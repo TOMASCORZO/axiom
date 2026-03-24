@@ -3,6 +3,9 @@ import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { runAgentLoop, MODE_CREDIT_MULTIPLIER, type GameMode, type AgentProvider } from '@/lib/agent/orchestrator';
 import { v4 as uuid } from 'uuid';
 
+// Vercel Serverless Function config — agent loop needs extended timeout
+export const maxDuration = 60;
+
 // POST /api/agent/chat — Full AI agent with ReAct tool execution loop
 export async function POST(request: NextRequest) {
     try {

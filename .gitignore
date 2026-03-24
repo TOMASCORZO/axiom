@@ -40,15 +40,15 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-# Axiom Engine WASM build output (compiled via scripts/build-engine.sh)
-public/engine/axiom.js
-public/engine/axiom.wasm
-public/engine/*.worklet.js
-public/engine/*.worker.js
-public/engine/*.pck
+# Axiom Engine WASM build output (keep committed for Vercel deploy)
+# public/engine/axiom.js
+# public/engine/axiom.wasm
+# public/engine/*.worklet.js
+# public/engine/*.worker.js
+# public/engine/*.pck
 
 # Emscripten SDK (auto-installed by build script)
 .emsdk/
 
 emsdk/
-engine/
+/engine/

@@ -7,6 +7,9 @@ import {
     executeGenerateAnimation,
 } from '@/lib/agent/tools';
 
+// Vercel Serverless Function config — 3D model generation can take up to 60s
+export const maxDuration = 60;
+
 // POST /api/assets/generate — Generate an asset via AI (standalone, outside agent loop)
 export async function POST(request: NextRequest) {
     try {
