@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Axiom Engine Runtime</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a0f; }
+        canvas { display: block; width: 100%; height: 100%; }
+        #status {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: #a78bfa; font-family: 'Inter', system-ui, sans-serif; font-size: 14px;
+            text-align: center;
+        }
+        #progress-bar {
+            width: 200px; height: 4px; background: #27272a; border-radius: 2px;
+            margin: 12px auto 0; overflow: hidden;
+        }
+        #progress-fill {
+            height: 100%; width: 0%;
+            background: linear-gradient(90deg, #8b5cf6, #d946ef);
+            border-radius: 2px; transition: width 0.3s ease;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas" tabindex="0"></canvas>
+    <div id="status">
+        <div id="status-text">Loading Axiom Engine...</div>
+        <div id="progress-bar"><div id="progress-fill"></div></div>
+    </div>
+
+    <script>
+        // ═══════════════════════════════════════════════════════════════════
+        // Axiom Engine Shell — Runs inside an iframe, communicates with
+        // the parent React app via postMessage
+        // ═══════════════════════════════════════════════════════════════════
+
+        const canvas = document.getElementById('canvas');
+        const statusEl = document.getElementById('status');
+        const statusText = document.getElementById('status-text');
+        const progressFill = document.getElementById('progress-fill');
+
+        // Track FPS
+        let lastTime = performance.now();
+        let frameCount = 0;
+        let currentFps = 0;
+
+        function updateFps() {
+            frameCount++;
+            const now = performance.now();
+            if (now - lastTime >= 1000) {
+                currentFps = frameCount;
+                frameCount = 0;
+                lastTime = now;
+                sendToParent({ type: 'fps', value: currentFps });
+            }
+            requestAnimationFrame(updateFps);
+        }
+
+        // ── PostMessage Bridge ──────────────────────────────────────────
+
+        function sendToParent(msg) {
+            if (window.parent && window.parent !== window) {
+                window.parent.postMessage({ source: 'axiom-engine', ...msg }, '*');
+            }
+        }
+
+        // Listen for commands from parent
+        window.addEventListener('message', function(event) {
+            const data = event.data;
+            if (!data || data.source !== 'axiom-app') return;
+
+            switch (data.type) {
+                case 'start':
+                    startEngine(data.files || []);
+                    break;
+                case 'stop':
+                    stopEngine();
+                    break;
+                case 'sync-files':
+                    syncFiles(data.files || []);
+                    break;
+                case 'reload-scene':
+                    reloadScene();
+                    break;
+                case 'screenshot':
+                    takeScreenshot();
+                    break;
+            }
+        });
+
+        // ── Engine Lifecycle ────────────────────────────────────────────
+
+        let engine = null;
+        let engineStarted = false;
+
+        async function startEngine(projectFiles) {
+            if (engineStarted) return;
+
+            try {
+                statusText.textContent = 'Loading WASM module...';
+                progressFill.style.width = '20%';
+
+                // Check if axiom.js exists
+                const scriptResponse = await fetch('/engine/axiom.js');
+                if (!scriptResponse.ok) {
+                    sendToParent({ type: 'error', message: 'axiom.js not found. Run scripts/build-engine.sh first.' });
+                    statusText.textContent = 'Engine not compiled';
+                    progressFill.style.width = '0%';
+                    return;
+                }
+
+                // Load the engine script dynamically
+                if (!window.Engine) {
+                    const script = document.createElement('script');
+                    script.src = '/engine/axiom.js';
+                    await new Promise((resolve, reject) => {
+                        script.onload = resolve;
+                        script.onerror = reject;
+                        document.head.appendChild(script);
+                    });
+                }
+
+                progressFill.style.width = '40%';
+                statusText.textContent = 'Initializing engine...';
+
+                // Create engine instance
+                engine = new Engine({
+                    canvas: canvas,
+                    executable: '/engine/axiom',
+                    canvasResizePolicy: 2, // Adapt to parent
+                    onProgress: function(current, total) {
+                        const pct = total > 0 ? Math.round((current / total) * 100) : 0;
+                        progressFill.style.width = `${40 + pct * 0.5}%`;
+                        sendToParent({ type: 'progress', value: 40 + pct * 0.5 });
+                    },
+                    onExit: function(code) {
+                        engineStarted = false;
+                        sendToParent({ type: 'stopped', exitCode: code });
+                    },
+                    onPrint: function(text) {
+                        sendToParent({ type: 'console', level: 'log', message: text });
+                    },
+                    onPrintError: function(text) {
+                        sendToParent({ type: 'console', level: 'error', message: text });
+                    },
+                });
+
+                // Preload project files into the virtual filesystem
+                for (const file of projectFiles) {
+                    if (file.content) {
+                        const encoder = new TextEncoder();
+                        const buffer = encoder.encode(file.content);
+                        await engine.preloadFile(buffer.buffer, `/project/${file.path}`);
+                    }
+                }
+
+                progressFill.style.width = '90%';
+                statusText.textContent = 'Starting game...';
+
+                // Start the engine
+                await engine.start({
+                    args: ['--path', '/project', '--main-pack', ''],
+                });
+
+                engineStarted = true;
+                statusEl.style.display = 'none';
+                progressFill.style.width = '100%';
+
+                sendToParent({ type: 'started' });
+                sendToParent({ type: 'console', level: 'log', message: '[Axiom] Engine started successfully' });
+
+                // Start FPS tracking
+                requestAnimationFrame(updateFps);
+
+            } catch (err) {
+                const message = err instanceof Error ? err.message : String(err);
+                sendToParent({ type: 'error', message: `Engine failed to start: ${message}` });
+                statusText.textContent = 'Failed to start engine';
+                progressFill.style.width = '0%';
+            }
+        }
+
+        function stopEngine() {
+            if (engine && engineStarted) {
+                engine.requestQuit();
+                engineStarted = false;
+                statusEl.style.display = '';
+                statusText.textContent = 'Engine stopped';
+                sendToParent({ type: 'stopped' });
+            }
+        }
+
+        function syncFiles(files) {
+            if (!engine || !engineStarted) return;
+
+            for (const file of files) {
+                if (file.content) {
+                    const encoder = new TextEncoder();
+                    const buffer = encoder.encode(file.content);
+                    engine.copyToFS(`/project/${file.path}`, buffer.buffer);
+                }
+            }
+            sendToParent({ type: 'files-synced' });
+        }
+
+        function reloadScene() {
+            if (!engine || !engineStarted) return;
+            // The engine exposes a method to reload the current scene
+            // This is done via the command line interface
+            sendToParent({ type: 'console', level: 'log', message: '[Axiom] Scene reload requested' });
+        }
+
+        function takeScreenshot() {
+            if (!canvas) return;
+            try {
+                const dataUrl = canvas.toDataURL('image/png');
+                sendToParent({ type: 'screenshot', dataUrl: dataUrl });
+            } catch (err) {
+                sendToParent({ type: 'error', message: 'Failed to take screenshot' });
+            }
+        }
+
+        // ── Forward Input Events ────────────────────────────────────────
+
+        // Forward keyboard events to the canvas
+        canvas.addEventListener('keydown', function(e) { e.preventDefault(); });
+        canvas.addEventListener('keyup', function(e) { e.preventDefault(); });
+
+        // Auto-focus canvas
+        canvas.focus();
+
+        // Resize canvas to fill viewport
+        function resizeCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        // Notify parent that shell is ready
+        sendToParent({ type: 'ready' });
+    </script>
+</body>
+</html>
