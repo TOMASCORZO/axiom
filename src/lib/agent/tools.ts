@@ -437,6 +437,293 @@ export async function executeExportBuild(
     };
 }
 
+// ── Free Asset Search (open-source libraries) ──────────────────────
+
+interface FreeAssetResult {
+    title: string;
+    url: string;
+    download_url: string | null;
+    preview_url: string | null;
+    license: string;
+    source: string;
+    author: string;
+}
+
+/**
+ * Search OpenGameArt.org API for free game assets.
+ */
+async function searchOpenGameArt(query: string, assetType: string): Promise<FreeAssetResult[]> {
+    const typeMap: Record<string, string> = {
+        sprite: '2d', texture: '2d', tileset: '2d', sprite_sheet: '2d',
+        background: '2d', icon: '2d', model_3d: '3d', sound: 'sounds',
+    };
+    const artType = typeMap[assetType] || '2d';
+
+    try {
+        const params = new URLSearchParams({ keys: query, type: artType });
+        const res = await fetch(`https://opengameart.org/art-search-advanced?${params}`, {
+            headers: { 'Accept': 'application/json' },
+            signal: AbortSignal.timeout(8000),
+        });
+
+        if (!res.ok) return [];
+
+        const html = await res.text();
+
+        // Parse results from the HTML response (OGA doesn't have a clean JSON API)
+        const results: FreeAssetResult[] = [];
+        const titleRegex = /<a href="\/content\/([\w-]+)"[^>]*>([^<]+)<\/a>/g;
+        let match;
+        let count = 0;
+        while ((match = titleRegex.exec(html)) !== null && count < 5) {
+            const slug = match[1];
+            const title = match[2].trim();
+            results.push({
+                title,
+                url: `https://opengameart.org/content/${slug}`,
+                download_url: null, // Would need a second request to get direct download
+                preview_url: null,
+                license: 'CC0/CC-BY/CC-BY-SA (varies)',
+                source: 'OpenGameArt',
+                author: 'Community',
+            });
+            count++;
+        }
+
+        return results;
+    } catch {
+        return [];
+    }
+}
+
+/**
+ * Search Kenney.nl — all assets are CC0 (public domain).
+ * Uses their asset list page since there's no formal API.
+ */
+async function searchKenney(query: string, assetType: string): Promise<FreeAssetResult[]> {
+    const keywords = query.toLowerCase().split(/\s+/);
+
+    // Kenney's curated catalog — these are all CC0 public domain packs
+    const kenneyPacks: Array<{ name: string; slug: string; tags: string[]; type: string }> = [
+        // 2D Character / Sprite packs
+        { name: 'Platformer Characters', slug: 'simplified-platformer-pack', tags: ['platformer', 'character', 'player', 'sprite', 'jump', 'run'], type: 'sprite' },
+        { name: 'Toon Characters 1', slug: 'toon-characters-1', tags: ['character', 'toon', 'cartoon', 'people', 'sprite'], type: 'sprite' },
+        { name: 'Animal Pack Redux', slug: 'animal-pack-redux', tags: ['animal', 'animals', 'dog', 'cat', 'bird', 'sprite'], type: 'sprite' },
+        { name: 'Alien UFO Pack', slug: 'alien-ufo-pack', tags: ['alien', 'ufo', 'space', 'enemy', 'sprite', 'sci-fi'], type: 'sprite' },
+        { name: 'Space Shooter Redux', slug: 'space-shooter-redux', tags: ['space', 'ship', 'spaceship', 'shooter', 'bullet', 'laser', 'enemy'], type: 'sprite' },
+        { name: 'Pixel Platformer', slug: 'pixel-platformer', tags: ['pixel', 'platformer', 'retro', 'character', 'tiles', 'sprite'], type: 'sprite' },
+        { name: 'Pixel Shmup', slug: 'pixel-shmup', tags: ['pixel', 'shoot', 'shmup', 'ship', 'retro', 'bullet'], type: 'sprite' },
+        { name: 'Fish Pack', slug: 'fish-pack', tags: ['fish', 'ocean', 'sea', 'underwater', 'sprite'], type: 'sprite' },
+        { name: 'Monster Pack', slug: 'monster-pack', tags: ['monster', 'enemy', 'creature', 'rpg', 'sprite'], type: 'sprite' },
+        // Tilesets
+        { name: 'Platformer Art Pixel Redux', slug: 'platformer-art-pixel-redux', tags: ['platformer', 'tiles', 'tileset', 'pixel', 'ground', 'block'], type: 'tileset' },
+        { name: 'Abstract Platformer', slug: 'abstract-platformer', tags: ['platformer', 'tiles', 'tileset', 'abstract', 'colorful'], type: 'tileset' },
+        { name: 'Roguelike RPG Pack', slug: 'roguelike-rpg-pack', tags: ['roguelike', 'rpg', 'dungeon', 'tileset', 'tiles', 'fantasy', 'sword', 'item'], type: 'tileset' },
+        { name: 'Tiny Town', slug: 'tiny-town', tags: ['town', 'city', 'building', 'house', 'tiles', 'tileset', 'top-down'], type: 'tileset' },
+        { name: 'Tiny Dungeon', slug: 'tiny-dungeon', tags: ['dungeon', 'cave', 'tiles', 'tileset', 'dark', 'rpg', 'fantasy'], type: 'tileset' },
+        { name: 'Road Textures', slug: 'road-textures', tags: ['road', 'street', 'asphalt', 'tileset', 'tiles', 'racing'], type: 'tileset' },
+        // Textures
+        { name: 'Prototype Textures', slug: 'prototype-textures', tags: ['prototype', 'texture', 'grid', 'test', 'dev', 'material'], type: 'texture' },
+        { name: 'Pixel Art Medieval Fantasy', slug: 'pixel-art-medieval-fantasy-pack', tags: ['medieval', 'fantasy', 'pixel', 'castle', 'texture', 'tiles'], type: 'texture' },
+        // Backgrounds
+        { name: 'Background Elements Redux', slug: 'background-elements-redux', tags: ['background', 'sky', 'clouds', 'parallax', 'nature'], type: 'background' },
+        { name: 'Pixel Platformer Farm', slug: 'pixel-platformer-farm-expansion', tags: ['farm', 'background', 'nature', 'pixel', 'platformer'], type: 'background' },
+        // UI
+        { name: 'UI Pack', slug: 'ui-pack', tags: ['ui', 'button', 'menu', 'hud', 'icon', 'interface', 'gui'], type: 'icon' },
+        { name: 'UI Pack RPG Expansion', slug: 'ui-pack-rpg-expansion', tags: ['ui', 'rpg', 'inventory', 'icon', 'interface', 'health', 'bar'], type: 'icon' },
+        { name: 'Game Icons', slug: 'game-icons', tags: ['icon', 'item', 'weapon', 'potion', 'sword', 'shield', 'game'], type: 'icon' },
+        { name: 'Input Prompts Pixel', slug: 'input-prompts-pixel-16', tags: ['input', 'keyboard', 'controller', 'button', 'icon', 'pixel', 'prompt'], type: 'icon' },
+        // 3D Models
+        { name: 'Nature Kit', slug: 'nature-kit', tags: ['nature', 'tree', 'rock', 'grass', '3d', 'model', 'low-poly'], type: 'model_3d' },
+        { name: 'Furniture Kit', slug: 'furniture-kit', tags: ['furniture', 'chair', 'table', 'house', '3d', 'model', 'interior'], type: 'model_3d' },
+        { name: 'Car Kit', slug: 'car-kit', tags: ['car', 'vehicle', 'racing', '3d', 'model'], type: 'model_3d' },
+        { name: 'Pirate Kit', slug: 'pirate-kit', tags: ['pirate', 'ship', 'ocean', '3d', 'model', 'adventure'], type: 'model_3d' },
+        { name: 'Castle Kit', slug: 'castle-kit', tags: ['castle', 'medieval', 'tower', 'wall', '3d', 'model', 'fantasy'], type: 'model_3d' },
+        { name: 'Tower Defense Kit', slug: 'tower-defense-kit', tags: ['tower', 'defense', 'strategy', '3d', 'model', 'enemy'], type: 'model_3d' },
+        { name: 'Minigolf Kit', slug: 'minigolf-kit', tags: ['golf', 'sport', '3d', 'model'], type: 'model_3d' },
+        // Sounds
+        { name: 'Interface Sounds', slug: 'interface-sounds', tags: ['ui', 'click', 'menu', 'sound', 'interface', 'beep'], type: 'sound' },
+        { name: 'Impact Sounds', slug: 'impact-sounds', tags: ['impact', 'hit', 'punch', 'explosion', 'sound', 'sfx'], type: 'sound' },
+        { name: 'RPG Audio', slug: 'rpg-audio', tags: ['rpg', 'music', 'fantasy', 'sound', 'ambient'], type: 'sound' },
+    ];
+
+    // Score-based matching
+    const scored = kenneyPacks.map(pack => {
+        let score = 0;
+        for (const kw of keywords) {
+            if (pack.tags.some(t => t.includes(kw) || kw.includes(t))) score += 2;
+            if (pack.name.toLowerCase().includes(kw)) score += 3;
+        }
+        // Boost if asset type matches
+        if (pack.type === assetType) score += 2;
+        return { pack, score };
+    }).filter(s => s.score > 0).sort((a, b) => b.score - a.score).slice(0, 5);
+
+    return scored.map(({ pack }) => ({
+        title: pack.name,
+        url: `https://kenney.nl/assets/${pack.slug}`,
+        download_url: `https://kenney.nl/media/pages/assets/${pack.slug}/*/content.zip`,
+        preview_url: `https://kenney.nl/media/pages/assets/${pack.slug}/*/preview.png`,
+        license: 'CC0 (Public Domain)',
+        source: 'Kenney',
+        author: 'Kenney.nl',
+    }));
+}
+
+/**
+ * Search itch.io for free game assets using their API.
+ */
+async function searchItchIo(query: string, assetType: string): Promise<FreeAssetResult[]> {
+    const tagMap: Record<string, string> = {
+        sprite: 'sprites', texture: 'textures', tileset: 'tileset',
+        sprite_sheet: 'sprite-sheet', background: 'backgrounds', icon: 'icons',
+        model_3d: '3d', sound: 'sound-effects',
+    };
+    const tag = tagMap[assetType] || 'game-assets';
+
+    try {
+        const params = new URLSearchParams({
+            type: 'game-assets',
+            q: query,
+            'price-range': 'Free',
+        });
+
+        const res = await fetch(`https://itch.io/search?${params}`, {
+            headers: {
+                'Accept': 'text/html',
+                'User-Agent': 'Axiom-Engine/1.0 (game-asset-search)',
+            },
+            signal: AbortSignal.timeout(8000),
+        });
+
+        if (!res.ok) return [];
+
+        const html = await res.text();
+
+        // Parse basic results from the itch.io search HTML
+        const results: FreeAssetResult[] = [];
+        const gameRegex = /<a href="(https:\/\/[^"]+\.itch\.io\/[^"]+)"[^>]*class="title[^"]*"[^>]*>([^<]+)<\/a>/g;
+        let match;
+        let count = 0;
+        while ((match = gameRegex.exec(html)) !== null && count < 5) {
+            results.push({
+                title: match[2].trim(),
+                url: match[1],
+                download_url: null,
+                preview_url: null,
+                license: 'Varies (check page)',
+                source: 'itch.io',
+                author: match[1].split('.itch.io')[0].replace('https://', ''),
+            });
+            count++;
+        }
+
+        return results;
+    } catch {
+        return [];
+    }
+}
+
+/**
+ * Execute the search_free_asset tool — searches multiple open-source libraries in parallel.
+ */
+export async function executeSearchFreeAsset(
+    ctx: ToolContext,
+    input: ToolInput,
+): Promise<ToolResult> {
+    const start = Date.now();
+    const query = input.query as string;
+    const assetType = input.asset_type as string;
+    const targetPath = input.target_path as string;
+    const maxResults = (input.max_results as number) || 5;
+
+    // Search all sources in parallel
+    const [kenneyResults, ogaResults, itchResults] = await Promise.all([
+        searchKenney(query, assetType),
+        searchOpenGameArt(query, assetType),
+        searchItchIo(query, assetType),
+    ]);
+
+    // Merge and rank: Kenney first (CC0 guaranteed), then OGA, then itch.io
+    const allResults = [
+        ...kenneyResults.map(r => ({ ...r, priority: 0 })),
+        ...ogaResults.map(r => ({ ...r, priority: 1 })),
+        ...itchResults.map(r => ({ ...r, priority: 2 })),
+    ].sort((a, b) => a.priority - b.priority).slice(0, maxResults);
+
+    if (allResults.length === 0) {
+        return {
+            callId: '',
+            success: true,
+            output: {
+                message: `No free assets found for "${query}". Consider using generate_sprite or generate_texture for custom AI-generated assets.`,
+                results: [],
+                query,
+                asset_type: assetType,
+            },
+            filesModified: [],
+            duration_ms: Date.now() - start,
+        };
+    }
+
+    // Try to download the best match (Kenney assets have direct download URLs)
+    let downloaded = false;
+    const bestResult = allResults[0];
+
+    if (bestResult.download_url || bestResult.preview_url) {
+        const downloadUrl = bestResult.preview_url || bestResult.download_url;
+        try {
+            const imgRes = await fetch(downloadUrl!, { signal: AbortSignal.timeout(10000) });
+            if (imgRes.ok) {
+                const buffer = await imgRes.arrayBuffer();
+                if (buffer.byteLength > 0 && buffer.byteLength < 10 * 1024 * 1024) {
+                    const contentType = imgRes.headers.get('content-type') || 'image/png';
+                    await uploadBinaryAsset(ctx, targetPath, buffer, contentType);
+
+                    await ctx.supabase.from('assets').insert({
+                        project_id: ctx.projectId,
+                        name: targetPath.split('/').pop() || 'asset',
+                        asset_type: assetType,
+                        storage_key: `projects/${ctx.userId}/${ctx.projectId}/${targetPath}`,
+                        file_format: targetPath.split('.').pop() || 'png',
+                        generation_prompt: query,
+                        generation_model: `free:${bestResult.source}`,
+                        size_bytes: buffer.byteLength,
+                        metadata: { source: bestResult.source, license: bestResult.license, author: bestResult.author, url: bestResult.url },
+                    });
+
+                    downloaded = true;
+                }
+            }
+        } catch {
+            // Download failed — that's fine, we still return the search results
+        }
+    }
+
+    return {
+        callId: '',
+        success: true,
+        output: {
+            message: downloaded
+                ? `✅ Free asset "${bestResult.title}" from ${bestResult.source} downloaded to ${targetPath} (${bestResult.license})`
+                : `Found ${allResults.length} free assets for "${query}". Browse the links below to download manually, or use generate_sprite for AI-generated custom art.`,
+            downloaded,
+            downloaded_from: downloaded ? bestResult.source : null,
+            license: downloaded ? bestResult.license : null,
+            target_path: downloaded ? targetPath : null,
+            results: allResults.map(r => ({
+                title: r.title,
+                url: r.url,
+                source: r.source,
+                license: r.license,
+                author: r.author,
+            })),
+        },
+        filesModified: downloaded ? [targetPath] : [],
+        duration_ms: Date.now() - start,
+    };
+}
+
 // ── Asset Generation (calls external APIs) ─────────────────────────
 
 export async function executeGenerateSprite(
@@ -863,6 +1150,7 @@ export async function dispatchTool(
         update_ui_layout: executeUpdateUILayout,
         debug_runtime_error: executeDebugRuntimeError,
         export_build: executeExportBuild,
+        search_free_asset: executeSearchFreeAsset,
         generate_sprite: executeGenerateSprite,
         generate_texture: executeGenerateTexture,
         generate_3d_model: executeGenerate3DModel,

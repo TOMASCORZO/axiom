@@ -120,6 +120,13 @@ export const CreateSceneSchema = z.object({
     target_path: z.string().describe('Path in project, e.g. scenes/main.scene'),
 });
 
+export const SearchFreeAssetSchema = z.object({
+    query: z.string().describe('Search query describing the asset needed (e.g. "platformer character sprite", "grass tileset")'),
+    asset_type: z.enum(['sprite', 'texture', 'tileset', 'sprite_sheet', 'background', 'icon', 'sound', 'model_3d']).describe('Type of asset to search for'),
+    target_path: z.string().describe('Path in project to save the asset, e.g. assets/sprites/hero.png'),
+    max_results: z.number().int().default(5).describe('Maximum number of results to return for the agent to choose from'),
+});
+
 export const GenerateSpriteSchema = z.object({
     prompt: z.string().describe('Visual description of the sprite'),
     style: z.enum(['pixel_art', 'hand_drawn', 'vector', 'realistic', 'stylized']).default('stylized'),
@@ -217,9 +224,17 @@ export const TOOL_DEFINITIONS: Record<string, ToolDefinition> = {
         costCredits: 0,
         requiresConfirmation: false,
     },
+    search_free_asset: {
+        name: 'search_free_asset',
+        description: 'Search open-source asset libraries (OpenGameArt, Kenney, itch.io) for free game assets. Costs 0 credits. PREFER this over generate_sprite/generate_texture when the user has a free plan or when generic/common assets are needed (platformer tiles, UI icons, basic characters, backgrounds). Only use AI generation when the user needs something very specific or custom.',
+        parameters: SearchFreeAssetSchema,
+        sideEffects: ['storage_upload', 'fs_write'],
+        costCredits: 0,
+        requiresConfirmation: false,
+    },
     generate_sprite: {
         name: 'generate_sprite',
-        description: 'AI-generate a 2D sprite image and add it to the project',
+        description: 'AI-generate a CUSTOM 2D sprite image and add it to the project. Costs 5 credits. Only use when search_free_asset cannot find what is needed or the user explicitly requests AI-generated art.',
         parameters: GenerateSpriteSchema,
         sideEffects: ['storage_upload', 'fs_write'],
         costCredits: 5,

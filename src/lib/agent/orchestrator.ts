@@ -98,6 +98,16 @@ function zodToJsonSchema(toolName: string): Record<string, unknown> {
             },
             required: ['scene_name', 'target_path'],
         },
+        search_free_asset: {
+            type: 'object',
+            properties: {
+                query: { type: 'string', description: 'Search query describing the asset needed (e.g. "platformer character sprite", "grass tileset")' },
+                asset_type: { type: 'string', enum: ['sprite', 'texture', 'tileset', 'sprite_sheet', 'background', 'icon', 'sound', 'model_3d'], description: 'Type of asset to search for' },
+                target_path: { type: 'string', description: 'Path in project to save the asset, e.g. assets/sprites/hero.png' },
+                max_results: { type: 'integer', default: 5, description: 'Maximum number of results to return' },
+            },
+            required: ['query', 'asset_type', 'target_path'],
+        },
         generate_sprite: {
             type: 'object',
             properties: {
@@ -270,13 +280,13 @@ export type GameMode = '2d' | '3d';
 // Tools available per mode
 const TOOLS_2D = [
     'create_scene', 'write_game_logic', 'modify_scene', 'modify_physics',
-    'generate_sprite', 'generate_texture', 'generate_animation',
+    'search_free_asset', 'generate_sprite', 'generate_texture', 'generate_animation',
     'update_ui_layout', 'debug_runtime_error', 'export_build', 'create_project_config',
 ];
 
 const TOOLS_3D = [
     'create_scene', 'write_game_logic', 'modify_scene', 'modify_physics',
-    'generate_sprite', 'generate_texture', 'generate_3d_model', 'generate_animation',
+    'search_free_asset', 'generate_sprite', 'generate_texture', 'generate_3d_model', 'generate_animation',
     'update_ui_layout', 'debug_runtime_error', 'export_build', 'create_project_config',
 ];
 
@@ -294,8 +304,9 @@ function buildSystemPrompt(fileList: string, conversationHistory: string, gameMo
 - **write_game_logic**: Write AxiomScript (.axs) files — the scripting language is identical to GDScript
 - **modify_scene**: Add/remove/modify nodes in existing scenes (add sprites, collisions, etc.)
 - **modify_physics**: Configure physics bodies and collision shapes
-- **generate_sprite**: AI-generate 2D sprite images (characters, items, backgrounds)
-- **generate_texture**: AI-generate textures (terrain, materials, patterns)
+- **search_free_asset**: 🆓 Search open-source libraries (OpenGameArt, Kenney, itch.io) for FREE assets — **0 credits**
+- **generate_sprite**: AI-generate CUSTOM 2D sprite images — **5 credits**
+- **generate_texture**: AI-generate CUSTOM textures — **5 credits**
 - **generate_animation**: Create animation resources
 - **update_ui_layout**: Modify UI scenes (menus, HUD, dialogs)
 - **debug_runtime_error**: Analyze and fix runtime errors
@@ -306,9 +317,10 @@ function buildSystemPrompt(fileList: string, conversationHistory: string, gameMo
 - **write_game_logic**: Write AxiomScript (.axs) files — the scripting language is identical to GDScript
 - **modify_scene**: Add/remove/modify nodes in existing scenes
 - **modify_physics**: Configure physics bodies and collision shapes
-- **generate_sprite**: AI-generate 2D sprite/texture images
-- **generate_texture**: AI-generate textures (PBR materials, terrain)
-- **generate_3d_model**: AI-generate 3D models (GLB format) using Meshy AI
+- **search_free_asset**: 🆓 Search open-source libraries (OpenGameArt, Kenney, itch.io) for FREE assets — **0 credits**
+- **generate_sprite**: AI-generate CUSTOM 2D sprite/texture images — **5 credits**
+- **generate_texture**: AI-generate CUSTOM textures (PBR materials, terrain) — **5 credits**
+- **generate_3d_model**: AI-generate 3D models (GLB format) using Meshy AI — **10 credits**
 - **generate_animation**: Create animation resources
 - **update_ui_layout**: Modify UI scenes (menus, HUD, dialogs)
 - **debug_runtime_error**: Analyze and fix runtime errors
@@ -399,6 +411,16 @@ ${fileList || '(empty project — start fresh!)'}
 
 ## Recent Conversation
 ${conversationHistory || '(new conversation)'}
+
+## Asset Strategy — IMPORTANT
+When the user needs game assets (sprites, textures, tilesets, backgrounds, icons):
+1. **FIRST** try \`search_free_asset\` to find free open-source assets. This costs 0 credits.
+2. **ONLY** use \`generate_sprite\`/\`generate_texture\`/\`generate_3d_model\` if:
+   - search_free_asset returned no suitable results
+   - The user explicitly asks for AI-generated/custom art
+   - The asset is too specific or unique to find in free libraries
+3. When search_free_asset finds good results, download the best match and add it to the project.
+4. Always tell the user the source and license of free assets you use.
 
 ## Rules
 1. ALWAYS use tools to make changes. Never just describe changes without executing them.
