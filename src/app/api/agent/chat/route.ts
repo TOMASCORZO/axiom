@@ -3,7 +3,8 @@ import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { runAgentLoop, MODE_CREDIT_MULTIPLIER, type GameMode, type AgentProvider } from '@/lib/agent/orchestrator';
 import { v4 as uuid } from 'uuid';
 
-// Vercel Serverless Function config — agent loop needs extended timeout
+// Vercel Serverless Function config
+// Hobby plan: 10s max, Pro plan: 60s max
 export const maxDuration = 60;
 
 // POST /api/agent/chat — Full AI agent with ReAct tool execution loop
@@ -45,14 +46,14 @@ export async function POST(request: NextRequest) {
 
         const convId = conversation_id || uuid();
 
-        // Log the user message
-        await supabase.from('agent_logs').insert({
+        // Log the user message (fire-and-forget to reduce latency)
+        supabase.from('agent_logs').insert({
             project_id,
             user_id: user.id,
             conversation_id: convId,
             role: 'user',
             content: message,
-        });
+        }).then(() => {});
 
         // Run the full agent loop
         const toolCallsForClient: Array<{
@@ -106,19 +107,19 @@ export async function POST(request: NextRequest) {
             },
         });
 
-        // Log the assistant response
-        await supabase.from('agent_logs').insert({
-            project_id,
-            user_id: user.id,
-            conversation_id: convId,
-            role: 'assistant',
-            content: agentResult.response,
-            tokens_used: agentResult.totalTokens,
-        });
-
-        // Deduct credits (1 per iteration)
+        // Log the assistant response and deduct credits (fire-and-forget)
         const creditsToDeduct = Math.max(1, agentResult.iterations) * creditMultiplier;
-        await supabase.rpc('decrement_credits', { uid: user.id, amount: creditsToDeduct });
+        Promise.all([
+            supabase.from('agent_logs').insert({
+                project_id,
+                user_id: user.id,
+                conversation_id: convId,
+                role: 'assistant',
+                content: agentResult.response,
+                tokens_used: agentResult.totalTokens,
+            }),
+            supabase.rpc('decrement_credits', { uid: user.id, amount: creditsToDeduct }),
+        ]).catch(() => {});
 
         return NextResponse.json({
             conversation_id: convId,

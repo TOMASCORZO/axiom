@@ -494,33 +494,32 @@ export async function runAgentLoop(params: {
         };
     }
 
-    // Fetch project files for context
-    const { data: files } = await supabase
-        .from('project_files')
-        .select('path, content_type, size_bytes')
-        .eq('project_id', projectId)
-        .order('path');
+    // Fetch project files and conversation history in parallel to reduce latency
+    const [{ data: files }, { data: history }] = await Promise.all([
+        supabase
+            .from('project_files')
+            .select('path, content_type, size_bytes')
+            .eq('project_id', projectId)
+            .order('path'),
+        supabase
+            .from('agent_logs')
+            .select('role, content')
+            .eq('conversation_id', params.conversationId)
+            .order('created_at', { ascending: true })
+            .limit(10),
+    ]);
 
     const fileList = (files ?? []).map(f => `  ${f.path} (${f.content_type}, ${f.size_bytes ?? 0}B)`).join('\n');
-
-    // Fetch recent conversation history
-    const { data: history } = await supabase
-        .from('agent_logs')
-        .select('role, content')
-        .eq('conversation_id', params.conversationId)
-        .order('created_at', { ascending: true })
-        .limit(20);
-
     const conversationHistory = (history ?? [])
-        .map(h => `${h.role}: ${(h.content as string).slice(0, 500)}`)
+        .map(h => `${h.role}: ${(h.content as string).slice(0, 300)}`)
         .join('\n');
 
     // Build tools and system prompt — filtered by mode
     const allowedTools = gameMode === '3d' ? TOOLS_3D : TOOLS_2D;
     const systemPrompt = buildSystemPrompt(fileList, conversationHistory, gameMode);
 
-    // ReAct Loop — 3D gets more iterations since scenes are more complex
-    const MAX_ITERATIONS = gameMode === '3d' ? 15 : 10;
+    // ReAct Loop — keep iterations low to stay within serverless timeout
+    const MAX_ITERATIONS = gameMode === '3d' ? 5 : 3;
     const allToolCalls: AgentResult['toolCalls'] = [];
     let totalTokens = 0;
     let iterations = 0;

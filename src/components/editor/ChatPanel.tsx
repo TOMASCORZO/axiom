@@ -198,12 +198,18 @@ export default function ChatPanel({ projectId }: ChatPanelProps) {
                 }),
             });
 
-            const data = await res.json();
-
             if (!res.ok) {
-                setError(data.error || 'Failed to get response');
+                const text = await res.text();
+                try {
+                    const errData = JSON.parse(text);
+                    setError(errData.error || `Server error (${res.status})`);
+                } catch {
+                    setError(res.status === 504 ? 'Request timed out — try a simpler prompt' : `Server error (${res.status})`);
+                }
                 return;
             }
+
+            const data = await res.json();
 
             if (data.conversation_id) {
                 setConversationId(data.conversation_id);
