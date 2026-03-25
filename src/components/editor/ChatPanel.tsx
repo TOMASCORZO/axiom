@@ -149,7 +149,7 @@ interface ChatPanelProps {
 export default function ChatPanel({ projectId }: ChatPanelProps) {
     const [input, setInput] = useState('');
     const [gameMode, setGameMode] = useState<GameMode>('2d');
-    const [provider, setProvider] = useState<AgentProvider>('claude');
+    const [provider, setProvider] = useState<AgentProvider>('kimi');
     const [conversationId, setConversationId] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [showModeWarning, setShowModeWarning] = useState(false);

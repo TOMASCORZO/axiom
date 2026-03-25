@@ -460,24 +460,33 @@ export async function runAgentLoop(params: {
     onToolResult?: (toolName: string, result: ToolResult) => void;
 }): Promise<AgentResult> {
     const { message, projectId, userId, supabase, onToolStart, onToolResult, gameMode } = params;
-    const provider: AgentProvider = params.provider ?? 'claude';
+    let provider: AgentProvider = params.provider ?? 'claude';
 
-    // Resolve API key based on provider
+    // Resolve API key based on provider — auto-fallback to first available
     const apiKeyMap: Record<AgentProvider, string | undefined> = {
         claude: process.env.ANTHROPIC_API_KEY,
         gpt: process.env.OPENAI_API_KEY,
         kimi: process.env.MOONSHOT_API_KEY,
     };
-    const apiKey = apiKeyMap[provider];
-    const envVarName: Record<AgentProvider, string> = {
-        claude: 'ANTHROPIC_API_KEY',
-        gpt: 'OPENAI_API_KEY',
-        kimi: 'MOONSHOT_API_KEY',
-    };
+
+    let apiKey = apiKeyMap[provider];
+
+    // If requested provider has no key, try to fallback to one that does
+    if (!apiKey) {
+        const fallbackOrder: AgentProvider[] = ['kimi', 'claude', 'gpt'];
+        const fallback = fallbackOrder.find(p => !!apiKeyMap[p]);
+        if (fallback) {
+            provider = fallback;
+            apiKey = apiKeyMap[fallback];
+        }
+    }
 
     if (!apiKey) {
+        const allProviders = Object.entries(PROVIDER_INFO)
+            .map(([, info]) => info.label)
+            .join(', ');
         return {
-            response: `⚠️ ${PROVIDER_INFO[provider].label} is not configured. Add ${envVarName[provider]} to .env.local to enable this provider.`,
+            response: `⚠️ No AI provider is configured. Add at least one API key (ANTHROPIC_API_KEY, OPENAI_API_KEY, or MOONSHOT_API_KEY) to your environment variables. Available providers: ${allProviders}.`,
             toolCalls: [],
             totalTokens: 0,
             iterations: 0,

@@ -6,16 +6,6 @@ import { v4 as uuid } from 'uuid';
 // Vercel Serverless Function config — agent loop needs extended timeout
 export const maxDuration = 60;
 
-// GET /api/agent/chat — Debug: check env vars availability
-export async function GET() {
-    return NextResponse.json({
-        moonshot: !!process.env.MOONSHOT_API_KEY,
-        anthropic: !!process.env.ANTHROPIC_API_KEY,
-        openai: !!process.env.OPENAI_API_KEY,
-        moonshot_prefix: process.env.MOONSHOT_API_KEY?.slice(0, 6) ?? 'MISSING',
-    });
-}
-
 // POST /api/agent/chat — Full AI agent with ReAct tool execution loop
 export async function POST(request: NextRequest) {
     try {
