@@ -663,20 +663,28 @@ async function runOpenAICompatibleLoop(params: {
         const choice = response.choices[0];
         if (!choice) break;
 
-        // Kimi K2.5 may return content in reasoning_content instead of content
-        const messageContent = choice.message.content || choice.message.reasoning_content || null;
+        // Kimi K2.5 returns reasoning in reasoning_content (internal thinking)
+        // and the actual response in content. Only use reasoning_content as
+        // last resort if content is completely empty AND there are no tool calls.
+        const hasToolCalls = choice.message.tool_calls && choice.message.tool_calls.length > 0;
+        const messageContent = choice.message.content || (hasToolCalls ? '' : null);
 
-        // Add assistant message to conversation
+        // Add assistant message to conversation (always use content, not reasoning)
         messages.push({
             role: 'assistant',
-            content: messageContent,
+            content: messageContent ?? '',
             tool_calls: choice.message.tool_calls,
         });
 
         // If no tool calls, we're done
-        if (choice.finish_reason === 'stop' || choice.finish_reason === 'length' || !choice.message.tool_calls?.length) {
+        if (choice.finish_reason === 'stop' || choice.finish_reason === 'length' || !hasToolCalls) {
+            // If content is empty but we have reasoning, the model didn't produce
+            // a user-facing response — use reasoning as fallback
+            const finalResponse = choice.message.content
+                || choice.message.reasoning_content
+                || 'No response.';
             return {
-                response: messageContent ?? 'No response.',
+                response: finalResponse,
                 toolCalls: allToolCalls,
                 totalTokens,
                 iterations,
@@ -684,7 +692,7 @@ async function runOpenAICompatibleLoop(params: {
         }
 
         // Execute tool calls
-        for (const tc of choice.message.tool_calls) {
+        for (const tc of choice.message.tool_calls!) {
             const toolName = tc.function.name;
             let toolInput: Record<string, unknown> = {};
             try { toolInput = JSON.parse(tc.function.arguments); } catch { /* empty */ }
