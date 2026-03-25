@@ -1,2 +1,5 @@
-emsdk/
-engine/
+# Emscripten SDK (huge, not needed for deploy)
+/emsdk
+
+# C++ engine source (only the compiled WASM in public/engine/ is needed)
+/engine
