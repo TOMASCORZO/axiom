@@ -231,8 +231,9 @@ export default function ChatPanel({ projectId }: ChatPanelProps) {
             if (data.meta?.toolsExecuted > 0) {
                 await refreshProjectFiles(projectId);
             }
-        } catch {
-            setError('Network error. Please try again.');
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : 'Unknown error';
+            setError(`Network error: ${msg}`);
         } finally {
             setAgentBusy(false);
         }

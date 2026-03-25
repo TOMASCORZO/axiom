@@ -77,6 +77,7 @@ interface OpenAIResponse {
         message: {
             role: 'assistant';
             content: string | null;
+            reasoning_content?: string | null;
             tool_calls?: OpenAIToolCall[];
         };
         finish_reason: 'stop' | 'tool_calls' | 'length';
@@ -662,17 +663,20 @@ async function runOpenAICompatibleLoop(params: {
         const choice = response.choices[0];
         if (!choice) break;
 
+        // Kimi K2.5 may return content in reasoning_content instead of content
+        const messageContent = choice.message.content || choice.message.reasoning_content || null;
+
         // Add assistant message to conversation
         messages.push({
             role: 'assistant',
-            content: choice.message.content,
+            content: messageContent,
             tool_calls: choice.message.tool_calls,
         });
 
         // If no tool calls, we're done
         if (choice.finish_reason === 'stop' || choice.finish_reason === 'length' || !choice.message.tool_calls?.length) {
             return {
-                response: choice.message.content ?? 'No response.',
+                response: messageContent ?? 'No response.',
                 toolCalls: allToolCalls,
                 totalTokens,
                 iterations,
@@ -752,24 +756,43 @@ async function callOpenAICompatible(
     messages: OpenAIMessage[],
     tools: OpenAITool[],
 ): Promise<OpenAIResponse> {
+    // Kimi K2.5 supports tools but needs clean message format
+    const cleanMessages = messages.map(m => {
+        const msg: Record<string, unknown> = { role: m.role, content: m.content ?? '' };
+        if (m.tool_calls) msg.tool_calls = m.tool_calls;
+        if (m.tool_call_id) msg.tool_call_id = m.tool_call_id;
+        return msg;
+    });
+
+    const body: Record<string, unknown> = {
+        model,
+        max_tokens: 4096,
+        messages: cleanMessages,
+    };
+
+    // Only include tools if available
+    if (tools.length > 0) {
+        body.tools = tools;
+        body.tool_choice = 'auto';
+    }
+
     const res = await fetch(`${baseUrl}/chat/completions`, {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${apiKey}`,
         },
-        body: JSON.stringify({
-            model,
-            max_tokens: 4096,
-            messages,
-            tools: tools.length > 0 ? tools : undefined,
-            tool_choice: tools.length > 0 ? 'auto' : undefined,
-        }),
+        body: JSON.stringify(body),
     });
 
     if (!res.ok) {
-        const error = await res.json().catch(() => ({})) as { error?: { message?: string } };
-        throw new Error(`${model} API error: ${error?.error?.message || res.statusText}`);
+        const errorText = await res.text().catch(() => '');
+        let errorMsg = res.statusText;
+        try {
+            const errorJson = JSON.parse(errorText) as { error?: { message?: string } };
+            errorMsg = errorJson?.error?.message || errorMsg;
+        } catch { /* use statusText */ }
+        throw new Error(`${model} API error (${res.status}): ${errorMsg}`);
     }
 
     return res.json() as Promise<OpenAIResponse>;
