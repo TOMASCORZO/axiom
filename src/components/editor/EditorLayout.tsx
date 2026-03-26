@@ -3,6 +3,7 @@
 import Toolbar from './Toolbar';
 import FileTree from './FileTree';
 import AxiomViewport from './AxiomViewport';
+import CodeEditor from './CodeEditor';
 import ChatPanel from './ChatPanel';
 import ConsolePanel from './ConsolePanel';
 import { useEditorStore } from '@/lib/store';
@@ -12,7 +13,8 @@ interface EditorLayoutProps {
 }
 
 export default function EditorLayout({ projectId }: EditorLayoutProps) {
-    const { leftPanelWidth, rightPanelWidth, bottomPanelHeight } = useEditorStore();
+    const { leftPanelWidth, rightPanelWidth, bottomPanelHeight, openFiles } = useEditorStore();
+    const hasOpenFiles = openFiles.length > 0;
 
     return (
         <div className="h-screen w-screen flex flex-col bg-zinc-950 text-white overflow-hidden">
@@ -31,9 +33,25 @@ export default function EditorLayout({ projectId }: EditorLayoutProps) {
 
                 {/* Center + Bottom */}
                 <div className="flex-1 flex flex-col overflow-hidden">
-                    {/* Center — Engine Viewport */}
-                    <div className="flex-1 overflow-hidden">
-                        <AxiomViewport />
+                    {/* Center — split between Code Editor and Engine Viewport */}
+                    <div className="flex-1 flex flex-col overflow-hidden">
+                        {hasOpenFiles ? (
+                            <>
+                                {/* Code Editor — top half */}
+                                <div className="flex-1 overflow-hidden min-h-0" style={{ flex: '1 1 50%' }}>
+                                    <CodeEditor />
+                                </div>
+                                {/* Engine Viewport — bottom half */}
+                                <div className="flex-1 overflow-hidden min-h-0 border-t border-white/5" style={{ flex: '1 1 50%' }}>
+                                    <AxiomViewport />
+                                </div>
+                            </>
+                        ) : (
+                            /* No files open — viewport takes full center */
+                            <div className="flex-1 overflow-hidden">
+                                <AxiomViewport />
+                            </div>
+                        )}
                     </div>
 
                     {/* Bottom — Console Panel */}

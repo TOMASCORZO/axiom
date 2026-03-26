@@ -1,13 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServerSupabaseClient } from '@/lib/supabase/server';
+import { getAdminClient } from '@/lib/supabase/admin';
 import { runAgentLoop, MODE_CREDIT_MULTIPLIER, type GameMode, type AgentProvider } from '@/lib/agent/orchestrator';
 import { v4 as uuid } from 'uuid';
 
 // Vercel Serverless Function config
-// Hobby plan: 10s max, Pro plan: 60s max
-export const maxDuration = 60;
+// Streaming functions can run up to 5 min on Hobby, 15 min on Pro
+export const maxDuration = 300;
 
-// POST /api/agent/chat — Full AI agent with ReAct tool execution loop
+// POST /api/agent/chat — Streaming AI agent with ReAct tool execution loop
 export async function POST(request: NextRequest) {
     try {
         const supabase = await createServerSupabaseClient();
@@ -20,8 +21,7 @@ export async function POST(request: NextRequest) {
         const body = await request.json();
         const { project_id, message, conversation_id, game_mode, provider: rawProvider } = body;
         const gameMode: GameMode = game_mode === '3d' ? '3d' : '2d';
-        const provider: AgentProvider = ['claude', 'gpt', 'kimi'].includes(rawProvider) ? rawProvider : 'claude';
-        const creditMultiplier = MODE_CREDIT_MULTIPLIER[gameMode];
+        const provider: AgentProvider = ['claude', 'gpt', 'kimi', 'deepseek', 'gemini'].includes(rawProvider) ? rawProvider : 'claude';
 
         if (!project_id || !message) {
             return NextResponse.json(
@@ -30,8 +30,10 @@ export async function POST(request: NextRequest) {
             );
         }
 
+        const admin = getAdminClient();
+
         // Check AI credits
-        const { data: profile } = await supabase
+        const { data: profile } = await admin
             .from('profiles')
             .select('ai_credits_remaining')
             .eq('id', user.id)
@@ -46,8 +48,8 @@ export async function POST(request: NextRequest) {
 
         const convId = conversation_id || uuid();
 
-        // Log the user message (fire-and-forget to reduce latency)
-        supabase.from('agent_logs').insert({
+        // Log the user message (fire-and-forget)
+        admin.from('agent_logs').insert({
             project_id,
             user_id: user.id,
             conversation_id: convId,
@@ -55,87 +57,93 @@ export async function POST(request: NextRequest) {
             content: message,
         }).then(() => {});
 
-        // Run the full agent loop
-        const toolCallsForClient: Array<{
-            id: string;
-            name: string;
-            status: 'completed' | 'failed';
-            input: Record<string, unknown>;
-            output?: Record<string, unknown>;
-            error?: string;
-            filesModified?: string[];
-        }> = [];
+        // Create a readable stream for SSE
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream({
+            async start(controller) {
+                const sendEvent = (event: string, data: unknown) => {
+                    controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+                };
 
-        const agentResult = await runAgentLoop({
-            message,
-            projectId: project_id,
-            userId: user.id,
-            supabase,
-            conversationId: convId,
-            gameMode,
-            provider,
-            onToolStart: (toolName, input) => {
-                toolCallsForClient.push({
-                    id: uuid(),
-                    name: toolName,
-                    status: 'completed', // Will be updated
-                    input,
-                });
-            },
-            onToolResult: (toolName, result) => {
-                const last = toolCallsForClient[toolCallsForClient.length - 1];
-                if (last && last.name === toolName) {
-                    last.status = result.success ? 'completed' : 'failed';
-                    last.output = result.output;
-                    last.error = result.error;
-                    last.filesModified = result.filesModified;
+                try {
+                    // Send conversation ID immediately
+                    sendEvent('init', { conversation_id: convId, game_mode: gameMode });
+
+                    const agentResult = await runAgentLoop({
+                        message,
+                        projectId: project_id,
+                        userId: user.id,
+                        supabase,
+                        conversationId: convId,
+                        gameMode,
+                        provider,
+                        onToolStart: (toolName, input) => {
+                            sendEvent('tool_start', {
+                                id: uuid(),
+                                name: toolName,
+                                input,
+                            });
+                        },
+                        onToolResult: (toolName, result) => {
+                            sendEvent('tool_result', {
+                                name: toolName,
+                                status: result.success ? 'completed' : 'failed',
+                                output: result.output,
+                                error: result.error,
+                                filesModified: result.filesModified,
+                                fileContents: result.fileContents ?? [],
+                            });
+                        },
+                        onIteration: (iteration) => {
+                            sendEvent('iteration', { iteration });
+                        },
+                        onReasoning: (reasoning) => {
+                            sendEvent('reasoning', { text: reasoning });
+                        },
+                    });
+
+                    // Log assistant response and deduct credits (fire-and-forget)
+                    const creditMultiplier = MODE_CREDIT_MULTIPLIER[gameMode];
+                    const creditsToDeduct = Math.max(1, agentResult.iterations) * creditMultiplier;
+                    Promise.all([
+                        admin.from('agent_logs').insert({
+                            project_id,
+                            user_id: user.id,
+                            conversation_id: convId,
+                            role: 'assistant',
+                            content: agentResult.response,
+                            tokens_used: agentResult.totalTokens,
+                        }),
+                        admin.rpc('decrement_credits', { uid: user.id, amount: creditsToDeduct }),
+                    ]).catch(() => {});
+
+                    // Send final response
+                    sendEvent('done', {
+                        response: agentResult.response,
+                        meta: {
+                            iterations: agentResult.iterations,
+                            totalTokens: agentResult.totalTokens,
+                            creditsUsed: creditsToDeduct,
+                            toolsExecuted: agentResult.toolCalls.length,
+                        },
+                    });
+                } catch (err) {
+                    console.error('Agent stream error:', err);
+                    sendEvent('error', {
+                        error: err instanceof Error ? err.message : 'Internal server error',
+                    });
+                } finally {
+                    controller.close();
                 }
-
-                // Log tool calls
-                supabase.from('agent_logs').insert({
-                    project_id,
-                    user_id: user.id,
-                    conversation_id: convId,
-                    role: 'tool_call',
-                    content: `${toolName}: ${result.success ? 'OK' : 'FAIL'}`,
-                    tool_name: toolName,
-                    tool_input: last?.input ?? {},
-                    tool_output: result.output,
-                    tokens_used: 0,
-                    duration_ms: result.duration_ms,
-                }).then(() => { });
             },
         });
 
-        // Log the assistant response and deduct credits (fire-and-forget)
-        const creditsToDeduct = Math.max(1, agentResult.iterations) * creditMultiplier;
-        Promise.all([
-            supabase.from('agent_logs').insert({
-                project_id,
-                user_id: user.id,
-                conversation_id: convId,
-                role: 'assistant',
-                content: agentResult.response,
-                tokens_used: agentResult.totalTokens,
-            }),
-            supabase.rpc('decrement_credits', { uid: user.id, amount: creditsToDeduct }),
-        ]).catch(() => {});
-
-        return NextResponse.json({
-            conversation_id: convId,
-            response: {
-                id: uuid(),
-                role: 'assistant',
-                content: agentResult.response,
-                toolCalls: toolCallsForClient,
-                timestamp: new Date().toISOString(),
-            },
-            game_mode: gameMode,
-            meta: {
-                iterations: agentResult.iterations,
-                totalTokens: agentResult.totalTokens,
-                creditsUsed: creditsToDeduct,
-                toolsExecuted: toolCallsForClient.length,
+        return new Response(stream, {
+            headers: {
+                'Content-Type': 'text/event-stream',
+                'Cache-Control': 'no-cache',
+                'Connection': 'keep-alive',
+                'X-Accel-Buffering': 'no',
             },
         });
     } catch (err) {

@@ -20,11 +20,19 @@ export interface ToolCall {
     timestamp: string;
 }
 
+export interface ToolFileData {
+    path: string;
+    content: string;
+    size_bytes: number;
+    content_type: string;
+}
+
 export interface ToolResult {
     callId: string;
     success: boolean;
     output: Record<string, unknown>;
     filesModified: string[];
+    fileContents?: ToolFileData[];
     error?: string;
     duration_ms: number;
 }
@@ -55,6 +63,7 @@ export interface ChatMessage {
     role: 'user' | 'assistant';
     content: string;
     toolCalls?: ToolCallDisplay[];
+    reasoning?: string;
     timestamp: string;
     isStreaming?: boolean;
 }

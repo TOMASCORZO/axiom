@@ -42,7 +42,9 @@ interface EditorState {
     setEngineStatus: (status: EngineLoadProgress['stage'] | 'idle' | 'error') => void;
     setEngineProgress: (percent: number) => void;
     setIsPlaying: (playing: boolean) => void;
+    setMessages: (messages: ChatMessage[]) => void;
     addMessage: (message: ChatMessage) => void;
+    updateMessage: (id: string, update: Partial<ChatMessage>) => void;
     updateLastMessage: (content: string) => void;
     setAgentBusy: (busy: boolean) => void;
     addToolCall: (toolCall: ToolCallDisplay) => void;
@@ -53,6 +55,7 @@ interface EditorState {
     setBottomPanelHeight: (height: number) => void;
     setActiveBottomTab: (tab: 'console' | 'build' | 'errors') => void;
     refreshProjectFiles: (projectId: string) => Promise<void>;
+    addProjectFiles: (newFiles: Array<{ path: string; content: string; size_bytes: number; content_type: string }>) => void;
 }
 
 export const useEditorStore = create<EditorState>((set) => ({
@@ -104,8 +107,17 @@ export const useEditorStore = create<EditorState>((set) => ({
     setEngineProgress: (percent) => set({ engineProgress: percent }),
     setIsPlaying: (playing) => set({ isPlaying: playing }),
 
+    setMessages: (messages) => set({ messages }),
+
     addMessage: (message) =>
         set((state) => ({ messages: [...state.messages, message] })),
+
+    updateMessage: (id, update) =>
+        set((state) => ({
+            messages: state.messages.map((m) =>
+                m.id === id ? { ...m, ...update } : m,
+            ),
+        })),
 
     updateLastMessage: (content) =>
         set((state) => {
@@ -149,8 +161,12 @@ export const useEditorStore = create<EditorState>((set) => ({
     refreshProjectFiles: async (projectId: string) => {
         try {
             const res = await fetch(`/api/projects/${projectId}/files`);
-            if (!res.ok) return;
+            if (!res.ok) {
+                console.warn('[axiom] refreshProjectFiles failed:', res.status);
+                return;
+            }
             const data = await res.json();
+            console.log('[axiom] refreshProjectFiles:', data.files?.length ?? 0, 'files');
             const files = data.files ?? [];
             set({ files });
 
@@ -189,4 +205,60 @@ export const useEditorStore = create<EditorState>((set) => ({
             // Silent fail on refresh
         }
     },
+
+    addProjectFiles: (newFiles) => set((state) => {
+        // Merge new files into existing files list
+        const fileMap = new Map(state.files.map(f => [f.path, f]));
+        for (const nf of newFiles) {
+            const existing = fileMap.get(nf.path);
+            const merged: ProjectFile = {
+                id: existing?.id ?? crypto.randomUUID(),
+                project_id: existing?.project_id ?? '',
+                path: nf.path,
+                content_type: (nf.content_type === 'text' || nf.content_type === 'binary') ? nf.content_type : 'text',
+                text_content: nf.content,
+                storage_key: existing?.storage_key ?? null,
+                size_bytes: nf.size_bytes,
+                checksum: null,
+                created_at: existing?.created_at ?? new Date().toISOString(),
+                updated_at: new Date().toISOString(),
+            };
+            fileMap.set(nf.path, merged);
+        }
+
+        const files = Array.from(fileMap.values());
+
+        // Rebuild file tree
+        const root: FileNode[] = [];
+        for (const file of files) {
+            const parts = file.path.split('/');
+            let current = root;
+            for (let i = 0; i < parts.length; i++) {
+                const name = parts[i];
+                const pathSoFar = parts.slice(0, i + 1).join('/');
+                const isFile = i === parts.length - 1;
+                const existing = current.find((n: FileNode) => n.name === name);
+                if (existing) {
+                    if (existing.type === 'directory' && existing.children) {
+                        current = existing.children;
+                    }
+                } else if (isFile) {
+                    const ext = name.split('.').pop()?.toLowerCase();
+                    let fileType: FileNode['fileType'] = undefined;
+                    if (ext === 'scene') fileType = 'scene';
+                    else if (ext === 'axs') fileType = 'script';
+                    else if (['png', 'jpg', 'webp', 'svg', 'ogg', 'wav', 'glb'].includes(ext ?? '')) fileType = 'asset';
+                    else if (['axiom', 'cfg', 'ini'].includes(ext ?? '')) fileType = 'config';
+                    else if (ext === 'res') fileType = 'resource';
+                    current.push({ path: pathSoFar, name, type: 'file', fileType, size: file.size_bytes });
+                } else {
+                    const dir: FileNode = { path: pathSoFar, name, type: 'directory', size: 0, children: [] };
+                    current.push(dir);
+                    current = dir.children!;
+                }
+            }
+        }
+
+        return { files, fileTree: root };
+    }),
 }));

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServerSupabaseClient } from '@/lib/supabase/server';
+import { getAdminClient } from '@/lib/supabase/admin';
 
 // GET /api/projects — List user's projects
 export async function GET() {
@@ -11,7 +12,8 @@ export async function GET() {
             return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
         }
 
-        const { data: projects, error } = await supabase
+        const admin = getAdminClient();
+        const { data: projects, error } = await admin
             .from('projects')
             .select('*')
             .eq('owner_id', user.id)
@@ -44,8 +46,10 @@ export async function POST(request: NextRequest) {
             return NextResponse.json({ error: 'Name is required' }, { status: 400 });
         }
 
+        const admin = getAdminClient();
+
         // Create project
-        const { data: project, error } = await supabase
+        const { data: project, error } = await admin
             .from('projects')
             .insert({
                 owner_id: user.id,
@@ -85,7 +89,7 @@ export async function POST(request: NextRequest) {
             },
         ];
 
-        await supabase.from('project_files').insert(defaultFiles);
+        await admin.from('project_files').insert(defaultFiles);
 
         return NextResponse.json({ project }, { status: 201 });
     } catch (err) {

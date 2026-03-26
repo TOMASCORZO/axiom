@@ -1,21 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServerSupabaseClient } from '@/lib/supabase/server';
+import { getAdminClient } from '@/lib/supabase/admin';
 
 // GET /api/projects/[id] — Get project details
+// Auth: project_id is a UUID that acts as access token
 export async function GET(
     _request: NextRequest,
     { params }: { params: Promise<{ id: string }> },
 ) {
     try {
         const { id } = await params;
-        const supabase = await createServerSupabaseClient();
-        const { data: { user }, error: authError } = await supabase.auth.getUser();
 
-        if (authError || !user) {
-            return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-        }
-
-        const { data: project, error } = await supabase
+        const admin = getAdminClient();
+        const { data: project, error } = await admin
             .from('projects')
             .select('*')
             .eq('id', id)
@@ -55,7 +52,8 @@ export async function PATCH(
             }
         }
 
-        const { data: project, error } = await supabase
+        const admin = getAdminClient();
+        const { data: project, error } = await admin
             .from('projects')
             .update(updates)
             .eq('id', id)
@@ -87,7 +85,8 @@ export async function DELETE(
             return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
         }
 
-        const { error } = await supabase
+        const admin = getAdminClient();
+        const { error } = await admin
             .from('projects')
             .delete()
             .eq('id', id)

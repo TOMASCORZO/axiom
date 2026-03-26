@@ -1,11 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServerSupabaseClient } from '@/lib/supabase/server';
-import {
-    executeGenerateSprite,
-    executeGenerateTexture,
-    executeGenerate3DModel,
-    executeGenerateAnimation,
-} from '@/lib/agent/tools';
+import { executeTool } from '@/lib/agent/tools';
 
 // Vercel Serverless Function config — 3D model generation can take up to 60s
 export const maxDuration = 60;
@@ -53,59 +48,24 @@ export async function POST(request: NextRequest) {
             );
         }
 
-        const ctx = { supabase, projectId: project_id, userId: user.id };
+        const ctx = { supabase, projectId: project_id, userId: user.id, createdFiles: [] as import('@/types/agent').ToolFileData[] };
 
-        // Dispatch to the correct generator
-        let result;
-        switch (asset_type) {
-            case 'sprite':
-            case 'sprite_sheet':
-            case 'ui_element':
-                result = await executeGenerateSprite(ctx, {
-                    prompt,
-                    style: style || 'stylized',
-                    width: options.width || 128,
-                    height: options.height || 128,
-                    transparent_bg: options.transparent_bg ?? true,
-                    target_path,
-                });
-                break;
-
-            case 'texture':
-            case 'material':
-                result = await executeGenerateTexture(ctx, {
-                    prompt,
-                    style: style || 'stylized',
-                    width: options.width || 512,
-                    height: options.height || 512,
-                    tileable: options.tileable || false,
-                    target_path,
-                });
-                break;
-
-            case 'model_3d':
-                result = await executeGenerate3DModel(ctx, {
-                    prompt,
-                    topology: options.topology || 'standard',
-                    textured: options.textured ?? true,
-                    target_path,
-                });
-                break;
-
-            case 'animation':
-                result = await executeGenerateAnimation(ctx, {
-                    prompt,
-                    type: options.animation_type || 'sprite_frames',
-                    frame_count: options.frame_count || 4,
-                    fps: options.fps || 12,
-                    loop: options.loop ?? true,
-                    target_path,
-                });
-                break;
-
-            default:
-                return NextResponse.json({ error: `Unknown asset type: ${asset_type}` }, { status: 400 });
+        // Map asset_type to tool name and build input
+        const toolMap: Record<string, string> = {
+            sprite: 'generate_sprite', sprite_sheet: 'generate_sprite', ui_element: 'generate_sprite',
+            texture: 'generate_texture', material: 'generate_texture',
+            model_3d: 'generate_3d_model',
+            animation: 'generate_animation',
+        };
+        const toolName = toolMap[asset_type];
+        if (!toolName) {
+            return NextResponse.json({ error: `Unknown asset type: ${asset_type}` }, { status: 400 });
         }
+
+        const toolInput: Record<string, unknown> = { prompt, target_path, ...options };
+        if (style) toolInput.style = style;
+
+        const result = await executeTool(toolName, toolInput, ctx);
 
         // Deduct credits if generation was successful
         if (result.success) {
