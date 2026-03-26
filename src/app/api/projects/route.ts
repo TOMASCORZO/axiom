@@ -68,23 +68,23 @@ export async function POST(request: NextRequest) {
         const defaultFiles = [
             {
                 project_id: project.id,
-                path: 'axiom.project',
+                path: 'project.axiom',
                 content_type: 'text' as const,
-                text_content: `[axiom]\nconfig_version=1\nproject/name="${name}"\nrun/main_scene="scenes/main.scene"\nrendering/renderer="gl_compatibility"`,
-                size_bytes: 150,
+                text_content: `; Axiom Engine Project Configuration\n[application]\nconfig/name="${name}"\nrun/main_scene="res://scenes/main.scene"\nconfig/features=PackedStringArray("2D")\n\n[display]\nwindow/size/viewport_width=1280\nwindow/size/viewport_height=720\nwindow/stretch/mode="canvas_items"\n\n[physics]\n2d/default_gravity=980.0\n\n[rendering]\nrenderer/rendering_method="gl_compatibility"\n`,
+                size_bytes: 350,
             },
             {
                 project_id: project.id,
                 path: 'scenes/main.scene',
                 content_type: 'text' as const,
-                text_content: `[axiom_scene format=1]\n\n[node name="Main" type="Entity2D"]`,
-                size_bytes: 60,
+                text_content: `[axiom_scene format=3]\n\n[node name="Main" type="Entity2D"]\nscript = ExtResource("scripts/main.axs")\n`,
+                size_bytes: 90,
             },
             {
                 project_id: project.id,
                 path: 'scripts/main.axs',
                 content_type: 'text' as const,
-                text_content: `extends Entity2D\n\nfunc _ready():\n    print("Hello from Axiom!")\n\nfunc _process(delta):\n    pass`,
+                text_content: `extends Entity2D\n\nfunc _ready():\n    print("Hello from Axiom!")\n\nfunc _process(delta):\n    pass\n`,
                 size_bytes: 95,
             },
         ];

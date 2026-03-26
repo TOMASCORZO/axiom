@@ -160,9 +160,10 @@
                 progressFill.style.width = '90%';
                 statusText.textContent = 'Starting game...';
 
-                // Start the engine
+                // Start the engine — only --path, no --main-pack so Godot
+                // reads project.godot + scenes from the virtual filesystem
                 await engine.start({
-                    args: ['--path', '/project', '--main-pack', ''],
+                    args: ['--path', '/project'],
                 });
 
                 engineStarted = true;
