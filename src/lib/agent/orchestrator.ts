@@ -24,6 +24,7 @@ import { CompactionEngine } from '../compaction';
 import { bus } from '../bus';
 import type { ToolResult, ToolFileData } from '@/types/agent';
 import type { ToolContext } from './tools';
+import { executeTool } from './tools';
 
 // Ensure all tools are registered
 import './tools';
@@ -138,20 +139,7 @@ export async function runAgentLoop(params: {
         }
     } catch { /* MCP not configured */ }
 
-    // 6. Detect Godogen-style skill
-    const skillMatch = detectSkill(message);
-    let userMessage = message;
-
-    if (skillMatch) {
-        const steps = skillMatch.skill.steps({
-            gameName: skillMatch.params.gameName ?? 'My Game',
-            gameDescription: skillMatch.params.gameDescription ?? message,
-            gameMode,
-        });
-        userMessage = `[SKILL HINT: ${skillMatch.skill.name}]\nRecommended tool execution order:\n${steps.map((s, i) => `${i + 1}. ${s.tool}(${JSON.stringify(s.input)})`).join('\n')}\n\nUser request: ${message}`;
-    }
-
-    // 7. Build tool context
+    // 6. Build tool context (needed before skill execution)
     const toolCtx: ToolContext = {
         projectId,
         userId,
@@ -159,7 +147,46 @@ export async function runAgentLoop(params: {
         createdFiles: [] as ToolFileData[],
     };
 
-    // 8. Auto-capture snapshot before agent loop (OpenCode snapshot pattern)
+    // 7. Detect Godogen-style skill and execute mandatory steps
+    const skillMatch = detectSkill(message);
+    let userMessage = message;
+    const skillResults: Array<{ tool: string; description: string; success: boolean; filesModified: string[] }> = [];
+
+    if (skillMatch) {
+        const skillParams = {
+            gameName: skillMatch.params.gameName ?? 'My Game',
+            gameDescription: skillMatch.params.gameDescription ?? message,
+            gameMode,
+        };
+        const steps = skillMatch.skill.steps(skillParams);
+
+        if (skillMatch.skill.mandatory) {
+            // Execute ALL steps before LLM gets control
+            for (const step of steps) {
+                params.onToolStart?.(step.tool, step.input);
+                toolCtx.createdFiles = [];
+                const result = await executeTool(step.tool, step.input, toolCtx);
+                params.onToolResult?.(step.tool, result);
+                skillResults.push({
+                    tool: step.tool,
+                    description: step.description,
+                    success: result.success,
+                    filesModified: result.filesModified ?? [],
+                });
+            }
+
+            // Tell the LLM what was already created so it can enhance
+            const summary = skillResults
+                .map((r, i) => `${i + 1}. ${r.tool}: ${r.success ? '✓' : '✗'} ${r.description}${r.filesModified.length > 0 ? ` → ${r.filesModified.join(', ')}` : ''}`)
+                .join('\n');
+            userMessage = `[SKILL EXECUTED: ${skillMatch.skill.name}]\nThe following files were already created automatically:\n${summary}\n\nNow enhance this game based on the user's request. Add game-specific logic, enemies, mechanics, or whatever the game needs. Do NOT recreate project.axiom or the main scene — they already exist.\n\nUser request: ${message}`;
+        } else {
+            // Non-mandatory: just hint
+            userMessage = `[SKILL HINT: ${skillMatch.skill.name}]\nRecommended tool execution order:\n${steps.map((s, i) => `${i + 1}. ${s.tool}(${JSON.stringify(s.input)})`).join('\n')}\n\nUser request: ${message}`;
+        }
+    }
+
+    // 8. Auto-capture snapshot before LLM loop (OpenCode snapshot pattern)
     const snapshotMgr = new SnapshotManager(supabase, projectId);
     const snapshotId = await snapshotMgr.capture(`pre-agent-${Date.now()}`).catch(() => null);
 
