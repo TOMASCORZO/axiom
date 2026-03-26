@@ -9,6 +9,7 @@
  */
 
 import type { ToolResult, ToolFileData } from '@/types/agent';
+import { bus } from '../../bus';
 
 export type ToolInput = Record<string, unknown>;
 
@@ -24,6 +25,10 @@ export interface ToolDef {
     description: string;
     parameters: Record<string, unknown>;
     access: ('build' | 'plan' | 'explore')[];
+    /** If true, emits a permission.request event and waits for approval before executing */
+    requiresApproval?: boolean;
+    /** Patterns that describe what this tool affects (used in permission requests) */
+    permissionPatterns?: string[];
     execute: (ctx: ToolContext, input: ToolInput) => Promise<ToolResult>;
 }
 
@@ -99,6 +104,21 @@ export async function executeTool(name: string, input: ToolInput, ctx: ToolConte
     const tool = _tools.get(repairedName)!;
     ctx.createdFiles = [];
 
+    // Interactive approval gate (OpenCode ctx.ask pattern)
+    if (tool.requiresApproval) {
+        const approved = await requestPermission(repairedName, tool.permissionPatterns ?? ['*']);
+        if (!approved) {
+            return {
+                callId: '',
+                success: false,
+                output: {},
+                filesModified: [],
+                error: `Tool "${repairedName}" requires user approval but was denied. Try a different approach.`,
+                duration_ms: Date.now() - start,
+            };
+        }
+    }
+
     try {
         const result = await tool.execute(ctx, input);
         if (ctx.createdFiles.length > 0) {
@@ -116,4 +136,31 @@ export async function executeTool(name: string, input: ToolInput, ctx: ToolConte
             duration_ms: Date.now() - start,
         };
     }
+}
+
+/**
+ * Request permission from the user via the Event Bus.
+ * Emits 'permission.request' and waits for 'permission.response'.
+ * If no listener responds within the timeout, auto-grants (fail-open for now).
+ */
+function requestPermission(toolName: string, patterns: string[]): Promise<boolean> {
+    return new Promise((resolve) => {
+        const TIMEOUT_MS = 30_000; // 30 seconds
+
+        const unsub = bus.on('permission.response', (payload) => {
+            if (payload.toolName === toolName) {
+                clearTimeout(timer);
+                unsub();
+                resolve(payload.granted);
+            }
+        });
+
+        // Auto-grant if no one listens (fail-open in dev, can be changed to fail-closed)
+        const timer = setTimeout(() => {
+            unsub();
+            resolve(true);
+        }, TIMEOUT_MS);
+
+        bus.emit('permission.request', { toolName, permission: 'execute', patterns });
+    });
 }
