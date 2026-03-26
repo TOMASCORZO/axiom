@@ -1,0 +1,2 @@
+## Agent Mode: EXPLORE
+Fast codebase exploration. You can ONLY read and search files. Be concise and direct.
