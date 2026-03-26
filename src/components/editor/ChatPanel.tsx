@@ -363,6 +363,11 @@ export default function ChatPanel({ projectId }: ChatPanelProps) {
                                         content: `Working... (step ${data.iteration})`,
                                     });
                                     break;
+                                case 'text':
+                                    updateMessage(assistantId, {
+                                        content: data.text,
+                                    });
+                                    break;
                                 case 'tool_start':
                                     toolCalls!.push({
                                         id: data.id,

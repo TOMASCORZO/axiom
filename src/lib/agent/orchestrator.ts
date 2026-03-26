@@ -70,6 +70,7 @@ export async function runAgentLoop(params: {
     onToolResult?: (toolName: string, result: ToolResult) => void;
     onIteration?: (iteration: number) => void;
     onReasoning?: (reasoning: string) => void;
+    onText?: (text: string) => void;
 }): Promise<AgentResult> {
     const { message, projectId, userId, supabase, gameMode } = params;
 
@@ -94,6 +95,7 @@ export async function runAgentLoop(params: {
     }
 
     const { adapter, apiKey, provider: resolvedProvider } = resolved;
+    console.log(`[Orchestrator] provider=${resolvedProvider} model=${adapter.model}`);
 
     // 2. Fetch project state and conversation history in parallel
     const [{ data: files }, { data: history }] = await Promise.all([
@@ -149,6 +151,7 @@ export async function runAgentLoop(params: {
 
     // 7. Detect Godogen-style skill and execute mandatory steps
     const skillMatch = detectSkill(message);
+    console.log(`[Orchestrator] skill=${skillMatch ? skillMatch.skill.name : 'none'} mandatory=${skillMatch?.skill.mandatory ?? false}`);
     let userMessage = message;
     const skillResults: Array<{ tool: string; description: string; success: boolean; filesModified: string[] }> = [];
 
@@ -203,6 +206,7 @@ export async function runAgentLoop(params: {
             onToolResult: params.onToolResult,
             onIteration: params.onIteration,
             onReasoning: params.onReasoning,
+            onText: params.onText,
         },
     });
 

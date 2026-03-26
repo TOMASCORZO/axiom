@@ -48,8 +48,8 @@ export const AGENT_DEFS: Record<AgentType, AgentDef> = {
         description: 'The default agent. Executes tools based on configured permissions.',
         maxIterations: 25,
         deniedTools: [],
-        systemSuffix: loadPrompt('build', '## Agent Mode: BUILD\nYou have FULL access to all tools.'),
-        forceFirstTool: false,
+        systemSuffix: loadPrompt('build', '## Agent Mode: BUILD\nYou have FULL access to all tools. Always use tools to build — never respond with text only.'),
+        forceFirstTool: true,
     },
     plan: {
         type: 'plan',

@@ -109,14 +109,18 @@ export async function processGeneration(params: LoopParams): Promise<AgentResult
             });
         }
 
+        const toolChoice = (i === 0 && agentDef.forceFirstTool) ? 'required' : 'auto';
+        console.log(`[Agent] iter=${i + 1}/${agentDef.maxIterations} toolChoice=${toolChoice} tools=${i === agentDef.maxIterations - 1 ? 0 : tools.length}`);
+
         const response = await adapter.chat(
             config,
             messages,
             i === agentDef.maxIterations - 1 ? [] : tools, // No tools on last iteration
-            (i === 0 && agentDef.forceFirstTool) ? 'required' : 'auto',
+            toolChoice,
         );
 
         totalTokens += response.usage.inputTokens + response.usage.outputTokens;
+        console.log(`[Agent] response: content=${response.content ? response.content.length + 'ch' : 'null'} toolCalls=${response.toolCalls.length} finish=${response.finishReason} tokens=${response.usage.inputTokens}+${response.usage.outputTokens}`);
         bus.emit('model.tokens', { inputTokens: response.usage.inputTokens, outputTokens: response.usage.outputTokens });
 
         if (response.reasoning) {
@@ -137,8 +141,17 @@ export async function processGeneration(params: LoopParams): Promise<AgentResult
         };
         messages.push(assistantMsg);
 
-        // If no tool calls → done
+        // If no tool calls → either done or needs a nudge
         if (response.toolCalls.length === 0 || response.finishReason === 'stop' || response.finishReason === 'length') {
+            // If the LLM returned empty on the first iteration, nudge it to use tools
+            if (i === 0 && !response.content && !response.reasoning && allToolCalls.length === 0) {
+                console.warn('[Agent] Empty first response — nudging LLM to use tools');
+                messages.push({
+                    role: 'user',
+                    content: '[SYSTEM] You returned an empty response. You MUST use your tools to build the game. Start by calling create_project_config, then create_scene, then write_game_logic. Do NOT respond with text only.',
+                });
+                continue;
+            }
             return {
                 response: response.content || response.reasoning || 'Done.',
                 toolCalls: allToolCalls,

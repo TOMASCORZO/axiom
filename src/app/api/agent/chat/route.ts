@@ -114,6 +114,9 @@ export async function POST(request: NextRequest) {
                         onReasoning: (reasoning) => {
                             sendEvent('reasoning', { text: reasoning });
                         },
+                        onText: (text) => {
+                            sendEvent('text', { text });
+                        },
                     });
 
                     // Log assistant response and deduct credits (fire-and-forget)
