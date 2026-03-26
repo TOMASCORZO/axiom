@@ -12,6 +12,7 @@
 import type { ToolResult, ToolFileData } from '@/types/agent';
 import type { ProviderAdapter, ProviderConfig, ProviderMessage, ProviderTool } from '../providers/base';
 import { executeTool, getToolSchemas, type ToolContext } from '../tools';
+import { truncateToolOutput } from '../truncate';
 import { AGENT_DEFS, type AgentType } from './types';
 
 const DOOM_LOOP_THRESHOLD = 3;
@@ -181,9 +182,15 @@ export async function processGeneration(params: LoopParams): Promise<AgentResult
             }
 
             // Feed result back to LLM — the key feedback loop
-            const resultContent = result.success
+            // OpenCode pattern: truncate output to prevent context window exhaustion
+            const rawContent = result.success
                 ? JSON.stringify(result.output)
                 : JSON.stringify({ error: result.error, hint: 'The tool failed. Read the error carefully and try a different approach.' });
+
+            const truncated = truncateToolOutput(rawContent);
+            const resultContent = truncated.truncated
+                ? `${truncated.content}\n\n[⚠ Output truncated: ${truncated.originalLength} → ${truncated.content.length} chars]`
+                : truncated.content;
 
             messages.push({
                 role: 'tool',
