@@ -223,7 +223,7 @@ export default function ChatPanel({ projectId }: ChatPanelProps) {
     const [showModeWarning, setShowModeWarning] = useState(false);
     const [loaded, setLoaded] = useState(false);
     const messagesEndRef = useRef<HTMLDivElement>(null);
-    const { messages, isAgentBusy, addMessage, updateMessage, setAgentBusy, setMessages, addProjectFiles } = useEditorStore();
+    const { messages, isAgentBusy, addMessage, updateMessage, setAgentBusy, setMessages, addProjectFiles, refreshProjectFiles } = useEditorStore();
 
     // Load persisted messages on mount or when projectId changes
     useEffect(() => {
@@ -405,6 +405,8 @@ export default function ChatPanel({ projectId }: ChatPanelProps) {
                                         reasoning: reasoningText || undefined,
                                         isStreaming: false,
                                     });
+                                    // Sync files from Supabase after agent finishes
+                                    refreshProjectFiles(projectId);
                                     break;
                                 }
                                 case 'error':
