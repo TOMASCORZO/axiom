@@ -27,8 +27,8 @@ registerTool({
             query = query.like('path', `${input.pathFilter}%`);
         }
 
-        const { data: files } = await query;
-        const allFiles = files ?? [];
+        const { data } = await query;
+        const allFiles = (data ?? []) as unknown as Array<{ path: string; content_type: string; size_bytes: number; text_content?: string }>;
 
         // Compute stats
         const stats = {

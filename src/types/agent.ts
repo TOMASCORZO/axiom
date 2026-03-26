@@ -28,10 +28,10 @@ export interface ToolFileData {
 }
 
 export interface ToolResult {
-    callId: string;
+    callId?: string;
     success: boolean;
-    output: Record<string, unknown>;
-    filesModified: string[];
+    output: any;
+    filesModified?: string[];
     fileContents?: ToolFileData[];
     error?: string;
     duration_ms: number;

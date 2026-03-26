@@ -184,7 +184,7 @@ class LspManager {
             position: { line, character },
         });
         if (!result) return [];
-        return Array.isArray(result) ? result : [result];
+        return Array.isArray(result) ? result as LspLocation[] : [result as LspLocation];
     }
 
     /**
@@ -197,7 +197,7 @@ class LspManager {
             position: { line, character },
             context: { includeDeclaration: true },
         });
-        return Array.isArray(result) ? result : [];
+        return Array.isArray(result) ? result as LspLocation[] : [];
     }
 
     /**

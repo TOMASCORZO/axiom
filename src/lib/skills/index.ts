@@ -27,9 +27,13 @@
  *   const injection = mgr.buildPromptInjection();
  */
 
-import { readdirSync, readFileSync, existsSync, statSync } from 'fs';
 import { join, extname, basename } from 'path';
 import { homedir } from 'os';
+
+// Prevent Next.js/Turbopack from trying to statically analyze these fs calls
+// and bundling the entire project directory.
+const fs = typeof window === 'undefined' ? eval('require')('fs') : null;
+const { readdirSync, readFileSync, existsSync, statSync } = (fs || {}) as typeof import('fs');
 
 // ── Types ───────────────────────────────────────────────────────────
 

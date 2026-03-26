@@ -42,15 +42,15 @@ export function getTool(name: string): ToolDef | undefined {
     return _tools.get(name);
 }
 
-export function getToolsForAgent(agentType: 'build' | 'plan' | 'explore'): ToolDef[] {
-    return Array.from(_tools.values()).filter(t => t.access.includes(agentType));
+export function getToolsForAgent(agentType: string): ToolDef[] {
+    return Array.from(_tools.values()).filter(t => t.access.includes(agentType as any));
 }
 
 export function getAllTools(): ToolDef[] {
     return Array.from(_tools.values());
 }
 
-export function getToolSchemas(agentType: 'build' | 'plan' | 'explore'): Array<{ name: string; description: string; parameters: Record<string, unknown> }> {
+export function getToolSchemas(agentType: string): Array<{ name: string; description: string; parameters: Record<string, unknown> }> {
     return getToolsForAgent(agentType).map(t => ({
         name: t.name,
         description: t.description,
