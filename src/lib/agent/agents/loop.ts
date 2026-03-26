@@ -13,6 +13,7 @@ import type { ToolResult, ToolFileData } from '@/types/agent';
 import type { ProviderAdapter, ProviderConfig, ProviderMessage, ProviderTool } from '../providers/base';
 import { executeTool, getToolSchemas, type ToolContext } from '../tools';
 import { truncateToolOutput } from '../truncate';
+import { bus } from '../../bus';
 import { AGENT_DEFS, type AgentType } from './types';
 
 const DOOM_LOOP_THRESHOLD = 3;
@@ -98,6 +99,7 @@ export async function processGeneration(params: LoopParams): Promise<AgentResult
     for (let i = 0; i < agentDef.maxIterations; i++) {
         iterations = i + 1;
         callbacks.onIteration?.(iterations);
+        bus.emit('iteration.start', { iteration: iterations });
 
         // On last iteration, tell the LLM to wrap up (OpenCode max-steps pattern)
         if (i === agentDef.maxIterations - 1) {
@@ -115,13 +117,16 @@ export async function processGeneration(params: LoopParams): Promise<AgentResult
         );
 
         totalTokens += response.usage.inputTokens + response.usage.outputTokens;
+        bus.emit('model.tokens', { inputTokens: response.usage.inputTokens, outputTokens: response.usage.outputTokens });
 
         if (response.reasoning) {
             callbacks.onReasoning?.(response.reasoning);
+            bus.emit('model.reasoning', { text: response.reasoning });
         }
 
         if (response.content) {
             callbacks.onText?.(response.content);
+            bus.emit('model.text', { text: response.content });
         }
 
         const assistantMsg: ProviderMessage = {
@@ -150,6 +155,7 @@ export async function processGeneration(params: LoopParams): Promise<AgentResult
             // Doom loop detection (OpenCode pattern)
             if (isDoomLoop(recentCalls, tc.name, toolInput)) {
                 const errorMsg = `Doom loop detected: tool "${tc.name}" called ${DOOM_LOOP_THRESHOLD} times with identical input. Stopping to prevent infinite loop.`;
+                bus.emit('doom_loop.detected', { toolName: tc.name, count: DOOM_LOOP_THRESHOLD });
                 callbacks.onToolResult?.(tc.name, {
                     callId: tc.id,
                     success: false,
@@ -167,11 +173,13 @@ export async function processGeneration(params: LoopParams): Promise<AgentResult
             }
 
             callbacks.onToolStart?.(tc.name, toolInput);
+            bus.emit('tool.start', { toolName: tc.name, input: toolInput, callId: tc.id });
 
             const result = await executeTool(tc.name, toolInput, toolCtx);
             result.callId = tc.id;
 
             callbacks.onToolResult?.(tc.name, result);
+            bus.emit('tool.complete', { toolName: tc.name, success: result.success, duration_ms: result.duration_ms, callId: tc.id });
 
             allToolCalls.push({ id: tc.id, name: tc.name, input: toolInput, result });
             recentCalls.push({ name: tc.name, input: toolInput });
@@ -191,6 +199,10 @@ export async function processGeneration(params: LoopParams): Promise<AgentResult
             const resultContent = truncated.truncated
                 ? `${truncated.content}\n\n[⚠ Output truncated: ${truncated.originalLength} → ${truncated.content.length} chars]`
                 : truncated.content;
+
+            if (truncated.truncated) {
+                bus.emit('truncation.applied', { toolName: tc.name, originalLength: truncated.originalLength, truncatedLength: truncated.content.length });
+            }
 
             messages.push({
                 role: 'tool',
