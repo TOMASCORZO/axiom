@@ -13,6 +13,7 @@ import { resolveProvider, PROVIDER_INFO, type AgentProvider } from './providers'
 import { buildSystemPrompt, MODE_CREDIT_MULTIPLIER, type GameMode } from './prompts';
 import { detectSkill } from './skills';
 import { processGeneration, type AgentResult } from './agents/loop';
+import { SnapshotManager } from '../snapshot';
 import type { ToolResult, ToolFileData } from '@/types/agent';
 import type { ToolContext } from './tools';
 
@@ -94,7 +95,11 @@ export async function runAgentLoop(params: {
         createdFiles: [] as ToolFileData[],
     };
 
-    // 6. Run the agent loop
+    // 6. Auto-capture snapshot before agent loop (OpenCode snapshot pattern)
+    const snapshotMgr = new SnapshotManager(supabase, projectId);
+    const snapshotId = await snapshotMgr.capture(`pre-agent-${Date.now()}`).catch(() => null);
+
+    // 7. Run the agent loop
     return processGeneration({
         adapter,
         config: { apiKey, model: adapter.model, maxTokens: 4096 },
