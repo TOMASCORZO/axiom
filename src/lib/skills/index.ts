@@ -171,9 +171,9 @@ export class SkillsManager {
 
                 return {
                     id,
-                    name: meta.name ?? id,
-                    description: meta.description ?? '',
-                    globs: meta.globs ?? [],
+                    name: (meta.name as string) ?? id,
+                    description: (meta.description as string) ?? '',
+                    globs: (meta.globs as string[]) ?? [],
                     alwaysApply: meta.alwaysApply === true || meta.alwaysApply === 'true',
                     content,
                     source: filePath,

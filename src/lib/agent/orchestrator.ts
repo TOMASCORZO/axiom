@@ -3,9 +3,12 @@
  *
  * Entry point that:
  * 1. Resolves the AI provider (with auto-fallback)
- * 2. Builds per-provider system prompt (OpenCode pattern)
- * 3. Detects Godogen-style skills for multi-step generation
- * 4. Delegates to processGeneration (the ReAct loop)
+ * 2. Loads dynamic tools and MCP tools
+ * 3. Injects skills into the system prompt
+ * 4. Builds per-provider system prompt (OpenCode pattern)
+ * 5. Auto-captures snapshot before agent loop
+ * 6. Runs the ReAct loop with compaction support
+ * 7. Delegates to processGeneration (the ReAct loop)
  */
 
 import { SupabaseClient } from '@supabase/supabase-js';
@@ -14,6 +17,11 @@ import { buildSystemPrompt, MODE_CREDIT_MULTIPLIER, type GameMode } from './prom
 import { detectSkill } from './skills';
 import { processGeneration, type AgentResult } from './agents/loop';
 import { SnapshotManager } from '../snapshot';
+import { SkillsManager } from '../skills';
+import { scanAndRegisterTools } from '../tools/dynamic';
+import { mcpManager } from '../mcp';
+import { CompactionEngine } from '../compaction';
+import { bus } from '../bus';
 import type { ToolResult, ToolFileData } from '@/types/agent';
 import type { ToolContext } from './tools';
 
@@ -22,6 +30,32 @@ import './tools';
 
 export { MODE_CREDIT_MULTIPLIER, PROVIDER_INFO };
 export type { GameMode, AgentProvider, AgentResult };
+
+// ── Initialization (runs once on first import) ─────────────────────
+
+let _initialized = false;
+
+async function initializeSubsystems() {
+    if (_initialized) return;
+    _initialized = true;
+
+    // Load custom tools from .axiom/tools/ and ~/.axiom/tools/
+    try {
+        const count = await scanAndRegisterTools();
+        if (count > 0) {
+            bus.emit('tool.complete', {
+                toolName: 'dynamic:init',
+                success: true,
+                duration_ms: 0,
+                callId: `init_${Date.now()}`,
+            });
+        }
+    } catch (err) {
+        console.error('[Orchestrator] Dynamic tools scan failed:', err);
+    }
+}
+
+// ── Main Entry Point ────────────────────────────────────────────────
 
 export async function runAgentLoop(params: {
     message: string;
@@ -37,6 +71,15 @@ export async function runAgentLoop(params: {
     onReasoning?: (reasoning: string) => void;
 }): Promise<AgentResult> {
     const { message, projectId, userId, supabase, gameMode } = params;
+
+    // Initialize subsystems on first call
+    await initializeSubsystems();
+
+    // Emit agent start event
+    bus.emit('agent.start', {
+        sessionId: params.conversationId,
+        agentType: 'build',
+    });
 
     // 1. Resolve provider with auto-fallback
     const resolved = resolveProvider(params.provider ?? 'claude');
@@ -72,9 +115,30 @@ export async function runAgentLoop(params: {
         .join('\n');
 
     // 3. Build per-provider system prompt (OpenCode pattern)
-    const systemPrompt = buildSystemPrompt(fileList, conversationHistory, gameMode, resolvedProvider);
+    let systemPrompt = buildSystemPrompt(fileList, conversationHistory, gameMode, resolvedProvider);
 
-    // 4. Detect Godogen-style skill
+    // 4. Inject active skills into system prompt
+    try {
+        const skillsMgr = new SkillsManager(process.cwd());
+        const activeFiles = (files ?? []).map(f => f.path);
+        const skillsInjection = skillsMgr.buildPromptInjection(activeFiles);
+        if (skillsInjection) {
+            systemPrompt += '\n' + skillsInjection;
+        }
+    } catch (err) {
+        console.error('[Orchestrator] Skills injection failed:', err);
+    }
+
+    // 5. Inject MCP tools info into system prompt
+    try {
+        const mcpTools = mcpManager.getTools();
+        if (mcpTools.length > 0) {
+            const mcpSection = mcpTools.map(t => `- ${t.name}: ${t.description}`).join('\n');
+            systemPrompt += `\n\n## Available MCP Tools\n${mcpSection}`;
+        }
+    } catch { /* MCP not configured */ }
+
+    // 6. Detect Godogen-style skill
     const skillMatch = detectSkill(message);
     let userMessage = message;
 
@@ -87,7 +151,7 @@ export async function runAgentLoop(params: {
         userMessage = `[SKILL HINT: ${skillMatch.skill.name}]\nRecommended tool execution order:\n${steps.map((s, i) => `${i + 1}. ${s.tool}(${JSON.stringify(s.input)})`).join('\n')}\n\nUser request: ${message}`;
     }
 
-    // 5. Build tool context
+    // 7. Build tool context
     const toolCtx: ToolContext = {
         projectId,
         userId,
@@ -95,12 +159,12 @@ export async function runAgentLoop(params: {
         createdFiles: [] as ToolFileData[],
     };
 
-    // 6. Auto-capture snapshot before agent loop (OpenCode snapshot pattern)
+    // 8. Auto-capture snapshot before agent loop (OpenCode snapshot pattern)
     const snapshotMgr = new SnapshotManager(supabase, projectId);
     const snapshotId = await snapshotMgr.capture(`pre-agent-${Date.now()}`).catch(() => null);
 
-    // 7. Run the agent loop
-    return processGeneration({
+    // 9. Run the agent loop
+    const result = await processGeneration({
         adapter,
         config: { apiKey, model: adapter.model, maxTokens: 4096 },
         systemPrompt,
@@ -114,4 +178,29 @@ export async function runAgentLoop(params: {
             onReasoning: params.onReasoning,
         },
     });
+
+    // 10. Emit agent completion event
+    bus.emit('agent.complete', {
+        sessionId: params.conversationId,
+        response: result.response,
+        totalTokens: result.totalTokens,
+        iterations: result.iterations,
+    });
+
+    // 11. Post-run: check if snapshot diff shows changes worth noting
+    if (snapshotId) {
+        try {
+            const diffs = await snapshotMgr.diff(snapshotId);
+            if (diffs.length > 0) {
+                bus.emit('tool.complete', {
+                    toolName: 'snapshot.diff',
+                    success: true,
+                    duration_ms: 0,
+                    callId: snapshotId,
+                });
+            }
+        } catch { /* snapshot diff failed, non-critical */ }
+    }
+
+    return result;
 }

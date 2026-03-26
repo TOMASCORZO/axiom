@@ -6,6 +6,7 @@ import AxiomViewport from './AxiomViewport';
 import CodeEditor from './CodeEditor';
 import ChatPanel from './ChatPanel';
 import ConsolePanel from './ConsolePanel';
+import SubsystemsPanel from './SubsystemsPanel';
 import { useEditorStore } from '@/lib/store';
 
 interface EditorLayoutProps {
@@ -54,12 +55,17 @@ export default function EditorLayout({ projectId }: EditorLayoutProps) {
                         )}
                     </div>
 
-                    {/* Bottom — Console Panel */}
+                    {/* Bottom — Console + Subsystems */}
                     <div
-                        className="flex-shrink-0 overflow-hidden"
+                        className="flex-shrink-0 overflow-hidden flex flex-col"
                         style={{ height: `${bottomPanelHeight}px` }}
                     >
-                        <ConsolePanel />
+                        <div className="flex-1 overflow-hidden">
+                            <ConsolePanel />
+                        </div>
+                        <div className="flex-shrink-0 max-h-[200px] overflow-hidden">
+                            <SubsystemsPanel />
+                        </div>
                     </div>
                 </div>
 

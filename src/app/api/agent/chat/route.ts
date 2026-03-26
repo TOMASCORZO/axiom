@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { getAdminClient } from '@/lib/supabase/admin';
 import { runAgentLoop, MODE_CREDIT_MULTIPLIER, type GameMode, type AgentProvider } from '@/lib/agent/orchestrator';
+import { bus } from '@/lib/bus';
 import { v4 as uuid } from 'uuid';
 
 // Vercel Serverless Function config
@@ -64,6 +65,19 @@ export async function POST(request: NextRequest) {
                 const sendEvent = (event: string, data: unknown) => {
                     controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
                 };
+
+                // Bridge Event Bus to SSE stream for live subsystem updates
+                const unsubBus = bus.onAll((event, payload) => {
+                    if (
+                        event === 'truncation.applied' ||
+                        event === 'doom_loop.detected' ||
+                        event === 'tool.complete' ||
+                        event === 'agent.start' ||
+                        event === 'agent.complete'
+                    ) {
+                        sendEvent('subsystem', { event, ...payload as object });
+                    }
+                });
 
                 try {
                     // Send conversation ID immediately
@@ -133,6 +147,7 @@ export async function POST(request: NextRequest) {
                         error: err instanceof Error ? err.message : 'Internal server error',
                     });
                 } finally {
+                    unsubBus();
                     controller.close();
                 }
             },
