@@ -53,23 +53,41 @@ export abstract class OpenAICompatAdapter implements ProviderAdapter {
 
         body = this.customizeBody(body, tools);
 
-        const res = await fetch(`${this.baseUrl}/chat/completions`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${config.apiKey}`,
-            },
-            body: JSON.stringify(body),
-        });
+        const url = `${this.baseUrl}/chat/completions`;
+        const headers = {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${config.apiKey}`,
+        };
+        const payload = JSON.stringify(body);
 
-        if (!res.ok) {
-            const errText = await res.text().catch(() => '');
-            let errMsg = res.statusText;
-            try {
-                const j = JSON.parse(errText) as { error?: { message?: string } };
-                errMsg = j?.error?.message || errMsg;
-            } catch { /* */ }
-            throw new Error(`${this.label} API error (${res.status}): ${errMsg}`);
+        // Retry with exponential backoff on 429 / 500+ errors
+        const MAX_RETRIES = 5;
+        let res!: Response;
+
+        for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+            res = await fetch(url, { method: 'POST', headers, body: payload });
+
+            if (res.ok) break;
+
+            const isRetryable = res.status === 429 || res.status >= 500;
+            if (!isRetryable || attempt === MAX_RETRIES) {
+                const errText = await res.text().catch(() => '');
+                let errMsg = res.statusText;
+                try {
+                    const j = JSON.parse(errText) as { error?: { message?: string } };
+                    errMsg = j?.error?.message || errMsg;
+                } catch { /* */ }
+                throw new Error(`${this.label} API error (${res.status}): ${errMsg}`);
+            }
+
+            // Read Retry-After header, fall back to exponential backoff
+            const retryAfter = res.headers.get('retry-after');
+            const waitMs = retryAfter
+                ? parseInt(retryAfter, 10) * 1000 || 2000
+                : Math.min(1000 * Math.pow(2, attempt) + Math.random() * 500, 30000);
+
+            console.warn(`[${this.label}] ${res.status} — retry ${attempt + 1}/${MAX_RETRIES} in ${Math.round(waitMs)}ms`);
+            await new Promise(r => setTimeout(r, waitMs));
         }
 
         const data = await res.json() as {
