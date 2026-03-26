@@ -4,6 +4,7 @@ import { useRef, useEffect, useState, useCallback } from 'react';
 import { useEditorStore } from '@/lib/store';
 import { checkEngineAvailability, type EngineAvailability } from '@/lib/engine/loader';
 import { engineBridge } from '@/lib/engine/bridge';
+import { translateProjectFiles, translateEngineMessage } from '@/lib/engine/translate';
 import { Loader2, Zap } from 'lucide-react';
 
 /**
@@ -196,7 +197,7 @@ function WasmEngine({ isPlaying }: { isPlaying: boolean }) {
                     addConsoleEntry({
                         id: crypto.randomUUID(),
                         level: msg.level,
-                        message: msg.message,
+                        message: translateEngineMessage(msg.message),
                         timestamp: new Date().toISOString(),
                         source: 'engine',
                     });
@@ -205,7 +206,7 @@ function WasmEngine({ isPlaying }: { isPlaying: boolean }) {
                     addConsoleEntry({
                         id: crypto.randomUUID(),
                         level: 'error',
-                        message: msg.message,
+                        message: translateEngineMessage(msg.message),
                         timestamp: new Date().toISOString(),
                         source: 'engine',
                     });
@@ -223,11 +224,12 @@ function WasmEngine({ isPlaying }: { isPlaying: boolean }) {
     // Start/stop engine based on isPlaying
     useEffect(() => {
         if (isPlaying && engineBridge.isReady && !engineBridge.isRunning) {
-            // Prepare file list for the engine
-            const projectFiles = files
+            // Prepare file list: Axiom format → Godot native before sending to WASM
+            const axiomFiles = files
                 .filter((f) => f.text_content != null)
                 .map((f) => ({ path: f.path, content: f.text_content ?? '' }));
-            engineBridge.startGame(projectFiles);
+            const godotFiles = translateProjectFiles(axiomFiles);
+            engineBridge.startGame(godotFiles);
         } else if (!isPlaying && engineBridge.isRunning) {
             engineBridge.stopGame();
         }
