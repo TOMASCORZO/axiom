@@ -7,6 +7,7 @@ export class MoonshotAdapter extends OpenAICompatAdapter {
     readonly color = 'blue';
     readonly model = 'kimi-k2.5';
     readonly baseUrl = 'https://api.moonshot.ai/v1';
+    protected readonly rpm = 10; // Moonshot rate limit (conservative)
 
     protected customizeBody(body: Record<string, unknown>, tools: ProviderTool[]): Record<string, unknown> {
         // Kimi K2.5: thinking mode is incompatible with tool_choice "required"
