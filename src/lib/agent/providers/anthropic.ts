@@ -3,6 +3,7 @@
  */
 
 import type { ProviderAdapter, ProviderConfig, ProviderMessage, ProviderTool, ProviderToolCall, ProviderResponse } from './base';
+import { throttle, on429, onSuccess } from './throttle';
 
 export class AnthropicAdapter implements ProviderAdapter {
     readonly id = 'claude';
@@ -45,25 +46,38 @@ export class AnthropicAdapter implements ProviderAdapter {
             input_schema: t.parameters,
         }));
 
-        const res = await fetch('https://api.anthropic.com/v1/messages', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'x-api-key': config.apiKey,
-                'anthropic-version': '2023-06-01',
-            },
-            body: JSON.stringify({
-                model: config.model || this.model,
-                max_tokens: config.maxTokens ?? 4096,
-                system,
-                messages: formatted,
-                tools: anthropicTools.length > 0 ? anthropicTools : undefined,
-            }),
+        const url = 'https://api.anthropic.com/v1/messages';
+        const reqHeaders = {
+            'Content-Type': 'application/json',
+            'x-api-key': config.apiKey,
+            'anthropic-version': '2023-06-01',
+        };
+        const payload = JSON.stringify({
+            model: config.model || this.model,
+            max_tokens: config.maxTokens ?? 4096,
+            system,
+            messages: formatted,
+            tools: anthropicTools.length > 0 ? anthropicTools : undefined,
         });
 
-        if (!res.ok) {
-            const err = await res.json().catch(() => ({})) as { error?: { message?: string } };
-            throw new Error(`Claude API error: ${err?.error?.message || res.statusText}`);
+        const MAX_RETRIES = 7;
+        let res!: Response;
+
+        for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+            await throttle('claude');
+            res = await fetch(url, { method: 'POST', headers: reqHeaders, body: payload });
+
+            if (res.ok) { onSuccess('claude'); break; }
+
+            const isRetryable = res.status === 429 || res.status >= 500;
+            if (!isRetryable || attempt === MAX_RETRIES) {
+                const err = await res.json().catch(() => ({})) as { error?: { message?: string } };
+                throw new Error(`Claude API error (${res.status}): ${err?.error?.message || res.statusText}`);
+            }
+
+            const waitMs = on429('claude');
+            console.warn(`[Claude] ${res.status} — retry ${attempt + 1}/${MAX_RETRIES} in ${Math.round(waitMs / 1000)}s`);
+            await new Promise(r => setTimeout(r, waitMs));
         }
 
         const data = await res.json() as {

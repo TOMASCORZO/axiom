@@ -3,6 +3,7 @@
  */
 
 import type { ProviderAdapter, ProviderConfig, ProviderMessage, ProviderTool, ProviderToolCall, ProviderResponse } from './base';
+import { throttle, on429, onSuccess } from './throttle';
 
 export class GoogleAdapter implements ProviderAdapter {
     readonly id = 'gemini';
@@ -52,23 +53,32 @@ export class GoogleAdapter implements ProviderAdapter {
             })),
         }] : undefined;
 
-        const res = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${config.apiKey}`,
-            {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    systemInstruction: systemInstruction ? { parts: [{ text: systemInstruction }] } : undefined,
-                    contents,
-                    tools: geminiTools,
-                    generationConfig: { maxOutputTokens: config.maxTokens ?? 4096 },
-                }),
-            },
-        );
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${config.apiKey}`;
+        const payload = JSON.stringify({
+            systemInstruction: systemInstruction ? { parts: [{ text: systemInstruction }] } : undefined,
+            contents,
+            tools: geminiTools,
+            generationConfig: { maxOutputTokens: config.maxTokens ?? 4096 },
+        });
 
-        if (!res.ok) {
-            const err = await res.json().catch(() => ({})) as { error?: { message?: string } };
-            throw new Error(`Gemini API error: ${err?.error?.message || res.statusText}`);
+        const MAX_RETRIES = 7;
+        let res!: Response;
+
+        for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+            await throttle('gemini');
+            res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: payload });
+
+            if (res.ok) { onSuccess('gemini'); break; }
+
+            const isRetryable = res.status === 429 || res.status >= 500;
+            if (!isRetryable || attempt === MAX_RETRIES) {
+                const err = await res.json().catch(() => ({})) as { error?: { message?: string } };
+                throw new Error(`Gemini API error (${res.status}): ${err?.error?.message || res.statusText}`);
+            }
+
+            const waitMs = on429('gemini');
+            console.warn(`[Gemini] ${res.status} — retry ${attempt + 1}/${MAX_RETRIES} in ${Math.round(waitMs / 1000)}s`);
+            await new Promise(r => setTimeout(r, waitMs));
         }
 
         const data = await res.json() as {

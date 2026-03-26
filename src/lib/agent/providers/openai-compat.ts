@@ -1,69 +1,12 @@
 /**
  * OpenAI-Compatible Provider Base — shared by GPT, Kimi, DeepSeek
  *
- * Includes per-provider rate limiting (token bucket) and retry with
- * exponential backoff. The agent loop runs at full speed — the throttle
- * only pauses the minimum time needed to stay within the provider's RPM.
+ * Progressive request spacing via throttle + retry with backoff.
+ * The agent loop runs at full speed — only the HTTP call waits.
  */
 
 import type { ProviderAdapter, ProviderConfig, ProviderMessage, ProviderTool, ProviderToolCall, ProviderResponse } from './base';
-
-// ── Token-Bucket Rate Limiter ─────────────────────────────────────
-
-class TokenBucket {
-    private tokens: number;
-    private lastRefill: number;
-
-    constructor(
-        private readonly maxTokens: number,
-        private readonly refillRate: number, // tokens per second
-    ) {
-        this.tokens = maxTokens;
-        this.lastRefill = Date.now();
-    }
-
-    /** Wait until a token is available, then consume it. */
-    async acquire(): Promise<void> {
-        this.refill();
-        if (this.tokens >= 1) {
-            this.tokens -= 1;
-            return;
-        }
-        // Calculate wait time for next token
-        const waitMs = ((1 - this.tokens) / this.refillRate) * 1000;
-        await new Promise(r => setTimeout(r, Math.ceil(waitMs)));
-        this.refill();
-        this.tokens -= 1;
-    }
-
-    /** Mark that the provider just told us to slow down (429). */
-    drain(): void {
-        this.tokens = 0;
-        this.lastRefill = Date.now();
-    }
-
-    private refill(): void {
-        const now = Date.now();
-        const elapsed = (now - this.lastRefill) / 1000;
-        this.tokens = Math.min(this.maxTokens, this.tokens + elapsed * this.refillRate);
-        this.lastRefill = now;
-    }
-}
-
-// Global buckets keyed by provider ID — survives across requests
-const _buckets = new Map<string, TokenBucket>();
-
-function getBucket(providerId: string, rpm: number): TokenBucket {
-    let bucket = _buckets.get(providerId);
-    if (!bucket) {
-        // burst = 2 requests instantly, then throttled to RPM rate
-        bucket = new TokenBucket(2, rpm / 60);
-        _buckets.set(providerId, bucket);
-    }
-    return bucket;
-}
-
-// ── Adapter ───────────────────────────────────────────────────────
+import { throttle, on429, onSuccess } from './throttle';
 
 export abstract class OpenAICompatAdapter implements ProviderAdapter {
     abstract readonly id: string;
@@ -71,12 +14,6 @@ export abstract class OpenAICompatAdapter implements ProviderAdapter {
     abstract readonly color: string;
     abstract readonly model: string;
     abstract readonly baseUrl: string;
-
-    /**
-     * Max requests per minute for this provider.
-     * Override in subclasses. Default is generous (60 RPM).
-     */
-    protected readonly rpm: number = 60;
 
     /** Override to customize request body */
     protected customizeBody(body: Record<string, unknown>, _tools: ProviderTool[]): Record<string, unknown> {
@@ -127,18 +64,20 @@ export abstract class OpenAICompatAdapter implements ProviderAdapter {
         };
         const payload = JSON.stringify(body);
 
-        // Proactive rate limiting — wait for token before sending
-        const bucket = getBucket(this.id, this.rpm);
-
-        // Retry with exponential backoff on 429 / 500+ errors
-        const MAX_RETRIES = 5;
+        // Retry loop with progressive spacing
+        const MAX_RETRIES = 7;
         let res!: Response;
 
         for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-            await bucket.acquire();
+            // Progressive throttle — waits the right interval for this provider
+            await throttle(this.id);
+
             res = await fetch(url, { method: 'POST', headers, body: payload });
 
-            if (res.ok) break;
+            if (res.ok) {
+                onSuccess(this.id);
+                break;
+            }
 
             const isRetryable = res.status === 429 || res.status >= 500;
             if (!isRetryable || attempt === MAX_RETRIES) {
@@ -151,16 +90,13 @@ export abstract class OpenAICompatAdapter implements ProviderAdapter {
                 throw new Error(`${this.label} API error (${res.status}): ${errMsg}`);
             }
 
-            // 429 → drain bucket so next acquire() waits
-            if (res.status === 429) bucket.drain();
-
-            // Read Retry-After header, fall back to exponential backoff
+            // Get wait time — on 429 the throttle auto-doubles its interval
             const retryAfter = res.headers.get('retry-after');
             const waitMs = retryAfter
-                ? parseInt(retryAfter, 10) * 1000 || 2000
-                : Math.min(1000 * Math.pow(2, attempt) + Math.random() * 500, 30000);
+                ? parseInt(retryAfter, 10) * 1000 || on429(this.id)
+                : on429(this.id);
 
-            console.warn(`[${this.label}] ${res.status} — retry ${attempt + 1}/${MAX_RETRIES} in ${Math.round(waitMs)}ms`);
+            console.warn(`[${this.label}] ${res.status} — retry ${attempt + 1}/${MAX_RETRIES} in ${Math.round(waitMs / 1000)}s`);
             await new Promise(r => setTimeout(r, waitMs));
         }
 
