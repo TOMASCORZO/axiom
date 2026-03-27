@@ -1,26 +1,24 @@
 /**
- * Axiom Agent — Orchestrator (OpenCode-faithful)
+ * Axiom Agent — Orchestrator (AI SDK / OpenCode-faithful)
  *
  * Entry point that:
- * 1. Resolves the AI provider (with auto-fallback)
+ * 1. Resolves the AI provider via AI SDK (with auto-fallback)
  * 2. Loads dynamic tools and MCP tools
  * 3. Injects skills into the system prompt
- * 4. Builds per-provider system prompt (OpenCode pattern)
+ * 4. Builds per-provider system prompt
  * 5. Auto-captures snapshot before agent loop
- * 6. Runs the ReAct loop with compaction support
- * 7. Delegates to processGeneration (the ReAct loop)
+ * 6. Runs the agent loop via AI SDK streamText()
  */
 
 import { SupabaseClient } from '@supabase/supabase-js';
-import { resolveProvider, PROVIDER_INFO, type AgentProvider } from './providers';
+import { resolveProvider, PROVIDER_INFO, type AgentProvider } from './ai-provider';
 import { buildSystemPrompt, MODE_CREDIT_MULTIPLIER, type GameMode } from './prompts';
 import { detectSkill } from './skills';
-import { processGeneration, type AgentResult } from './agents/loop';
+import { runAILoop, type AgentResult } from './ai-loop';
 import { SnapshotManager } from '../snapshot';
 import { SkillsManager } from '../skills';
 import { scanAndRegisterTools } from '../tools/dynamic';
 import { mcpManager } from '../mcp';
-import { CompactionEngine } from '../compaction';
 import { bus } from '../bus';
 import type { ToolResult, ToolFileData } from '@/types/agent';
 import type { ToolContext } from './tools';
@@ -83,8 +81,8 @@ export async function runAgentLoop(params: {
         agentType: 'build',
     });
 
-    // 1. Resolve provider with auto-fallback
-    const resolved = resolveProvider(params.provider ?? 'claude');
+    // 1. Resolve provider with auto-fallback (now uses AI SDK)
+    const resolved = resolveProvider((params.provider ?? 'claude') as AgentProvider);
     if (!resolved) {
         return {
             response: `No AI provider configured. Add at least one API key: ${Object.values(PROVIDER_INFO).map(p => `${p.label} (${p.envKey})`).join(', ')}.`,
@@ -94,8 +92,8 @@ export async function runAgentLoop(params: {
         };
     }
 
-    const { adapter, apiKey, provider: resolvedProvider } = resolved;
-    console.log(`[Orchestrator] provider=${resolvedProvider} model=${adapter.model}`);
+    const { model, provider: resolvedProvider } = resolved;
+    console.log(`[Orchestrator] provider=${resolvedProvider} model=${PROVIDER_INFO[resolvedProvider].modelId} (AI SDK)`);
 
     // 2. Fetch project state and conversation history in parallel
     const [{ data: files }, { data: history }] = await Promise.all([
@@ -117,7 +115,7 @@ export async function runAgentLoop(params: {
         .map(h => `${h.role}: ${(h.content as string).slice(0, 300)}`)
         .join('\n');
 
-    // 3. Build per-provider system prompt (OpenCode pattern)
+    // 3. Build per-provider system prompt
     let systemPrompt = buildSystemPrompt(fileList, conversationHistory, gameMode, resolvedProvider);
 
     // 4. Inject active skills into system prompt
@@ -180,28 +178,38 @@ export async function runAgentLoop(params: {
                 });
             }
 
-            // Tell the LLM what was already created — ask for a brief summary, not more tools
             const summary = skillResults
                 .map((r, i) => `${i + 1}. ${r.tool}: ${r.success ? '✓' : '✗'} ${r.description}${r.filesModified.length > 0 ? ` → ${r.filesModified.join(', ')}` : ''}`)
                 .join('\n');
             userMessage = `[SKILL EXECUTED: ${skillMatch.skill.name}]\nThe following files were already created:\n${summary}\n\nProvide a brief summary of what was built. If the user asked for something specific that the skill didn't cover, add 1-2 extra tool calls. Otherwise just summarize.\n\nUser request: ${message}`;
         } else {
-            // Non-mandatory: just hint
             userMessage = `[SKILL HINT: ${skillMatch.skill.name}]\nRecommended tool execution order:\n${steps.map((s, i) => `${i + 1}. ${s.tool}(${JSON.stringify(s.input)})`).join('\n')}\n\nUser request: ${message}`;
         }
     }
 
-    // Track if mandatory skill already created files
     const mandatorySkillRan = skillMatch?.skill.mandatory && skillResults.length > 0;
 
-    // 8. Auto-capture snapshot before LLM loop (OpenCode snapshot pattern)
+    // 8. Auto-capture snapshot before LLM loop
     const snapshotMgr = new SnapshotManager(supabase, projectId);
     const snapshotId = await snapshotMgr.capture(`pre-agent-${Date.now()}`).catch(() => null);
 
-    // 9. Run the agent loop
-    const result = await processGeneration({
-        adapter,
-        config: { apiKey, model: adapter.model, maxTokens: 4096 },
+    // 9. Build conversation history as AI SDK messages
+    const historyMessages: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+    if (history?.length) {
+        for (const h of history) {
+            const role = h.role as string;
+            if (role === 'user' || role === 'assistant') {
+                historyMessages.push({
+                    role: role as 'user' | 'assistant',
+                    content: (h.content as string).slice(0, 2000), // Truncate long history entries
+                });
+            }
+        }
+    }
+
+    // 10. Run the AI SDK agent loop
+    const result = await runAILoop({
+        model,
         systemPrompt,
         userMessage,
         agentType: 'build',
@@ -213,12 +221,12 @@ export async function runAgentLoop(params: {
             onReasoning: params.onReasoning,
             onText: params.onText,
         },
-        // If mandatory skill already created files, don't force more tools and limit iterations
+        historyMessages,
         skipForceFirstTool: mandatorySkillRan,
         maxIterations: mandatorySkillRan ? 5 : undefined,
     });
 
-    // 10. Emit agent completion event
+    // 11. Emit agent completion event
     bus.emit('agent.complete', {
         sessionId: params.conversationId,
         response: result.response,
@@ -226,7 +234,7 @@ export async function runAgentLoop(params: {
         iterations: result.iterations,
     });
 
-    // 11. Post-run: check if snapshot diff shows changes worth noting
+    // 12. Post-run: check if snapshot diff shows changes
     if (snapshotId) {
         try {
             const diffs = await snapshotMgr.diff(snapshotId);

@@ -53,3 +53,4 @@ next-env.d.ts
 emsdk/
 /engine/
 .env*.local
+opencode-fork/
