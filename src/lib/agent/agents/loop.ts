@@ -47,6 +47,10 @@ export interface LoopParams {
     toolCtx: ToolContext;
     callbacks: LoopCallbacks;
     historyMessages?: ProviderMessage[];
+    /** Override: skip forceFirstTool even if agent def says so (e.g. skill already ran) */
+    skipForceFirstTool?: boolean;
+    /** Max iterations override (default from agent def) */
+    maxIterations?: number;
 }
 
 /**
@@ -95,27 +99,31 @@ export async function processGeneration(params: LoopParams): Promise<AgentResult
     const recentCalls: Array<{ name: string; input: Record<string, unknown> }> = [];
     let totalTokens = 0;
     let iterations = 0;
+    let earlyExit = false;
+    let earlyExitText: string | null = null;
+    const maxIter = params.maxIterations ?? agentDef.maxIterations;
+    const shouldForceFirst = agentDef.forceFirstTool && !params.skipForceFirstTool;
 
-    for (let i = 0; i < agentDef.maxIterations; i++) {
+    for (let i = 0; i < maxIter; i++) {
         iterations = i + 1;
         callbacks.onIteration?.(iterations);
         bus.emit('iteration.start', { iteration: iterations });
 
         // On last iteration, tell the LLM to wrap up (OpenCode max-steps pattern)
-        if (i === agentDef.maxIterations - 1) {
+        if (i === maxIter - 1) {
             messages.push({
                 role: 'user',
-                content: `[SYSTEM] You have reached the maximum number of steps (${agentDef.maxIterations}). Please provide a summary of what you accomplished and what remains to be done. Do not make any more tool calls.`,
+                content: `[SYSTEM] You have reached the maximum number of steps (${maxIter}). Please provide a summary of what you accomplished and what remains to be done. Do not make any more tool calls.`,
             });
         }
 
-        const toolChoice = (i === 0 && agentDef.forceFirstTool) ? 'required' : 'auto';
-        console.log(`[Agent] iter=${i + 1}/${agentDef.maxIterations} toolChoice=${toolChoice} tools=${i === agentDef.maxIterations - 1 ? 0 : tools.length}`);
+        const toolChoice = (i === 0 && shouldForceFirst) ? 'required' : 'auto';
+        console.log(`[Agent] iter=${i + 1}/${maxIter} toolChoice=${toolChoice} tools=${i === maxIter - 1 ? 0 : tools.length}`);
 
         const response = await adapter.chat(
             config,
             messages,
-            i === agentDef.maxIterations - 1 ? [] : tools, // No tools on last iteration
+            i === maxIter - 1 ? [] : tools, // No tools on last iteration
             toolChoice,
         );
 
@@ -143,7 +151,7 @@ export async function processGeneration(params: LoopParams): Promise<AgentResult
 
         // If no tool calls → either done or needs a nudge
         if (response.toolCalls.length === 0 || response.finishReason === 'stop' || response.finishReason === 'length') {
-            // If the LLM returned empty on the first iteration, nudge it to use tools
+            // If the LLM returned empty on the first iteration AND no prior tools ran, nudge it
             if (i === 0 && !response.content && !response.reasoning && allToolCalls.length === 0) {
                 console.warn('[Agent] Empty first response — nudging LLM to use tools');
                 messages.push({
@@ -152,12 +160,21 @@ export async function processGeneration(params: LoopParams): Promise<AgentResult
                 });
                 continue;
             }
+            console.log(`[Agent] Exiting loop: iter=${i + 1} toolCalls=${allToolCalls.length} hasContent=${!!response.content}`);
             return {
                 response: response.content || response.reasoning || 'Done.',
                 toolCalls: allToolCalls,
                 totalTokens,
                 iterations,
             };
+        }
+
+        // Early exit: if we already have 3+ tool calls and LLM gave text with more tools,
+        // execute these tools but then stop — prevents endless enhancement loop
+        if (allToolCalls.length >= 3 && response.content && response.toolCalls.length > 0) {
+            console.log(`[Agent] Early exit after this iteration: ${allToolCalls.length} tools already done, LLM gave text + tools`);
+            earlyExit = true;
+            earlyExitText = response.content;
         }
 
         // Execute each tool call with doom loop detection
@@ -222,6 +239,17 @@ export async function processGeneration(params: LoopParams): Promise<AgentResult
                 content: resultContent,
                 toolCallId: tc.id,
             });
+        }
+
+        // If early exit was triggered, stop the loop now
+        if (earlyExit) {
+            console.log(`[Agent] Early exit: returning with ${allToolCalls.length} tool calls`);
+            return {
+                response: earlyExitText || response.content || response.reasoning || 'Done.',
+                toolCalls: allToolCalls,
+                totalTokens,
+                iterations,
+            };
         }
     }
 

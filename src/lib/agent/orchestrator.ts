@@ -178,16 +178,19 @@ export async function runAgentLoop(params: {
                 });
             }
 
-            // Tell the LLM what was already created so it can enhance
+            // Tell the LLM what was already created — ask for a brief summary, not more tools
             const summary = skillResults
                 .map((r, i) => `${i + 1}. ${r.tool}: ${r.success ? '✓' : '✗'} ${r.description}${r.filesModified.length > 0 ? ` → ${r.filesModified.join(', ')}` : ''}`)
                 .join('\n');
-            userMessage = `[SKILL EXECUTED: ${skillMatch.skill.name}]\nThe following files were already created automatically:\n${summary}\n\nNow enhance this game based on the user's request. Add game-specific logic, enemies, mechanics, or whatever the game needs. Do NOT recreate project.axiom or the main scene — they already exist.\n\nUser request: ${message}`;
+            userMessage = `[SKILL EXECUTED: ${skillMatch.skill.name}]\nThe following files were already created:\n${summary}\n\nProvide a brief summary of what was built. If the user asked for something specific that the skill didn't cover, add 1-2 extra tool calls. Otherwise just summarize.\n\nUser request: ${message}`;
         } else {
             // Non-mandatory: just hint
             userMessage = `[SKILL HINT: ${skillMatch.skill.name}]\nRecommended tool execution order:\n${steps.map((s, i) => `${i + 1}. ${s.tool}(${JSON.stringify(s.input)})`).join('\n')}\n\nUser request: ${message}`;
         }
     }
+
+    // Track if mandatory skill already created files
+    const mandatorySkillRan = skillMatch?.skill.mandatory && skillResults.length > 0;
 
     // 8. Auto-capture snapshot before LLM loop (OpenCode snapshot pattern)
     const snapshotMgr = new SnapshotManager(supabase, projectId);
@@ -208,6 +211,9 @@ export async function runAgentLoop(params: {
             onReasoning: params.onReasoning,
             onText: params.onText,
         },
+        // If mandatory skill already created files, don't force more tools and limit iterations
+        skipForceFirstTool: mandatorySkillRan,
+        maxIterations: mandatorySkillRan ? 5 : undefined,
     });
 
     // 10. Emit agent completion event
