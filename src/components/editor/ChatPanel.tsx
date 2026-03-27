@@ -10,7 +10,7 @@ type AgentProvider = 'claude' | 'gpt' | 'kimi';
 const PROVIDERS: Record<AgentProvider, { label: string; color: string; bg: string; border: string }> = {
     claude: { label: 'Claude Sonnet 4.6', color: 'text-violet-300', bg: 'bg-violet-500/20', border: 'border-violet-500/30' },
     gpt: { label: 'GPT-4o', color: 'text-green-300', bg: 'bg-green-500/20', border: 'border-green-500/30' },
-    kimi: { label: 'Moonshot 128K', color: 'text-blue-300', bg: 'bg-blue-500/20', border: 'border-blue-500/30' },
+    kimi: { label: 'Kimi K2.5', color: 'text-blue-300', bg: 'bg-blue-500/20', border: 'border-blue-500/30' },
 };
 
 type GameMode = '2d' | '3d';
