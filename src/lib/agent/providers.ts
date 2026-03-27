@@ -73,6 +73,31 @@ export interface ChatProvider {
     ): unknown[];
 }
 
+// ── Retry Helper ────────────────────────────────────────────────────
+
+const MAX_RETRIES = 5;
+const BASE_DELAY_MS = 2000;
+
+async function withRetry<T>(
+    label: string,
+    fn: () => Promise<T>,
+    isRetryable: (err: unknown) => boolean = () => false,
+): Promise<T> {
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+        try {
+            return await fn();
+        } catch (err) {
+            lastErr = err;
+            if (!isRetryable(err) || attempt === MAX_RETRIES - 1) throw err;
+            const delay = BASE_DELAY_MS * Math.pow(2, attempt); // 2s, 4s, 8s, 16s, 32s
+            console.warn(`[${label}] Retryable error (attempt ${attempt + 1}/${MAX_RETRIES}), retrying in ${delay}ms:`, err instanceof Error ? err.message : err);
+            await new Promise(r => setTimeout(r, delay));
+        }
+    }
+    throw lastErr;
+}
+
 // ── Provider Info ────────────────────────────────────────────────────
 
 export const PROVIDERS: Record<ProviderId, ProviderConfig> = {
@@ -151,47 +176,52 @@ class ClaudeProvider implements ChatProvider {
             input_schema: t.parameters as Anthropic.Tool.InputSchema,
         }));
 
-        const stream = this.client.messages.stream({
-            model: this.modelId,
-            max_tokens: params.maxTokens,
-            temperature: params.temperature,
-            system: params.system,
-            messages: params.messages,
-            tools: anthropicTools.length > 0 ? anthropicTools : undefined,
-            tool_choice: params.forceToolUse && anthropicTools.length > 0
-                ? { type: 'any' }
-                : undefined,
-        });
+        return withRetry('claude', async () => {
+            const stream = this.client.messages.stream({
+                model: this.modelId,
+                max_tokens: params.maxTokens,
+                temperature: params.temperature,
+                system: params.system,
+                messages: params.messages,
+                tools: anthropicTools.length > 0 ? anthropicTools : undefined,
+                tool_choice: params.forceToolUse && anthropicTools.length > 0
+                    ? { type: 'any' }
+                    : undefined,
+            });
 
-        let text = '';
-        stream.on('text', (delta) => {
-            text += delta;
-            params.callbacks.onText?.(delta);
-        });
+            let text = '';
+            stream.on('text', (delta) => {
+                text += delta;
+                params.callbacks.onText?.(delta);
+            });
 
-        const finalMessage = await stream.finalMessage();
+            const finalMessage = await stream.finalMessage();
 
-        // Extract tool calls from the final message
-        const toolCalls: ToolCall[] = [];
-        for (const block of finalMessage.content) {
-            if (block.type === 'tool_use') {
-                toolCalls.push({
-                    id: block.id,
-                    name: block.name,
-                    input: block.input as Record<string, unknown>,
-                });
+            const toolCalls: ToolCall[] = [];
+            for (const block of finalMessage.content) {
+                if (block.type === 'tool_use') {
+                    toolCalls.push({
+                        id: block.id,
+                        name: block.name,
+                        input: block.input as Record<string, unknown>,
+                    });
+                }
             }
-        }
 
-        return {
-            text,
-            toolCalls,
-            done: finalMessage.stop_reason === 'end_turn' || finalMessage.stop_reason === 'max_tokens',
-            usage: {
-                inputTokens: finalMessage.usage?.input_tokens ?? 0,
-                outputTokens: finalMessage.usage?.output_tokens ?? 0,
-            },
-        };
+            return {
+                text,
+                toolCalls,
+                done: finalMessage.stop_reason === 'end_turn' || finalMessage.stop_reason === 'max_tokens',
+                usage: {
+                    inputTokens: finalMessage.usage?.input_tokens ?? 0,
+                    outputTokens: finalMessage.usage?.output_tokens ?? 0,
+                },
+            };
+        }, (err) => {
+            // Retry on 429 (rate limit) and 5xx (server errors)
+            const msg = err instanceof Error ? err.message : String(err);
+            return msg.includes('429') || msg.includes('overloaded') || msg.includes('529') || msg.includes('500');
+        });
     }
 }
 
@@ -304,22 +334,26 @@ class OpenAICompatProvider implements ChatProvider {
             }
         }
 
-        const response = await fetch(`${this.baseUrl}/chat/completions`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${this.apiKey}`,
-            },
-            body: JSON.stringify(body),
+        return withRetry(this.id, async () => {
+            const response = await fetch(`${this.baseUrl}/chat/completions`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${this.apiKey}`,
+                },
+                body: JSON.stringify(body),
+            });
+
+            if (!response.ok) {
+                const errBody = await response.text();
+                throw new Error(`${this.id} API error (${response.status}): ${errBody}`);
+            }
+
+            return this.parseSSEStream(response, params.callbacks);
+        }, (err) => {
+            const msg = err instanceof Error ? err.message : String(err);
+            return msg.includes('429') || msg.includes('overloaded') || msg.includes('500');
         });
-
-        if (!response.ok) {
-            const errBody = await response.text();
-            throw new Error(`${this.id} API error (${response.status}): ${errBody}`);
-        }
-
-        // Parse SSE stream
-        return this.parseSSEStream(response, params.callbacks);
     }
 
     private async parseSSEStream(

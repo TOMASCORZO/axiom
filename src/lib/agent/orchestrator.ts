@@ -111,12 +111,9 @@ export async function runAgentLoop(params: {
     ]);
 
     const fileList = (files ?? []).map(f => `  ${f.path} (${f.content_type}, ${f.size_bytes ?? 0}B)`).join('\n');
-    const conversationHistory = (history ?? [])
-        .map(h => `${h.role}: ${(h.content as string).slice(0, 300)}`)
-        .join('\n');
 
-    // 3. Build per-provider system prompt
-    let systemPrompt = buildSystemPrompt(fileList, conversationHistory, gameMode, config.id);
+    // 3. Build per-provider system prompt (history is sent as messages, not duplicated here)
+    let systemPrompt = buildSystemPrompt(fileList, '', gameMode, config.id);
 
     // 4. Inject active skills into system prompt
     try {

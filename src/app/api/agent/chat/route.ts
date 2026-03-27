@@ -22,7 +22,7 @@ export async function POST(request: NextRequest) {
         const body = await request.json();
         const { project_id, message, conversation_id, game_mode, provider: rawProvider } = body;
         const gameMode: GameMode = game_mode === '3d' ? '3d' : '2d';
-        const provider: AgentProvider = ['claude', 'gpt', 'kimi', 'deepseek', 'gemini'].includes(rawProvider) ? rawProvider : 'claude';
+        const provider: AgentProvider = ['claude', 'gpt', 'kimi'].includes(rawProvider) ? rawProvider : 'claude';
 
         if (!project_id || !message) {
             return NextResponse.json(
