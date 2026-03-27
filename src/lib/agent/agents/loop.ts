@@ -31,7 +31,7 @@ export interface AgentResult {
 }
 
 export interface LoopCallbacks {
-    onToolStart?: (toolName: string, input: Record<string, unknown>) => void;
+    onToolStart?: (toolName: string, input: Record<string, unknown>, callId: string) => void;
     onToolResult?: (toolName: string, result: ToolResult) => void;
     onIteration?: (iteration: number) => void;
     onReasoning?: (reasoning: string) => void;
@@ -150,7 +150,9 @@ export async function processGeneration(params: LoopParams): Promise<AgentResult
         messages.push(assistantMsg);
 
         // If no tool calls → either done or needs a nudge
-        if (response.toolCalls.length === 0 || response.finishReason === 'stop' || response.finishReason === 'length') {
+        // Note: do NOT check finishReason here — some providers (Claude) return 'stop'
+        // even when tool calls are present alongside text content.
+        if (response.toolCalls.length === 0) {
             // If the LLM returned empty on the first iteration AND no prior tools ran, nudge it
             if (i === 0 && !response.content && !response.reasoning && allToolCalls.length === 0) {
                 console.warn('[Agent] Empty first response — nudging LLM to use tools');
@@ -159,6 +161,10 @@ export async function processGeneration(params: LoopParams): Promise<AgentResult
                     content: '[SYSTEM] You returned an empty response. You MUST use your tools to build the game. Start by calling create_project_config, then create_scene, then write_game_logic. Do NOT respond with text only.',
                 });
                 continue;
+            }
+            // Also exit on 'length' finishReason (token limit hit)
+            if (response.finishReason === 'length') {
+                console.log(`[Agent] Exiting loop: finishReason=length iter=${i + 1}`);
             }
             console.log(`[Agent] Exiting loop: iter=${i + 1} toolCalls=${allToolCalls.length} hasContent=${!!response.content}`);
             return {
@@ -202,7 +208,7 @@ export async function processGeneration(params: LoopParams): Promise<AgentResult
                 continue;
             }
 
-            callbacks.onToolStart?.(tc.name, toolInput);
+            callbacks.onToolStart?.(tc.name, toolInput, tc.id);
             bus.emit('tool.start', { toolName: tc.name, input: toolInput, callId: tc.id });
 
             const result = await executeTool(tc.name, toolInput, toolCtx);

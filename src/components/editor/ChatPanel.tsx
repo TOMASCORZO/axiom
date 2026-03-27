@@ -287,6 +287,7 @@ export default function ChatPanel({ projectId }: ChatPanelProps) {
         const assistantId = crypto.randomUUID();
         const toolCalls: ChatMessage['toolCalls'] = [];
         let reasoningText = '';
+        let accumulatedContent = '';
 
         addMessage({
             id: assistantId,
@@ -364,8 +365,14 @@ export default function ChatPanel({ projectId }: ChatPanelProps) {
                                     });
                                     break;
                                 case 'text':
+                                    // Accumulate text from each iteration instead of replacing
+                                    if (accumulatedContent) {
+                                        accumulatedContent += '\n\n' + data.text;
+                                    } else {
+                                        accumulatedContent = data.text;
+                                    }
                                     updateMessage(assistantId, {
-                                        content: data.text,
+                                        content: accumulatedContent,
                                     });
                                     break;
                                 case 'tool_start':
@@ -381,12 +388,14 @@ export default function ChatPanel({ projectId }: ChatPanelProps) {
                                     });
                                     break;
                                 case 'tool_result': {
-                                    const last = toolCalls![toolCalls!.length - 1];
-                                    if (last && last.name === data.name) {
-                                        last.status = data.status;
-                                        last.output = data.output;
-                                        last.error = data.error;
-                                        last.filesModified = data.filesModified;
+                                    // Match by callId (data.id) for correct tool result pairing
+                                    const matchIdx = toolCalls!.findIndex(tc => tc.id === data.id);
+                                    const matched = matchIdx !== -1 ? toolCalls![matchIdx] : toolCalls![toolCalls!.length - 1];
+                                    if (matched) {
+                                        matched.status = data.status;
+                                        matched.output = data.output;
+                                        matched.error = data.error;
+                                        matched.filesModified = data.filesModified;
                                     }
                                     updateMessage(assistantId, {
                                         toolCalls: [...toolCalls!],
@@ -398,7 +407,8 @@ export default function ChatPanel({ projectId }: ChatPanelProps) {
                                     break;
                                 }
                                 case 'done': {
-                                    let content = data.response ?? 'No response';
+                                    // Use accumulated content from iterations, fall back to final response
+                                    let content = accumulatedContent || data.response || 'No response';
                                     if (data.meta) {
                                         const meta = data.meta;
                                         const modeBadge = gameMode === '3d' ? '3D' : '2D';

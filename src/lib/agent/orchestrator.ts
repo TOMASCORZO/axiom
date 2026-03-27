@@ -66,7 +66,7 @@ export async function runAgentLoop(params: {
     conversationId: string;
     gameMode: GameMode;
     provider?: AgentProvider;
-    onToolStart?: (toolName: string, input: Record<string, unknown>) => void;
+    onToolStart?: (toolName: string, input: Record<string, unknown>, callId: string) => void;
     onToolResult?: (toolName: string, result: ToolResult) => void;
     onIteration?: (iteration: number) => void;
     onReasoning?: (reasoning: string) => void;
@@ -166,9 +166,11 @@ export async function runAgentLoop(params: {
         if (skillMatch.skill.mandatory) {
             // Execute ALL steps before LLM gets control
             for (const step of steps) {
-                params.onToolStart?.(step.tool, step.input);
+                const stepCallId = `skill_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+                params.onToolStart?.(step.tool, step.input, stepCallId);
                 toolCtx.createdFiles = [];
                 const result = await executeTool(step.tool, step.input, toolCtx);
+                result.callId = stepCallId;
                 params.onToolResult?.(step.tool, result);
                 skillResults.push({
                     tool: step.tool,

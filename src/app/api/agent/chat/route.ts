@@ -91,15 +91,16 @@ export async function POST(request: NextRequest) {
                         conversationId: convId,
                         gameMode,
                         provider,
-                        onToolStart: (toolName, input) => {
+                        onToolStart: (toolName, input, callId) => {
                             sendEvent('tool_start', {
-                                id: uuid(),
+                                id: callId,
                                 name: toolName,
                                 input,
                             });
                         },
                         onToolResult: (toolName, result) => {
                             sendEvent('tool_result', {
+                                id: result.callId,
                                 name: toolName,
                                 status: result.success ? 'completed' : 'failed',
                                 output: result.output,
