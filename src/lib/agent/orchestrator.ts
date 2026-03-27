@@ -1,20 +1,20 @@
 /**
- * Axiom Agent — Orchestrator (AI SDK / OpenCode-faithful)
+ * Axiom Agent — Orchestrator
  *
  * Entry point that:
- * 1. Resolves the AI provider via AI SDK (with auto-fallback)
+ * 1. Resolves the AI provider with auto-fallback
  * 2. Loads dynamic tools and MCP tools
  * 3. Injects skills into the system prompt
  * 4. Builds per-provider system prompt
  * 5. Auto-captures snapshot before agent loop
- * 6. Runs the agent loop via AI SDK streamText()
+ * 6. Runs the manual agentic loop (no Vercel AI SDK)
  */
 
 import { SupabaseClient } from '@supabase/supabase-js';
-import { resolveProvider, PROVIDER_INFO, type AgentProvider } from './ai-provider';
+import { resolveProvider, PROVIDERS, type ProviderId } from './providers';
 import { buildSystemPrompt, MODE_CREDIT_MULTIPLIER, type GameMode } from './prompts';
 import { detectSkill } from './skills';
-import { runAILoop, type AgentResult } from './ai-loop';
+import { runAgentLoop as runLoop, type AgentResult } from './loop';
 import { SnapshotManager } from '../snapshot';
 import { SkillsManager } from '../skills';
 import { scanAndRegisterTools } from '../tools/dynamic';
@@ -27,8 +27,11 @@ import { executeTool } from './tools';
 // Ensure all tools are registered
 import './tools';
 
-export { MODE_CREDIT_MULTIPLIER, PROVIDER_INFO };
-export type { GameMode, AgentProvider, AgentResult };
+// Re-export for route.ts compatibility
+export { MODE_CREDIT_MULTIPLIER };
+export const PROVIDER_INFO = PROVIDERS;
+export type AgentProvider = ProviderId;
+export type { GameMode, AgentResult };
 
 // ── Initialization (runs once on first import) ─────────────────────
 
@@ -38,7 +41,6 @@ async function initializeSubsystems() {
     if (_initialized) return;
     _initialized = true;
 
-    // Load custom tools from .axiom/tools/ and ~/.axiom/tools/
     try {
         const count = await scanAndRegisterTools();
         if (count > 0) {
@@ -72,28 +74,26 @@ export async function runAgentLoop(params: {
 }): Promise<AgentResult> {
     const { message, projectId, userId, supabase, gameMode } = params;
 
-    // Initialize subsystems on first call
     await initializeSubsystems();
 
-    // Emit agent start event
     bus.emit('agent.start', {
         sessionId: params.conversationId,
         agentType: 'build',
     });
 
-    // 1. Resolve provider with auto-fallback (now uses AI SDK)
-    const resolved = resolveProvider((params.provider ?? 'claude') as AgentProvider);
+    // 1. Resolve provider with auto-fallback
+    const resolved = resolveProvider((params.provider ?? 'claude') as ProviderId);
     if (!resolved) {
         return {
-            response: `No AI provider configured. Add at least one API key: ${Object.values(PROVIDER_INFO).map(p => `${p.label} (${p.envKey})`).join(', ')}.`,
+            response: `No AI provider configured. Add at least one API key: ${Object.values(PROVIDERS).map(p => `${p.label} (${p.envKey})`).join(', ')}.`,
             toolCalls: [],
             totalTokens: 0,
             iterations: 0,
         };
     }
 
-    const { model, provider: resolvedProvider } = resolved;
-    console.log(`[Orchestrator] provider=${resolvedProvider} model=${PROVIDER_INFO[resolvedProvider].modelId} (AI SDK)`);
+    const { provider, config } = resolved;
+    console.log(`[Orchestrator] provider=${config.id} model=${config.modelId}`);
 
     // 2. Fetch project state and conversation history in parallel
     const [{ data: files }, { data: history }] = await Promise.all([
@@ -116,7 +116,7 @@ export async function runAgentLoop(params: {
         .join('\n');
 
     // 3. Build per-provider system prompt
-    let systemPrompt = buildSystemPrompt(fileList, conversationHistory, gameMode, resolvedProvider);
+    let systemPrompt = buildSystemPrompt(fileList, conversationHistory, gameMode, config.id);
 
     // 4. Inject active skills into system prompt
     try {
@@ -139,7 +139,7 @@ export async function runAgentLoop(params: {
         }
     } catch { /* MCP not configured */ }
 
-    // 6. Build tool context (needed before skill execution)
+    // 6. Build tool context
     const toolCtx: ToolContext = {
         projectId,
         userId,
@@ -147,7 +147,7 @@ export async function runAgentLoop(params: {
         createdFiles: [] as ToolFileData[],
     };
 
-    // 7. Detect Godogen-style skill and execute mandatory steps
+    // 7. Detect skill and execute mandatory steps
     const skillMatch = detectSkill(message);
     console.log(`[Orchestrator] skill=${skillMatch ? skillMatch.skill.name : 'none'} mandatory=${skillMatch?.skill.mandatory ?? false}`);
     let userMessage = message;
@@ -162,7 +162,6 @@ export async function runAgentLoop(params: {
         const steps = skillMatch.skill.steps(skillParams);
 
         if (skillMatch.skill.mandatory) {
-            // Execute ALL steps before LLM gets control
             for (const step of steps) {
                 const stepCallId = `skill_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
                 params.onToolStart?.(step.tool, step.input, stepCallId);
@@ -189,11 +188,11 @@ export async function runAgentLoop(params: {
 
     const mandatorySkillRan = skillMatch?.skill.mandatory && skillResults.length > 0;
 
-    // 8. Auto-capture snapshot before LLM loop
+    // 8. Auto-capture snapshot
     const snapshotMgr = new SnapshotManager(supabase, projectId);
     const snapshotId = await snapshotMgr.capture(`pre-agent-${Date.now()}`).catch(() => null);
 
-    // 9. Build conversation history as AI SDK messages
+    // 9. Build conversation history
     const historyMessages: Array<{ role: 'user' | 'assistant'; content: string }> = [];
     if (history?.length) {
         for (const h of history) {
@@ -201,15 +200,15 @@ export async function runAgentLoop(params: {
             if (role === 'user' || role === 'assistant') {
                 historyMessages.push({
                     role: role as 'user' | 'assistant',
-                    content: (h.content as string).slice(0, 2000), // Truncate long history entries
+                    content: (h.content as string).slice(0, 2000),
                 });
             }
         }
     }
 
-    // 10. Run the AI SDK agent loop
-    const result = await runAILoop({
-        model,
+    // 10. Run the agent loop
+    const result = await runLoop({
+        provider,
         systemPrompt,
         userMessage,
         agentType: 'build',
@@ -224,7 +223,6 @@ export async function runAgentLoop(params: {
         historyMessages,
         skipForceFirstTool: mandatorySkillRan,
         maxIterations: mandatorySkillRan ? 5 : undefined,
-        provider: resolvedProvider,
     });
 
     // 11. Emit agent completion event
@@ -235,7 +233,7 @@ export async function runAgentLoop(params: {
         iterations: result.iterations,
     });
 
-    // 12. Post-run: check if snapshot diff shows changes
+    // 12. Post-run snapshot diff
     if (snapshotId) {
         try {
             const diffs = await snapshotMgr.diff(snapshotId);
