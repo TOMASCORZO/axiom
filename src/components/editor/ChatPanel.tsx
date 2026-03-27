@@ -5,14 +5,12 @@ import { useEditorStore } from '@/lib/store';
 import { Send, Bot, User, Wrench, Loader2, Sparkles, AlertCircle, Box, Square, Coins, ChevronDown, Brain, ChevronRight } from 'lucide-react';
 import type { ChatMessage } from '@/types/agent';
 
-type AgentProvider = 'claude' | 'gpt' | 'kimi' | 'deepseek' | 'gemini';
+type AgentProvider = 'claude' | 'gpt' | 'kimi';
 
 const PROVIDERS: Record<AgentProvider, { label: string; color: string; bg: string; border: string }> = {
-    claude: { label: 'Claude Sonnet 4', color: 'text-violet-300', bg: 'bg-violet-500/20', border: 'border-violet-500/30' },
-    gpt: { label: 'GPT-5.4', color: 'text-green-300', bg: 'bg-green-500/20', border: 'border-green-500/30' },
-    kimi: { label: 'Kimi K2.5', color: 'text-blue-300', bg: 'bg-blue-500/20', border: 'border-blue-500/30' },
-    deepseek: { label: 'DeepSeek R1', color: 'text-cyan-300', bg: 'bg-cyan-500/20', border: 'border-cyan-500/30' },
-    gemini: { label: 'Gemini 2.5 Pro', color: 'text-amber-300', bg: 'bg-amber-500/20', border: 'border-amber-500/30' },
+    claude: { label: 'Claude Sonnet 4.6', color: 'text-violet-300', bg: 'bg-violet-500/20', border: 'border-violet-500/30' },
+    gpt: { label: 'GPT-4o', color: 'text-green-300', bg: 'bg-green-500/20', border: 'border-green-500/30' },
+    kimi: { label: 'Moonshot 128K', color: 'text-blue-300', bg: 'bg-blue-500/20', border: 'border-blue-500/30' },
 };
 
 type GameMode = '2d' | '3d';
@@ -217,7 +215,7 @@ interface ChatPanelProps {
 export default function ChatPanel({ projectId }: ChatPanelProps) {
     const [input, setInput] = useState('');
     const [gameMode, setGameMode] = useState<GameMode>('2d');
-    const [provider, setProvider] = useState<AgentProvider>('kimi');
+    const [provider, setProvider] = useState<AgentProvider>('claude');
     const [conversationId, setConversationId] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [showModeWarning, setShowModeWarning] = useState(false);
