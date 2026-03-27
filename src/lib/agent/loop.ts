@@ -17,6 +17,38 @@ import { AGENT_DEFS, type AgentType } from './agents/types';
 const DOOM_LOOP_THRESHOLD = 3;
 const MAX_TOOL_OUTPUT_LENGTH = 8000;
 
+/**
+ * Normalize shorthand tool parameters into a proper JSON Schema object.
+ * Tools define params as `{ name: { type, description, required } }` but
+ * Anthropic requires `{ type: "object", properties: {...}, required: [...] }`.
+ */
+function normalizeSchema(params: Record<string, unknown>): Record<string, unknown> {
+    // Already a proper JSON Schema
+    if (params.type === 'object' && params.properties) return params;
+
+    // Empty parameters
+    if (!params || Object.keys(params).length === 0) {
+        return { type: 'object', properties: {} };
+    }
+
+    const properties: Record<string, unknown> = {};
+    const required: string[] = [];
+
+    for (const [key, val] of Object.entries(params)) {
+        if (val && typeof val === 'object' && 'type' in (val as Record<string, unknown>)) {
+            const { required: isReq, ...rest } = val as Record<string, unknown>;
+            properties[key] = rest;
+            if (isReq) required.push(key);
+        } else {
+            properties[key] = val;
+        }
+    }
+
+    const schema: Record<string, unknown> = { type: 'object', properties };
+    if (required.length > 0) schema.required = required;
+    return schema;
+}
+
 // ── Public Types ─────────────────────────────────────────────────────
 
 export interface AgentResult {
@@ -60,12 +92,13 @@ export async function runAgentLoop(params: LoopParams): Promise<AgentResult> {
     const shouldForceFirst = agentDef.forceFirstTool && !params.skipForceFirstTool;
 
     // Build tool schemas for this agent type
+    // Normalize shorthand parameters into proper JSON Schema (required by Anthropic)
     const agentTools = getToolsForAgent(agentType);
     const filteredTools = agentTools.filter(t => !agentDef.deniedTools.includes(t.name));
     const toolSchemas: ToolSchema[] = filteredTools.map(t => ({
         name: t.name,
         description: t.description,
-        parameters: t.parameters,
+        parameters: normalizeSchema(t.parameters),
     }));
 
     const fullSystemPrompt = systemPrompt + '\n' + agentDef.systemSuffix;
