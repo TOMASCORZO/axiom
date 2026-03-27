@@ -46,7 +46,7 @@ export const AGENT_DEFS: Record<AgentType, AgentDef> = {
         type: 'build',
         name: 'Build',
         description: 'The default agent. Executes tools based on configured permissions.',
-        maxIterations: 25,
+        maxIterations: 10,
         deniedTools: [],
         systemSuffix: loadPrompt('build', '## Agent Mode: BUILD\nYou have FULL access to all tools. Always use tools to build — never respond with text only.'),
         forceFirstTool: true,

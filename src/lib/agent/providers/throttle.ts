@@ -24,11 +24,11 @@ const _state = new Map<string, ThrottleState>();
 
 /** Default intervals per provider (ms between requests) */
 const PROVIDER_INTERVALS: Record<string, number> = {
-    kimi: 8000,      // Moonshot: conservative, their servers overload easily
+    kimi: 3000,      // Moonshot: moderate (was 8s, too slow for agent loops)
     deepseek: 3000,  // DeepSeek: moderate
     gpt: 1500,       // OpenAI: generous limits
     claude: 1500,    // Anthropic: generous limits
-    gemini: 2000,    // Google: moderate
+    gemini: 1500,    // Google: generous limits
 };
 
 function getState(providerId: string): ThrottleState {

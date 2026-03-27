@@ -17,6 +17,7 @@ import { bus } from '../../bus';
 import { AGENT_DEFS, type AgentType } from './types';
 
 const DOOM_LOOP_THRESHOLD = 3;
+const MAX_NO_TEXT_ITERATIONS = 5; // Exit if LLM makes this many consecutive tool-only iterations with no text
 
 export interface AgentResult {
     response: string;
@@ -101,6 +102,7 @@ export async function processGeneration(params: LoopParams): Promise<AgentResult
     let iterations = 0;
     let earlyExit = false;
     let earlyExitText: string | null = null;
+    let consecutiveNoText = 0; // Track iterations where LLM gave tools but no text
     const maxIter = params.maxIterations ?? agentDef.maxIterations;
     const shouldForceFirst = agentDef.forceFirstTool && !params.skipForceFirstTool;
 
@@ -149,11 +151,10 @@ export async function processGeneration(params: LoopParams): Promise<AgentResult
         };
         messages.push(assistantMsg);
 
-        // If no tool calls → either done or needs a nudge
-        // Note: do NOT check finishReason here — some providers (Claude) return 'stop'
-        // even when tool calls are present alongside text content.
+        // ── Exit decision logic ──────────────────────────────────────
+
+        // No tool calls → done (or nudge on empty first response)
         if (response.toolCalls.length === 0) {
-            // If the LLM returned empty on the first iteration AND no prior tools ran, nudge it
             if (i === 0 && !response.content && !response.reasoning && allToolCalls.length === 0) {
                 console.warn('[Agent] Empty first response — nudging LLM to use tools');
                 messages.push({
@@ -162,11 +163,7 @@ export async function processGeneration(params: LoopParams): Promise<AgentResult
                 });
                 continue;
             }
-            // Also exit on 'length' finishReason (token limit hit)
-            if (response.finishReason === 'length') {
-                console.log(`[Agent] Exiting loop: finishReason=length iter=${i + 1}`);
-            }
-            console.log(`[Agent] Exiting loop: iter=${i + 1} toolCalls=${allToolCalls.length} hasContent=${!!response.content}`);
+            console.log(`[Agent] Exiting loop: no tool calls, iter=${i + 1} totalTools=${allToolCalls.length}`);
             return {
                 response: response.content || response.reasoning || 'Done.',
                 toolCalls: allToolCalls,
@@ -175,9 +172,29 @@ export async function processGeneration(params: LoopParams): Promise<AgentResult
             };
         }
 
-        // Early exit: if we already have 3+ tool calls and LLM gave text with more tools,
+        // finishReason === 'stop' but has tool calls → execute tools then EXIT
+        // (The LLM intended to finish but also included final tools)
+        if (response.finishReason === 'stop' && response.toolCalls.length > 0) {
+            console.log(`[Agent] finishReason=stop with ${response.toolCalls.length} tools — will exit after executing them`);
+            earlyExit = true;
+            earlyExitText = response.content;
+        }
+
+        // Track consecutive iterations without LLM text (spinning on tools only)
+        if (!response.content && !response.reasoning) {
+            consecutiveNoText++;
+            if (consecutiveNoText >= MAX_NO_TEXT_ITERATIONS) {
+                console.warn(`[Agent] ${consecutiveNoText} consecutive tool-only iterations — forcing exit`);
+                earlyExit = true;
+                earlyExitText = 'Agent completed tool execution.';
+            }
+        } else {
+            consecutiveNoText = 0;
+        }
+
+        // Early exit: if we already have 2+ tool call batches and LLM gave text + more tools,
         // execute these tools but then stop — prevents endless enhancement loop
-        if (allToolCalls.length >= 3 && response.content && response.toolCalls.length > 0) {
+        if (!earlyExit && allToolCalls.length >= 2 && response.content && response.toolCalls.length > 0) {
             console.log(`[Agent] Early exit after this iteration: ${allToolCalls.length} tools already done, LLM gave text + tools`);
             earlyExit = true;
             earlyExitText = response.content;
