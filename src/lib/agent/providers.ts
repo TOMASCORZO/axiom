@@ -36,6 +36,8 @@ export interface StepResult {
     toolCalls: ToolCall[];
     done: boolean;
     usage: { inputTokens: number; outputTokens: number };
+    /** Reasoning content from thinking models (kimi-k2.5). Must be preserved in multi-step. */
+    reasoningContent?: string;
 }
 
 export interface ChatCallbacks {
@@ -230,6 +232,7 @@ class ClaudeProvider implements ChatProvider {
 interface OpenAIMessage {
     role: 'system' | 'user' | 'assistant' | 'tool';
     content?: string | null;
+    reasoning_content?: string | null;
     tool_calls?: Array<{
         id: string;
         type: 'function';
@@ -268,11 +271,14 @@ class OpenAICompatProvider implements ChatProvider {
         stepResult: StepResult,
         toolResults: Array<{ callId: string; output: string }>,
     ): OpenAIMessage[] {
-        // Append assistant message with tool_calls
+        // Append assistant message with tool_calls + reasoning_content (required by kimi-k2.5)
         const assistantMsg: OpenAIMessage = {
             role: 'assistant',
             content: stepResult.text || null,
         };
+        if (stepResult.reasoningContent) {
+            assistantMsg.reasoning_content = stepResult.reasoningContent;
+        }
         if (stepResult.toolCalls.length > 0) {
             assistantMsg.tool_calls = stepResult.toolCalls.map(tc => ({
                 id: tc.id,
@@ -364,6 +370,7 @@ class OpenAICompatProvider implements ChatProvider {
         const decoder = new TextDecoder();
 
         let text = '';
+        let reasoningContent = '';
         const toolCallMap = new Map<number, { id: string; name: string; args: string }>();
         let inputTokens = 0;
         let outputTokens = 0;
@@ -402,6 +409,12 @@ class OpenAICompatProvider implements ChatProvider {
                 const delta = choice.delta;
                 if (!delta) continue;
 
+                // Reasoning content (kimi-k2.5 thinking model)
+                if (delta.reasoning_content) {
+                    reasoningContent += delta.reasoning_content;
+                    callbacks.onReasoning?.(delta.reasoning_content);
+                }
+
                 // Text content
                 if (delta.content) {
                     text += delta.content;
@@ -437,6 +450,7 @@ class OpenAICompatProvider implements ChatProvider {
             toolCalls,
             done: finishReason === 'stop' || finishReason === 'length',
             usage: { inputTokens, outputTokens },
+            reasoningContent: reasoningContent || undefined,
         };
     }
 }
