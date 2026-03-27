@@ -141,7 +141,8 @@ export async function runAILoop(params: AILoopParams): Promise<AgentResult> {
             },
 
             maxOutputTokens: 4096,
-            temperature: 0.3,
+            // kimi-k2.5 (thinking model) only accepts temperature=1
+            temperature: params.provider === 'kimi' ? 1 : 0.3,
 
             onError(event) {
                 const rootCause = getRootCause(event.error);
