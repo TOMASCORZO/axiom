@@ -121,7 +121,7 @@ export async function runAgentLoop(params: LoopParams): Promise<AgentResult> {
         callbacks.onIteration?.(stepCount);
         bus.emit('iteration.start', { iteration: stepCount });
 
-        const forceToolUse = shouldForceFirst && stepCount === 1;
+        const forceToolUse = shouldForceFirst && stepCount === 1 && provider.id !== 'kimi';
 
         console.log(`[Loop] Step ${stepCount}/${maxSteps} forceTools=${forceToolUse}`);
 
