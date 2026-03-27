@@ -45,21 +45,24 @@ export function createModel(provider: AgentProvider, apiKey: string): LanguageMo
         }
         case 'gpt': {
             const openai = createOpenAI({ apiKey });
-            return openai(info.modelId);
+            // Use .chat() to hit /chat/completions (default uses /responses)
+            return openai.chat(info.modelId);
         }
         case 'kimi': {
             const kimi = createOpenAI({
                 apiKey,
                 baseURL: 'https://api.moonshot.ai/v1',
             });
-            return kimi(info.modelId);
+            // Must use .chat() — Moonshot only supports /chat/completions, not /responses
+            return kimi.chat(info.modelId);
         }
         case 'deepseek': {
             const deepseek = createOpenAI({
                 apiKey,
                 baseURL: 'https://api.deepseek.com/v1',
             });
-            return deepseek(info.modelId);
+            // Must use .chat() — DeepSeek only supports /chat/completions, not /responses
+            return deepseek.chat(info.modelId);
         }
         case 'gemini': {
             const google = createGoogleGenerativeAI({ apiKey });
