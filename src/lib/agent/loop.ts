@@ -132,7 +132,7 @@ export async function runAgentLoop(params: LoopParams): Promise<AgentResult> {
                 messages,
                 tools: toolSchemas,
                 maxTokens: 4096,
-                temperature: 0.3,
+                temperature: provider.id === 'kimi' ? 1 : 0.3,
                 forceToolUse,
                 callbacks: {
                     onText: (text) => {
