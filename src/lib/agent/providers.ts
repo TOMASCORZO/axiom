@@ -101,7 +101,7 @@ async function withRetry<T>(
 // ── Provider Info ────────────────────────────────────────────────────
 
 export const PROVIDERS: Record<ProviderId, ProviderConfig> = {
-    claude: { id: 'claude', label: 'Claude Sonnet 4', modelId: 'claude-sonnet-4-20250514', envKey: 'ANTHROPIC_API_KEY' },
+    claude: { id: 'claude', label: 'Claude Sonnet 4.6', modelId: 'claude-sonnet-4-6', envKey: 'ANTHROPIC_API_KEY' },
     gpt: { id: 'gpt', label: 'GPT-4o', modelId: 'gpt-4o', envKey: 'OPENAI_API_KEY' },
     kimi: { id: 'kimi', label: 'Moonshot 128K', modelId: 'moonshot-v1-128k', envKey: 'MOONSHOT_API_KEY' },
 };
