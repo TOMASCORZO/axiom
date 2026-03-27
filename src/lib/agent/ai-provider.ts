@@ -24,7 +24,7 @@ export interface ProviderInfo {
 export const PROVIDER_INFO: Record<AgentProvider, ProviderInfo> = {
     claude: { id: 'claude', label: 'Claude Sonnet 4', modelId: 'claude-sonnet-4-20250514', color: 'violet', envKey: 'ANTHROPIC_API_KEY' },
     gpt: { id: 'gpt', label: 'GPT-5.4', modelId: 'gpt-5.4', color: 'green', envKey: 'OPENAI_API_KEY' },
-    kimi: { id: 'kimi', label: 'Kimi K2.5', modelId: 'kimi-k2.5', color: 'blue', envKey: 'MOONSHOT_API_KEY' },
+    kimi: { id: 'kimi', label: 'Moonshot 128K', modelId: 'moonshot-v1-128k', color: 'blue', envKey: 'MOONSHOT_API_KEY' },
     deepseek: { id: 'deepseek', label: 'DeepSeek R1', modelId: 'deepseek-reasoner', color: 'cyan', envKey: 'DEEPSEEK_API_KEY' },
     gemini: { id: 'gemini', label: 'Gemini 2.5 Pro', modelId: 'gemini-2.5-pro-preview-06-05', color: 'amber', envKey: 'GOOGLE_AI_API_KEY' },
 };

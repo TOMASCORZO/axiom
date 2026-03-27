@@ -71,10 +71,7 @@ export async function runAILoop(params: AILoopParams): Promise<AgentResult> {
     const { model, systemPrompt, userMessage, agentType, toolCtx, callbacks } = params;
     const agentDef = AGENT_DEFS[agentType];
     const maxSteps = params.maxIterations ?? agentDef.maxIterations;
-    // Only force toolChoice on providers known to support it
-    const TOOL_CHOICE_PROVIDERS = ['claude', 'gpt', 'gemini'];
-    const providerSupportsToolChoice = !params.provider || TOOL_CHOICE_PROVIDERS.includes(params.provider);
-    const shouldForceFirst = agentDef.forceFirstTool && !params.skipForceFirstTool && providerSupportsToolChoice;
+    const shouldForceFirst = agentDef.forceFirstTool && !params.skipForceFirstTool;
 
     const tools = buildToolSet(agentType, toolCtx, callbacks, agentDef.deniedTools);
 
@@ -141,8 +138,7 @@ export async function runAILoop(params: AILoopParams): Promise<AgentResult> {
             },
 
             maxOutputTokens: 4096,
-            // kimi-k2.5 (thinking model) only accepts temperature=1
-            temperature: params.provider === 'kimi' ? 1 : 0.3,
+            temperature: 0.3,
 
             onError(event) {
                 const rootCause = getRootCause(event.error);
