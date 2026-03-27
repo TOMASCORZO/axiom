@@ -12,7 +12,7 @@
  * - fullStream consumption (handles text AND tool-only responses)
  */
 
-import { streamText, stepCountIs } from 'ai';
+import { streamText, stepCountIs, NoOutputGeneratedError } from 'ai';
 import type { LanguageModel } from 'ai';
 import { buildToolSet, type ToolCallbacks } from './ai-tools';
 import type { ToolContext } from './tools/registry';
@@ -21,6 +21,19 @@ import { bus } from '../bus';
 import { AGENT_DEFS, type AgentType } from './agents/types';
 
 const DOOM_LOOP_THRESHOLD = 3;
+
+/** Extract the deepest cause from an error chain */
+function getRootCause(error: unknown): string {
+    const messages: string[] = [];
+    let current: unknown = error;
+    let depth = 0;
+    while (current instanceof Error && depth < 5) {
+        messages.push(`${current.constructor.name}: ${current.message}`);
+        current = current.cause;
+        depth++;
+    }
+    return messages.join(' → ');
+}
 
 export interface AgentResult {
     response: string;
@@ -50,13 +63,18 @@ export interface AILoopParams {
     historyMessages?: Array<{ role: 'user' | 'assistant'; content: string }>;
     skipForceFirstTool?: boolean;
     maxIterations?: number;
+    /** Provider ID — used to disable unsupported features (e.g. toolChoice for Kimi) */
+    provider?: string;
 }
 
 export async function runAILoop(params: AILoopParams): Promise<AgentResult> {
     const { model, systemPrompt, userMessage, agentType, toolCtx, callbacks } = params;
     const agentDef = AGENT_DEFS[agentType];
     const maxSteps = params.maxIterations ?? agentDef.maxIterations;
-    const shouldForceFirst = agentDef.forceFirstTool && !params.skipForceFirstTool;
+    // Only force toolChoice on providers known to support it
+    const TOOL_CHOICE_PROVIDERS = ['claude', 'gpt', 'gemini'];
+    const providerSupportsToolChoice = !params.provider || TOOL_CHOICE_PROVIDERS.includes(params.provider);
+    const shouldForceFirst = agentDef.forceFirstTool && !params.skipForceFirstTool && providerSupportsToolChoice;
 
     const tools = buildToolSet(agentType, toolCtx, callbacks, agentDef.deniedTools);
 
@@ -76,7 +94,10 @@ export async function runAILoop(params: AILoopParams): Promise<AgentResult> {
     const fullSystemPrompt = systemPrompt + '\n' + agentDef.systemSuffix;
     const toolCount = Object.keys(tools).length - 1; // minus 'invalid'
 
-    console.log(`[AI Loop] Starting: agent=${agentType} maxSteps=${maxSteps} forceFirst=${shouldForceFirst} tools=${toolCount}`);
+    // Track stream-level errors so we can surface them if NoOutputGeneratedError fires
+    const streamErrors: string[] = [];
+
+    console.log(`[AI Loop] Starting: agent=${agentType} provider=${params.provider ?? 'unknown'} maxSteps=${maxSteps} forceFirst=${shouldForceFirst} tools=${toolCount}`);
 
     try {
         const result = streamText({
@@ -123,7 +144,9 @@ export async function runAILoop(params: AILoopParams): Promise<AgentResult> {
             temperature: 0.3,
 
             onError(event) {
-                console.error('[AI Loop] Stream error:', event.error);
+                const rootCause = getRootCause(event.error);
+                streamErrors.push(rootCause);
+                console.error('[AI Loop] Stream error:', rootCause);
             },
 
             onStepFinish(event) {
@@ -201,7 +224,8 @@ export async function runAILoop(params: AILoopParams): Promise<AgentResult> {
                     break;
 
                 case 'error':
-                    console.error('[AI Loop] Stream part error:', part.error);
+                    streamErrors.push(getRootCause(part.error));
+                    console.error('[AI Loop] Stream part error:', getRootCause(part.error));
                     break;
 
                 // tool-call, tool-result, step-finish etc. are handled by
@@ -229,21 +253,43 @@ export async function runAILoop(params: AILoopParams): Promise<AgentResult> {
         };
 
     } catch (error) {
-        const errMsg = error instanceof Error ? error.message : String(error);
         const errName = error instanceof Error ? error.constructor.name : 'Unknown';
-        console.error(`[AI Loop] Fatal (${errName}): ${errMsg}`);
+        const rootCause = getRootCause(error);
+        const streamCtx = streamErrors.length > 0 ? ` | Stream errors: ${streamErrors.join('; ')}` : '';
+        const fullError = `${rootCause}${streamCtx}`;
+        console.error(`[AI Loop] Fatal: ${fullError}`);
 
-        // Return partial results if we have any
+        // NoOutputGeneratedError means the model returned nothing — surface the real cause
+        if (NoOutputGeneratedError.isInstance(error)) {
+            const hint = streamErrors.length > 0
+                ? streamErrors.join('; ')
+                : 'Model returned empty response. Check API key, model ID, and rate limits.';
+            console.error(`[AI Loop] NoOutputGeneratedError cause: ${hint}`);
+
+            // Return partial results if we have any
+            if (allToolCalls.length > 0 || accumulatedText) {
+                return {
+                    response: accumulatedText || `Agent completed with warnings: ${hint}`,
+                    toolCalls: allToolCalls,
+                    totalTokens,
+                    iterations: Math.max(stepCount, 1),
+                };
+            }
+
+            throw new Error(`AI model produced no output. Cause: ${hint}`);
+        }
+
+        // Return partial results for other errors
         if (allToolCalls.length > 0 || accumulatedText) {
             return {
-                response: accumulatedText || `Agent error: ${errMsg}. ${allToolCalls.length} tools executed before failure.`,
+                response: accumulatedText || `Agent error: ${fullError}. ${allToolCalls.length} tools executed before failure.`,
                 toolCalls: allToolCalls,
                 totalTokens,
                 iterations: Math.max(stepCount, 1),
             };
         }
 
-        throw new Error(`AI Loop failed (${errName}): ${errMsg}`);
+        throw new Error(`AI Loop failed (${errName}): ${fullError}`);
     }
 }
 

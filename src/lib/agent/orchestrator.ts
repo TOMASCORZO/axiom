@@ -224,6 +224,7 @@ export async function runAgentLoop(params: {
         historyMessages,
         skipForceFirstTool: mandatorySkillRan,
         maxIterations: mandatorySkillRan ? 5 : undefined,
+        provider: resolvedProvider,
     });
 
     // 11. Emit agent completion event
