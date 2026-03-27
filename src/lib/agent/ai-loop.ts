@@ -1,13 +1,14 @@
 /**
  * AI SDK Agent Loop — OpenCode-faithful streamText() implementation.
  *
- * This replaces the manual ReAct loop with the Vercel AI SDK's streamText(),
- * which handles tool call parsing, execution, and feedback automatically.
+ * Uses the Vercel AI SDK's streamText() which handles tool call parsing,
+ * execution, and feedback automatically.
  *
- * Key OpenCode patterns ported:
+ * Key OpenCode patterns:
  * - Doom loop detection (same tool+input called 3x)
  * - Tool repair via experimental_repairToolCall
  * - Max steps via stopWhen + stepCountIs
+ * - Dynamic toolChoice via prepareStep (required on first, auto after)
  * - Streaming callbacks for SSE events
  * - Output truncation (handled in ai-tools.ts)
  */
@@ -52,32 +53,14 @@ export interface AILoopParams {
     maxIterations?: number;
 }
 
-/**
- * Run the AI agent loop using streamText().
- *
- * The AI SDK handles:
- * - Tool call parsing per provider
- * - Tool execution via the execute() functions
- * - Tool result injection back into the conversation
- * - Multi-step tool use (stopWhen + stepCountIs)
- * - Streaming of text and reasoning tokens
- *
- * We handle:
- * - Doom loop detection
- * - SSE event emission
- * - Tool repair
- * - Result aggregation
- */
 export async function runAILoop(params: AILoopParams): Promise<AgentResult> {
     const { model, systemPrompt, userMessage, agentType, toolCtx, callbacks } = params;
     const agentDef = AGENT_DEFS[agentType];
     const maxSteps = params.maxIterations ?? agentDef.maxIterations;
     const shouldForceFirst = agentDef.forceFirstTool && !params.skipForceFirstTool;
 
-    // Build the tool set from registered tools
     const tools = buildToolSet(agentType, toolCtx, callbacks, agentDef.deniedTools);
 
-    // Track tool calls for doom loop detection and result aggregation
     const allToolCalls: AgentResult['toolCalls'] = [];
     const recentCalls: Array<{ name: string; input: string }> = [];
     let totalTokens = 0;
@@ -85,18 +68,12 @@ export async function runAILoop(params: AILoopParams): Promise<AgentResult> {
     let accumulatedText = '';
     let accumulatedReasoning = '';
 
-    // Build message history
     const messages: Array<{ role: 'user' | 'assistant'; content: string }> = [];
-
-    // History messages (previous conversation)
     if (params.historyMessages?.length) {
         messages.push(...params.historyMessages);
     }
-
-    // Current user message
     messages.push({ role: 'user', content: userMessage });
 
-    // Build full system prompt
     const fullSystemPrompt = systemPrompt + '\n' + agentDef.systemSuffix;
 
     console.log(`[AI Loop] Starting: agent=${agentType} maxSteps=${maxSteps} forceFirst=${shouldForceFirst} tools=${Object.keys(tools).length - 1}`);
@@ -108,7 +85,16 @@ export async function runAILoop(params: AILoopParams): Promise<AgentResult> {
             messages,
             tools,
             stopWhen: stepCountIs(maxSteps),
-            toolChoice: shouldForceFirst ? 'required' : 'auto',
+
+            // FIX: Use prepareStep to set toolChoice dynamically per step.
+            // Only force tool use on the first step (OpenCode pattern).
+            // After that, use 'auto' so the model can respond with text when done.
+            prepareStep({ stepNumber }) {
+                if (stepNumber === 0 && shouldForceFirst) {
+                    return { toolChoice: 'required' as const };
+                }
+                return { toolChoice: 'auto' as const };
+            },
 
             // OpenCode pattern: repair misnamed tool calls
             experimental_repairToolCall: async (failed) => {
@@ -116,13 +102,13 @@ export async function runAILoop(params: AILoopParams): Promise<AgentResult> {
                 const toolNames = Object.keys(tools).filter(n => n !== 'invalid');
 
                 if (lower !== failed.toolCall.toolName && tools[lower]) {
-                    console.log(`[AI Loop] Repairing tool call: ${failed.toolCall.toolName} → ${lower}`);
+                    console.log(`[AI Loop] Repairing tool: ${failed.toolCall.toolName} → ${lower}`);
                     return { ...failed.toolCall, toolName: lower };
                 }
 
                 const prefixMatch = toolNames.find(n => n.toLowerCase() === lower);
                 if (prefixMatch) {
-                    console.log(`[AI Loop] Repairing tool call: ${failed.toolCall.toolName} → ${prefixMatch}`);
+                    console.log(`[AI Loop] Repairing tool: ${failed.toolCall.toolName} → ${prefixMatch}`);
                     return { ...failed.toolCall, toolName: prefixMatch };
                 }
 
@@ -148,7 +134,6 @@ export async function runAILoop(params: AILoopParams): Promise<AgentResult> {
                 callbacks.onIteration?.(stepCount);
                 bus.emit('iteration.start', { iteration: stepCount });
 
-                // Track token usage (AI SDK v6: inputTokens/outputTokens)
                 if (event.usage) {
                     totalTokens += (event.usage.inputTokens ?? 0) + (event.usage.outputTokens ?? 0);
                     bus.emit('model.tokens', {
@@ -157,7 +142,7 @@ export async function runAILoop(params: AILoopParams): Promise<AgentResult> {
                     });
                 }
 
-                // Collect tool calls from this step (AI SDK v6: tc.input not tc.args)
+                // Doom loop detection on tool calls
                 if (event.toolCalls) {
                     for (const tc of event.toolCalls) {
                         const inputStr = JSON.stringify((tc as any).input);
@@ -174,7 +159,7 @@ export async function runAILoop(params: AILoopParams): Promise<AgentResult> {
                     }
                 }
 
-                // Collect tool results from this step (AI SDK v6: tr.output not tr.result)
+                // Collect tool results
                 if (event.toolResults) {
                     for (const tr of event.toolResults) {
                         const tc = event.toolCalls?.find((c: any) => c.toolCallId === tr.toolCallId);
@@ -195,14 +180,14 @@ export async function runAILoop(params: AILoopParams): Promise<AgentResult> {
                     }
                 }
 
-                // Emit text if produced in this step
+                // Emit text (fires once per step with full step text)
                 if (event.text) {
                     accumulatedText += event.text;
                     callbacks.onText?.(event.text);
                     bus.emit('model.text', { text: event.text });
                 }
 
-                // Emit reasoning if present (AI SDK v6: reasoningText is string | undefined)
+                // Emit reasoning
                 if (event.reasoningText) {
                     accumulatedReasoning += event.reasoningText;
                     callbacks.onReasoning?.(event.reasoningText);
@@ -213,16 +198,27 @@ export async function runAILoop(params: AILoopParams): Promise<AgentResult> {
             },
         });
 
-        // Wait for the full stream to complete
-        const finalText = await result.text;
+        // FIX: Consume the stream incrementally to ensure callbacks fire.
+        // result.text is a promise that resolves when all streaming is done.
+        // We also consume textStream to get incremental text chunks for real-time SSE.
+        const textChunks: string[] = [];
+        for await (const chunk of result.textStream) {
+            textChunks.push(chunk);
+        }
+
+        // Now get final usage (stream is fully consumed at this point)
         const finalUsage = await result.usage;
 
         if (finalUsage) {
             totalTokens = (finalUsage.inputTokens ?? 0) + (finalUsage.outputTokens ?? 0);
         }
 
-        if (finalText && finalText !== accumulatedText) {
-            accumulatedText = finalText;
+        // Use the accumulated text from textStream if onStepFinish didn't capture it
+        const streamedText = textChunks.join('');
+        if (streamedText && !accumulatedText) {
+            accumulatedText = streamedText;
+            callbacks.onText?.(streamedText);
+            bus.emit('model.text', { text: streamedText });
         }
 
         const response = accumulatedText || accumulatedReasoning || 'Done.';
@@ -233,22 +229,24 @@ export async function runAILoop(params: AILoopParams): Promise<AgentResult> {
             response,
             toolCalls: allToolCalls,
             totalTokens,
-            iterations: stepCount,
+            iterations: Math.max(stepCount, 1),
         };
 
     } catch (error) {
         console.error('[AI Loop] Fatal error:', error);
 
+        // Return partial results if we have any
         if (allToolCalls.length > 0 || accumulatedText) {
             return {
                 response: accumulatedText || `Agent error: ${error instanceof Error ? error.message : 'Unknown error'}. Partial results: ${allToolCalls.length} tools executed.`,
                 toolCalls: allToolCalls,
                 totalTokens,
-                iterations: stepCount,
+                iterations: Math.max(stepCount, 1),
             };
         }
 
-        throw error;
+        // Re-throw with more context for the SSE error handler
+        throw new Error(`AI Loop failed: ${error instanceof Error ? error.message : String(error)}`);
     }
 }
 

@@ -146,9 +146,12 @@ export async function POST(request: NextRequest) {
                         },
                     });
                 } catch (err) {
-                    console.error('Agent stream error:', err);
+                    const errMsg = err instanceof Error ? err.message : String(err);
+                    const errStack = err instanceof Error ? err.stack : '';
+                    console.error('Agent stream error:', errMsg, errStack);
                     sendEvent('error', {
-                        error: err instanceof Error ? err.message : 'Internal server error',
+                        error: errMsg,
+                        stack: process.env.NODE_ENV === 'development' ? errStack : undefined,
                     });
                 } finally {
                     unsubBus();
