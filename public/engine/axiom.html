@@ -107,6 +107,14 @@
                 statusText.textContent = 'Loading WASM module...';
                 progressFill.style.width = '20%';
 
+                // Diagnostics: log received files
+                sendToParent({ type: 'console', level: 'log', message: `[Axiom] Received ${projectFiles.length} files from editor` });
+                for (const f of projectFiles) {
+                    const size = f.content ? f.content.length : 0;
+                    const preview = f.content ? f.content.slice(0, 60).replace(/\n/g, '\\n') : '(empty)';
+                    sendToParent({ type: 'console', level: 'log', message: `[Axiom]   → ${f.path} (${size} chars): ${preview}` });
+                }
+
                 // Check if axiom.js exists
                 const scriptResponse = await fetch('/engine/axiom.js');
                 if (!scriptResponse.ok) {
@@ -130,6 +138,9 @@
                 progressFill.style.width = '40%';
                 statusText.textContent = 'Initializing engine...';
 
+                // Check cross-origin isolation (required for SharedArrayBuffer / threads)
+                sendToParent({ type: 'console', level: 'log', message: `[Axiom] crossOriginIsolated=${self.crossOriginIsolated}, SharedArrayBuffer=${typeof SharedArrayBuffer !== 'undefined'}` });
+
                 // Create engine instance
                 engine = new Engine({
                     canvas: canvas,
@@ -142,6 +153,7 @@
                     },
                     onExit: function(code) {
                         engineStarted = false;
+                        sendToParent({ type: 'console', level: 'warn', message: `[Axiom] Engine exited with code ${code}` });
                         sendToParent({ type: 'stopped', exitCode: code });
                     },
                     onPrint: function(text) {
@@ -155,16 +167,42 @@
                 // Initialize engine — loads the 99MB WASM module
                 statusText.textContent = 'Loading WASM engine...';
                 await engine.init('/engine/axiom');
+                sendToParent({ type: 'console', level: 'log', message: '[Axiom] WASM module loaded successfully' });
 
                 progressFill.style.width = '70%';
                 statusText.textContent = 'Loading project files...';
 
                 // Preload project files into the virtual filesystem
+                let preloadedCount = 0;
                 for (const file of projectFiles) {
                     if (file.content) {
                         const encoder = new TextEncoder();
                         const buffer = encoder.encode(file.content);
                         await engine.preloadFile(buffer.buffer, `/project/${file.path}`);
+                        preloadedCount++;
+                    }
+                }
+                sendToParent({ type: 'console', level: 'log', message: `[Axiom] Preloaded ${preloadedCount}/${projectFiles.length} files to /project/` });
+
+                // Check critical file: project.godot
+                const hasProjectFile = projectFiles.some(f => f.path === 'project.godot');
+                if (!hasProjectFile) {
+                    sendToParent({ type: 'console', level: 'warn', message: '[Axiom] WARNING: No project.godot found! Engine may show blank screen.' });
+                }
+
+                // Check for main scene reference
+                const projFile = projectFiles.find(f => f.path === 'project.godot');
+                if (projFile && projFile.content) {
+                    const mainSceneMatch = projFile.content.match(/run\/main_scene="([^"]+)"/);
+                    if (mainSceneMatch) {
+                        const scenePath = mainSceneMatch[1].replace('res://', '');
+                        const sceneExists = projectFiles.some(f => f.path === scenePath);
+                        sendToParent({ type: 'console', level: 'log', message: `[Axiom] Main scene: ${mainSceneMatch[1]} (${sceneExists ? 'FOUND' : 'MISSING'})` });
+                        if (!sceneExists) {
+                            sendToParent({ type: 'console', level: 'error', message: `[Axiom] Main scene file "${scenePath}" not in project files! Available: ${projectFiles.map(f=>f.path).join(', ')}` });
+                        }
+                    } else {
+                        sendToParent({ type: 'console', level: 'warn', message: '[Axiom] WARNING: No run/main_scene in project.godot' });
                     }
                 }
 
@@ -182,7 +220,7 @@
                 progressFill.style.width = '100%';
 
                 sendToParent({ type: 'started' });
-                sendToParent({ type: 'console', level: 'log', message: '[Axiom] Engine started successfully' });
+                sendToParent({ type: 'console', level: 'log', message: '[Axiom] Engine started — waiting for Godot output...' });
 
                 // Start FPS tracking
                 requestAnimationFrame(updateFps);
@@ -190,6 +228,7 @@
             } catch (err) {
                 const message = err instanceof Error ? err.message : String(err);
                 sendToParent({ type: 'error', message: `Engine failed to start: ${message}` });
+                sendToParent({ type: 'console', level: 'error', message: `[Axiom] Stack: ${err instanceof Error ? err.stack : 'N/A'}` });
                 statusText.textContent = 'Failed to start engine';
                 progressFill.style.width = '0%';
             }

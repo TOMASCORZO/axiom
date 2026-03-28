@@ -79,6 +79,16 @@ export function translateContent(axiomPath: string, content: string): string {
 /** Translate project.axiom → project.godot content */
 function translateProjectConfig(content: string): string {
     let result = content;
+    // Godot 4 requires config_version=5 at the top — inject if missing
+    if (!result.includes('config_version=')) {
+        // Insert after any leading comments, before the first section
+        const firstSection = result.search(/^\[/m);
+        if (firstSection > 0) {
+            result = result.slice(0, firstSection) + 'config_version=5\n\n' + result.slice(firstSection);
+        } else {
+            result = 'config_version=5\n\n' + result;
+        }
+    }
     // Translate legacy [axiom] header to [application]
     result = result.replace(/^\[axiom\]$/m, '[application]');
     // Translate internal scene path references
@@ -208,14 +218,8 @@ export interface ProjectFile {
  * This is the main entry point — call it right before sending files to the engine.
  */
 export function translateProjectFiles(axiomFiles: ProjectFile[]): ProjectFile[] {
-    const result = axiomFiles.map((file) => ({
+    return axiomFiles.map((file) => ({
         path: translatePath(file.path),
         content: translateContent(file.path, file.content),
     }));
-    console.log('[axiom-translate] Input files:', axiomFiles.map(f => f.path));
-    console.log('[axiom-translate] Output files:', result.map(f => f.path));
-    for (const f of result) {
-        console.log(`[axiom-translate] ${f.path} (${f.content.length} chars, starts: ${f.content.slice(0, 80).replace(/\n/g, '\\n')})`);
-    }
-    return result;
 }

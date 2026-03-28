@@ -234,7 +234,6 @@ function WasmEngine({ isPlaying }: { isPlaying: boolean }) {
                 .filter((f) => f.text_content != null)
                 .map((f) => ({ path: f.path, content: f.text_content ?? '' }));
             const godotFiles = translateProjectFiles(axiomFiles);
-            console.log('[axiom] Starting engine with', godotFiles.length, 'files:', godotFiles.map(f => f.path));
             engineBridge.startGame(godotFiles);
         } else if (!isPlaying && engineBridge.isRunning) {
             engineBridge.stopGame();
