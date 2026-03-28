@@ -9,6 +9,23 @@ const nextConfig: NextConfig = {
   async headers() {
     return [
       {
+        // Editor pages need cross-origin isolation for SharedArrayBuffer
+        // (required by Godot 4 WASM engine running in iframe)
+        // Using 'credentialless' instead of 'require-corp' so external
+        // resources (fonts, images, CDN scripts) don't break
+        source: '/editor/:path*',
+        headers: [
+          {
+            key: 'Cross-Origin-Opener-Policy',
+            value: 'same-origin',
+          },
+          {
+            key: 'Cross-Origin-Embedder-Policy',
+            value: 'credentialless',
+          },
+        ],
+      },
+      {
         source: '/engine/:path*',
         headers: [
           {
@@ -26,7 +43,6 @@ const nextConfig: NextConfig = {
         ],
       },
       {
-        // Ensure .wasm files have the correct MIME type
         source: '/engine/:path*.wasm',
         headers: [
           {
