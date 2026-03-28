@@ -535,9 +535,10 @@ function GalleryTab() {
                         >
                             {/* Checkerboard background for transparency */}
                             <div className="absolute inset-0 bg-[length:8px_8px] bg-[position:0_0,4px_4px] bg-[image:linear-gradient(45deg,#1a1a2e_25%,transparent_25%,transparent_75%,#1a1a2e_75%),linear-gradient(45deg,#1a1a2e_25%,transparent_25%,transparent_75%,#1a1a2e_75%)]" />
-                            {asset.thumbnail_key ? (
+                            {asset.storage_key ? (
+                                /* eslint-disable-next-line @next/next/no-img-element */
                                 <img
-                                    src={asset.thumbnail_key}
+                                    src={`/api/assets/serve?key=${encodeURIComponent(asset.storage_key)}`}
                                     alt={asset.name}
                                     className="absolute inset-0 w-full h-full object-contain"
                                 />

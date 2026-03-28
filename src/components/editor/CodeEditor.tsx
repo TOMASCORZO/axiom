@@ -7,8 +7,7 @@ import { X, Code, Gamepad2, Settings, Image, File, ZoomIn, ZoomOut, Download } f
 const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'webp', 'svg', 'gif', 'bmp', 'ico']);
 
 function getImageUrl(storageKey: string): string {
-    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-    return `${supabaseUrl}/storage/v1/object/public/assets/${storageKey}`;
+    return `/api/assets/serve?key=${encodeURIComponent(storageKey)}`;
 }
 
 function getTabIcon(name: string) {
@@ -81,6 +80,8 @@ function highlightLine(line: string, ext: string): React.ReactNode {
 function ImagePreview({ src, fileName, sizeBytes }: { src: string; fileName: string; sizeBytes: number }) {
     const [zoom, setZoom] = useState(1);
     const [imgSize, setImgSize] = useState<{ w: number; h: number } | null>(null);
+    const [loadError, setLoadError] = useState(false);
+    const [loaded, setLoaded] = useState(false);
 
     const sizeLabel = sizeBytes > 1024 * 1024
         ? `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`
@@ -136,25 +137,41 @@ function ImagePreview({ src, fileName, sizeBytes }: { src: string; fileName: str
 
             {/* Image area with checkerboard */}
             <div className="flex-1 overflow-auto flex items-center justify-center p-4 bg-zinc-950">
-                {/* Checkerboard background behind image */}
-                <div className="relative inline-block">
-                    <div className="absolute inset-0 rounded bg-[length:12px_12px] bg-[position:0_0,6px_6px] bg-[image:linear-gradient(45deg,#1a1a2e_25%,transparent_25%,transparent_75%,#1a1a2e_75%),linear-gradient(45deg,#1a1a2e_25%,transparent_25%,transparent_75%,#1a1a2e_75%)]" />
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                        src={src}
-                        alt={fileName}
-                        className="relative block"
-                        style={zoom === 0
-                            ? { maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }
-                            : { width: imgSize ? imgSize.w * zoom : 'auto', imageRendering: zoom >= 2 ? 'pixelated' : 'auto' }
-                        }
-                        onLoad={(e) => {
-                            const img = e.currentTarget;
-                            setImgSize({ w: img.naturalWidth, h: img.naturalHeight });
-                        }}
-                        draggable={false}
-                    />
-                </div>
+                {loadError ? (
+                    <div className="flex flex-col items-center gap-2 text-zinc-500">
+                        <Image size={32} strokeWidth={1} />
+                        <span className="text-sm">Failed to load image</span>
+                        <span className="text-xs text-zinc-600">{fileName}</span>
+                    </div>
+                ) : (
+                    <>
+                        {!loaded && (
+                            <div className="absolute inset-0 flex items-center justify-center">
+                                <div className="w-5 h-5 border-2 border-violet-500/30 border-t-violet-500 rounded-full animate-spin" />
+                            </div>
+                        )}
+                        <div className={`relative inline-block ${loaded ? '' : 'opacity-0'}`}>
+                            <div className="absolute inset-0 rounded bg-[length:12px_12px] bg-[position:0_0,6px_6px] bg-[image:linear-gradient(45deg,#1a1a2e_25%,transparent_25%,transparent_75%,#1a1a2e_75%),linear-gradient(45deg,#1a1a2e_25%,transparent_25%,transparent_75%,#1a1a2e_75%)]" />
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img
+                                src={src}
+                                alt={fileName}
+                                className="relative block"
+                                style={zoom === 0
+                                    ? { maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }
+                                    : { width: imgSize ? imgSize.w * zoom : 'auto', imageRendering: zoom >= 2 ? 'pixelated' : 'auto' }
+                                }
+                                onLoad={(e) => {
+                                    const img = e.currentTarget;
+                                    setImgSize({ w: img.naturalWidth, h: img.naturalHeight });
+                                    setLoaded(true);
+                                }}
+                                onError={() => setLoadError(true)}
+                                draggable={false}
+                            />
+                        </div>
+                    </>
+                )}
             </div>
         </div>
     );
