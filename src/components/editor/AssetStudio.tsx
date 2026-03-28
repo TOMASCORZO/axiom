@@ -217,7 +217,7 @@ const SOURCE_COLORS: Record<string, string> = {
 };
 
 type ImportStatus = 'idle' | 'importing' | 'success' | 'error';
-interface ResultState { status: ImportStatus; error?: string; path?: string; sizeKb?: number }
+interface ResultState { status: ImportStatus; error?: string; path?: string; sizeKb?: number; fileCount?: number }
 
 function FreeAssetSearch() {
     const { project, addConsoleEntry, addAsset, refreshProjectFiles, setAssetStudioTab } = useEditorStore();
@@ -272,29 +272,62 @@ function FreeAssetSearch() {
             });
             const data = await res.json();
             if (res.ok && data.success) {
-                const sizeKb = Math.round(data.size_bytes / 1024);
-                setImportStates(prev => ({ ...prev, [key]: { status: 'success', path: targetPath, sizeKb } }));
-                addConsoleEntry({
-                    id: crypto.randomUUID(), level: 'log',
-                    message: `[Asset Studio] Imported "${result.title}" → ${targetPath} (${sizeKb}KB)`,
-                    timestamp: new Date().toISOString(),
-                });
-                // Add to gallery
-                addAsset({
-                    id: crypto.randomUUID(),
-                    project_id: project.id,
-                    name: result.title,
-                    asset_type: 'sprite',
-                    storage_key: data.storage_key,
-                    thumbnail_key: data.public_url || null,
-                    file_format: 'png',
-                    width: null, height: null,
-                    metadata: { tags: [result.source, result.license] },
-                    generation_prompt: null,
-                    generation_model: null,
-                    size_bytes: data.size_bytes,
-                    created_at: new Date().toISOString(),
-                });
+                if (data.pack && data.files) {
+                    // ZIP pack — multiple files extracted
+                    const totalKb = Math.round(data.files.reduce((s: number, f: { size_bytes: number }) => s + f.size_bytes, 0) / 1024);
+                    setImportStates(prev => ({
+                        ...prev,
+                        [key]: { status: 'success', path: `${data.files_imported} files`, sizeKb: totalKb, fileCount: data.files_imported },
+                    }));
+                    addConsoleEntry({
+                        id: crypto.randomUUID(), level: 'log',
+                        message: `[Asset Studio] Imported pack "${result.title}" — ${data.files_imported} files (${totalKb}KB)`,
+                        timestamp: new Date().toISOString(),
+                    });
+                    // Add each extracted file to gallery
+                    for (const f of data.files) {
+                        const fileName = f.path.split('/').pop() || f.path;
+                        addAsset({
+                            id: crypto.randomUUID(),
+                            project_id: project.id,
+                            name: fileName,
+                            asset_type: 'sprite',
+                            storage_key: f.path,
+                            thumbnail_key: f.public_url || null,
+                            file_format: fileName.split('.').pop() || 'png',
+                            width: null, height: null,
+                            metadata: { tags: [result.source, result.license, result.title] },
+                            generation_prompt: null,
+                            generation_model: null,
+                            size_bytes: f.size_bytes,
+                            created_at: new Date().toISOString(),
+                        });
+                    }
+                } else {
+                    // Single file
+                    const sizeKb = Math.round(data.size_bytes / 1024);
+                    setImportStates(prev => ({ ...prev, [key]: { status: 'success', path: targetPath, sizeKb } }));
+                    addConsoleEntry({
+                        id: crypto.randomUUID(), level: 'log',
+                        message: `[Asset Studio] Imported "${result.title}" → ${targetPath} (${sizeKb}KB)`,
+                        timestamp: new Date().toISOString(),
+                    });
+                    addAsset({
+                        id: crypto.randomUUID(),
+                        project_id: project.id,
+                        name: result.title,
+                        asset_type: 'sprite',
+                        storage_key: data.storage_key,
+                        thumbnail_key: data.public_url || null,
+                        file_format: 'png',
+                        width: null, height: null,
+                        metadata: { tags: [result.source, result.license] },
+                        generation_prompt: null,
+                        generation_model: null,
+                        size_bytes: data.size_bytes,
+                        created_at: new Date().toISOString(),
+                    });
+                }
                 refreshProjectFiles(project.id);
             } else {
                 setImportStates(prev => ({ ...prev, [key]: { status: 'error', error: data.error } }));
@@ -401,7 +434,10 @@ function FreeAssetSearch() {
                                     {/* Status messages */}
                                     {isSuccess && (
                                         <span className="text-[10px] text-emerald-400 mt-0.5 block">
-                                            Imported to {state.path} ({state.sizeKb}KB)
+                                            {state.fileCount
+                                                ? `${state.fileCount} sprites imported (${state.sizeKb}KB)`
+                                                : `Imported to ${state.path} (${state.sizeKb}KB)`
+                                            }
                                         </span>
                                     )}
                                     {isError && (
