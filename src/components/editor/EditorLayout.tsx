@@ -5,6 +5,7 @@ import FileTree from './FileTree';
 import AxiomViewport from './AxiomViewport';
 import CodeEditor from './CodeEditor';
 import ChatPanel from '@/components/chat/ChatPanel';
+import AssetStudio from './AssetStudio';
 import ConsolePanel from './ConsolePanel';
 import SubsystemsPanel from './SubsystemsPanel';
 import { useEditorStore } from '@/lib/store';
@@ -14,7 +15,7 @@ interface EditorLayoutProps {
 }
 
 export default function EditorLayout({ projectId }: EditorLayoutProps) {
-    const { leftPanelWidth, rightPanelWidth, bottomPanelHeight, openFiles } = useEditorStore();
+    const { leftPanelWidth, rightPanelWidth, bottomPanelHeight, openFiles, activeRightPanel } = useEditorStore();
     const hasOpenFiles = openFiles.length > 0;
 
     return (
@@ -69,12 +70,16 @@ export default function EditorLayout({ projectId }: EditorLayoutProps) {
                     </div>
                 </div>
 
-                {/* Right Panel — Chat */}
+                {/* Right Panel — Chat or Asset Studio */}
                 <div
                     className="flex-shrink-0 border-l border-white/5 overflow-hidden"
                     style={{ width: `${rightPanelWidth}px` }}
                 >
-                    <ChatPanel projectId={projectId} />
+                    {activeRightPanel === 'assets' ? (
+                        <AssetStudio />
+                    ) : (
+                        <ChatPanel projectId={projectId} />
+                    )}
                 </div>
             </div>
         </div>

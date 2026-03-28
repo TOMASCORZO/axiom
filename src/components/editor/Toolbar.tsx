@@ -13,11 +13,12 @@ import {
     Maximize2,
     Save,
     ArrowLeft,
+    ImageIcon,
 } from 'lucide-react';
 
 export default function Toolbar() {
     const router = useRouter();
-    const { isPlaying, setIsPlaying, project, addConsoleEntry } = useEditorStore();
+    const { isPlaying, setIsPlaying, project, addConsoleEntry, activeRightPanel, setActiveRightPanel } = useEditorStore();
 
     const handlePlay = () => {
         const newState = !isPlaying;
@@ -130,6 +131,21 @@ export default function Toolbar() {
             >
                 <Save size={15} />
             </button>
+
+            {/* Asset Studio */}
+            <div className="ml-2 pl-2 border-l border-white/10">
+                <button
+                    onClick={() => setActiveRightPanel(activeRightPanel === 'assets' ? 'chat' : 'assets')}
+                    className={`p-2 rounded-lg transition-all ${
+                        activeRightPanel === 'assets'
+                            ? 'bg-violet-500/20 text-violet-400 hover:bg-violet-500/30'
+                            : 'text-zinc-500 hover:text-zinc-300 hover:bg-white/5'
+                    }`}
+                    title="Asset Studio"
+                >
+                    <ImageIcon size={15} />
+                </button>
+            </div>
 
             {/* Spacer */}
             <div className="flex-1" />

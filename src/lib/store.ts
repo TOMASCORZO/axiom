@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import type { Project, ProjectFile, FileNode } from '@/types/project';
 import type { ChatMessage, ToolCallDisplay, ConversationSummary } from '@/types/agent';
 import type { ConsoleEntry, EngineLoadProgress } from '@/types/engine';
+import type { Asset } from '@/types/asset';
 
 // ── Editor Store ───────────────────────────────────────────────────
 
@@ -35,6 +36,12 @@ interface EditorState {
     rightPanelWidth: number;
     bottomPanelHeight: number;
     activeBottomTab: 'console' | 'build' | 'errors';
+    activeRightPanel: 'chat' | 'assets';
+
+    // Asset Studio
+    assets: Asset[];
+    assetGenerating: boolean;
+    assetStudioTab: 'generate' | 'gallery' | 'timeline';
 
     // Actions
     setProject: (project: Project) => void;
@@ -58,6 +65,11 @@ interface EditorState {
     setPanelWidth: (panel: 'left' | 'right', width: number) => void;
     setBottomPanelHeight: (height: number) => void;
     setActiveBottomTab: (tab: 'console' | 'build' | 'errors') => void;
+    setActiveRightPanel: (panel: 'chat' | 'assets') => void;
+    setAssets: (assets: Asset[]) => void;
+    addAsset: (asset: Asset) => void;
+    setAssetGenerating: (generating: boolean) => void;
+    setAssetStudioTab: (tab: 'generate' | 'gallery' | 'timeline') => void;
     refreshProjectFiles: (projectId: string) => Promise<void>;
     addProjectFiles: (newFiles: Array<{ path: string; content: string; size_bytes: number; content_type: string }>) => void;
     setChatView: (view: 'chat' | 'history') => void;
@@ -91,6 +103,10 @@ export const useEditorStore = create<EditorState>((set) => ({
     rightPanelWidth: 340,
     bottomPanelHeight: 150,
     activeBottomTab: 'console',
+    activeRightPanel: 'chat',
+    assets: [],
+    assetGenerating: false,
+    assetStudioTab: 'generate',
 
     // Actions
     setProject: (project) => set({ project }),
@@ -172,6 +188,11 @@ export const useEditorStore = create<EditorState>((set) => ({
 
     setBottomPanelHeight: (height) => set({ bottomPanelHeight: height }),
     setActiveBottomTab: (tab) => set({ activeBottomTab: tab }),
+    setActiveRightPanel: (panel) => set({ activeRightPanel: panel }),
+    setAssets: (assets) => set({ assets }),
+    addAsset: (asset) => set((state) => ({ assets: [...state.assets, asset] })),
+    setAssetGenerating: (generating) => set({ assetGenerating: generating }),
+    setAssetStudioTab: (tab) => set({ assetStudioTab: tab }),
 
     setChatView: (view) => set({ chatView: view }),
     setConversations: (conversations) => set({ conversations }),

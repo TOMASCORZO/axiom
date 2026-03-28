@@ -1,0 +1,426 @@
+'use client';
+
+import { useState, useRef } from 'react';
+import { useEditorStore } from '@/lib/store';
+import type { Asset, AssetType, AssetStyle } from '@/types/asset';
+import {
+    Sparkles,
+    Image as ImageIcon,
+    Grid3X3,
+    Clock,
+    Play,
+    Pause,
+    SkipBack,
+    SkipForward,
+    Download,
+    FolderPlus,
+    Trash2,
+    Loader2,
+    ChevronLeft,
+    ChevronRight,
+    Wand2,
+    Search,
+} from 'lucide-react';
+
+// ── Tab Navigation ───────────────────────────────────────────────────
+
+const TABS = [
+    { id: 'generate' as const, label: 'Generate', icon: Wand2 },
+    { id: 'gallery' as const, label: 'Gallery', icon: Grid3X3 },
+    { id: 'timeline' as const, label: 'Timeline', icon: Clock },
+];
+
+// ── Generate Tab ─────────────────────────────────────────────────────
+
+const ASSET_TYPES: { value: AssetType; label: string }[] = [
+    { value: 'sprite', label: 'Sprite' },
+    { value: 'sprite_sheet', label: 'Sprite Sheet' },
+    { value: 'texture', label: 'Texture' },
+    { value: 'ui_element', label: 'UI Element' },
+    { value: 'model_3d', label: '3D Model' },
+];
+
+const STYLES: { value: AssetStyle; label: string }[] = [
+    { value: 'pixel_art', label: 'Pixel Art' },
+    { value: 'stylized', label: 'Stylized' },
+    { value: 'hand_drawn', label: 'Hand Drawn' },
+    { value: 'vector', label: 'Vector' },
+    { value: 'realistic', label: 'Realistic' },
+    { value: 'low_poly', label: 'Low Poly' },
+];
+
+const SIZE_PRESETS = [
+    { label: '64', w: 64, h: 64 },
+    { label: '128', w: 128, h: 128 },
+    { label: '256', w: 256, h: 256 },
+    { label: '512', w: 512, h: 512 },
+];
+
+function GenerateTab() {
+    const { assetGenerating, addConsoleEntry } = useEditorStore();
+    const [prompt, setPrompt] = useState('');
+    const [assetType, setAssetType] = useState<AssetType>('sprite');
+    const [style, setStyle] = useState<AssetStyle>('pixel_art');
+    const [sizeIdx, setSizeIdx] = useState(1); // 128x128 default
+    const [transparentBg, setTransparentBg] = useState(true);
+    const [frameCount, setFrameCount] = useState(4);
+
+    const size = SIZE_PRESETS[sizeIdx];
+    const isSheet = assetType === 'sprite_sheet';
+
+    const handleGenerate = () => {
+        if (!prompt.trim()) return;
+        addConsoleEntry({
+            id: crypto.randomUUID(),
+            level: 'log',
+            message: `[Asset Studio] Queued: "${prompt}" (${assetType}, ${style}, ${size.w}x${size.h})`,
+            timestamp: new Date().toISOString(),
+        });
+        // Generation will be wired to AI backends later
+    };
+
+    return (
+        <div className="flex flex-col gap-3 p-3 overflow-y-auto flex-1">
+            {/* Prompt */}
+            <div>
+                <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">Prompt</label>
+                <textarea
+                    value={prompt}
+                    onChange={(e) => setPrompt(e.target.value)}
+                    placeholder="A warrior character with sword and shield, side view..."
+                    className="w-full bg-zinc-900 border border-white/10 rounded-lg px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-600 resize-none focus:outline-none focus:border-violet-500/50 transition-colors"
+                    rows={3}
+                />
+            </div>
+
+            {/* Asset Type */}
+            <div>
+                <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">Type</label>
+                <div className="flex flex-wrap gap-1">
+                    {ASSET_TYPES.map((t) => (
+                        <button
+                            key={t.value}
+                            onClick={() => setAssetType(t.value)}
+                            className={`px-2 py-1 rounded text-xs transition-colors ${
+                                assetType === t.value
+                                    ? 'bg-violet-500/20 text-violet-300 border border-violet-500/30'
+                                    : 'bg-zinc-900 text-zinc-500 border border-white/5 hover:text-zinc-300'
+                            }`}
+                        >
+                            {t.label}
+                        </button>
+                    ))}
+                </div>
+            </div>
+
+            {/* Style */}
+            <div>
+                <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">Style</label>
+                <div className="flex flex-wrap gap-1">
+                    {STYLES.map((s) => (
+                        <button
+                            key={s.value}
+                            onClick={() => setStyle(s.value)}
+                            className={`px-2 py-1 rounded text-xs transition-colors ${
+                                style === s.value
+                                    ? 'bg-fuchsia-500/20 text-fuchsia-300 border border-fuchsia-500/30'
+                                    : 'bg-zinc-900 text-zinc-500 border border-white/5 hover:text-zinc-300'
+                            }`}
+                        >
+                            {s.label}
+                        </button>
+                    ))}
+                </div>
+            </div>
+
+            {/* Size */}
+            <div>
+                <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">
+                    Size — {size.w}x{size.h}px
+                </label>
+                <div className="flex gap-1">
+                    {SIZE_PRESETS.map((p, i) => (
+                        <button
+                            key={p.label}
+                            onClick={() => setSizeIdx(i)}
+                            className={`flex-1 py-1 rounded text-xs transition-colors ${
+                                sizeIdx === i
+                                    ? 'bg-violet-500/20 text-violet-300 border border-violet-500/30'
+                                    : 'bg-zinc-900 text-zinc-500 border border-white/5 hover:text-zinc-300'
+                            }`}
+                        >
+                            {p.label}
+                        </button>
+                    ))}
+                </div>
+            </div>
+
+            {/* Options row */}
+            <div className="flex items-center gap-3">
+                <label className="flex items-center gap-1.5 text-xs text-zinc-400 cursor-pointer">
+                    <input
+                        type="checkbox"
+                        checked={transparentBg}
+                        onChange={(e) => setTransparentBg(e.target.checked)}
+                        className="rounded bg-zinc-900 border-white/10 text-violet-500 focus:ring-violet-500/30 w-3.5 h-3.5"
+                    />
+                    Transparent
+                </label>
+                {isSheet && (
+                    <div className="flex items-center gap-1.5">
+                        <span className="text-xs text-zinc-500">Frames:</span>
+                        <input
+                            type="number"
+                            min={2}
+                            max={32}
+                            value={frameCount}
+                            onChange={(e) => setFrameCount(Number(e.target.value))}
+                            className="w-12 bg-zinc-900 border border-white/10 rounded px-1.5 py-0.5 text-xs text-zinc-200 text-center focus:outline-none focus:border-violet-500/50"
+                        />
+                    </div>
+                )}
+            </div>
+
+            {/* Generate Button */}
+            <button
+                onClick={handleGenerate}
+                disabled={!prompt.trim() || assetGenerating}
+                className="w-full py-2.5 rounded-lg font-medium text-sm transition-all flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 text-white shadow-lg shadow-violet-500/20"
+            >
+                {assetGenerating ? (
+                    <>
+                        <Loader2 size={14} className="animate-spin" />
+                        Generating...
+                    </>
+                ) : (
+                    <>
+                        <Sparkles size={14} />
+                        Generate Asset
+                    </>
+                )}
+            </button>
+
+            {/* Quick Search */}
+            <div className="pt-2 border-t border-white/5">
+                <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">Or search free assets</label>
+                <div className="relative">
+                    <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-600" />
+                    <input
+                        type="text"
+                        placeholder="Search Kenney, OpenGameArt, itch.io..."
+                        className="w-full bg-zinc-900 border border-white/10 rounded-lg pl-7 pr-3 py-2 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-violet-500/50 transition-colors"
+                    />
+                </div>
+            </div>
+        </div>
+    );
+}
+
+// ── Gallery Tab ──────────────────────────────────────────────────────
+
+function GalleryTab() {
+    const { assets } = useEditorStore();
+    const [selectedAsset, setSelectedAsset] = useState<string | null>(null);
+
+    if (assets.length === 0) {
+        return (
+            <div className="flex-1 flex flex-col items-center justify-center gap-3 text-zinc-600 p-6">
+                <ImageIcon size={32} strokeWidth={1} />
+                <p className="text-sm text-center">No assets yet</p>
+                <p className="text-xs text-center text-zinc-700">
+                    Generate sprites, textures, and models<br />
+                    using the Generate tab
+                </p>
+            </div>
+        );
+    }
+
+    return (
+        <div className="flex flex-col flex-1 overflow-hidden">
+            {/* Grid */}
+            <div className="flex-1 overflow-y-auto p-2">
+                <div className="grid grid-cols-3 gap-1.5">
+                    {assets.map((asset) => (
+                        <button
+                            key={asset.id}
+                            onClick={() => setSelectedAsset(asset.id === selectedAsset ? null : asset.id)}
+                            className={`relative aspect-square rounded-lg overflow-hidden border transition-all ${
+                                selectedAsset === asset.id
+                                    ? 'border-violet-500 ring-1 ring-violet-500/30'
+                                    : 'border-white/5 hover:border-white/10'
+                            }`}
+                        >
+                            {/* Checkerboard background for transparency */}
+                            <div className="absolute inset-0 bg-[length:8px_8px] bg-[position:0_0,4px_4px] bg-[image:linear-gradient(45deg,#1a1a2e_25%,transparent_25%,transparent_75%,#1a1a2e_75%),linear-gradient(45deg,#1a1a2e_25%,transparent_25%,transparent_75%,#1a1a2e_75%)]" />
+                            {asset.thumbnail_key ? (
+                                <img
+                                    src={asset.thumbnail_key}
+                                    alt={asset.name}
+                                    className="absolute inset-0 w-full h-full object-contain"
+                                />
+                            ) : (
+                                <div className="absolute inset-0 flex items-center justify-center bg-zinc-900/80">
+                                    <ImageIcon size={16} className="text-zinc-600" />
+                                </div>
+                            )}
+                            <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/80 to-transparent px-1.5 py-1">
+                                <span className="text-[9px] text-zinc-300 truncate block">{asset.name}</span>
+                            </div>
+                        </button>
+                    ))}
+                </div>
+            </div>
+
+            {/* Selected asset actions */}
+            {selectedAsset && (
+                <div className="flex-shrink-0 border-t border-white/5 p-2 flex gap-1.5">
+                    <button className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded bg-violet-500/20 text-violet-300 text-xs hover:bg-violet-500/30 transition-colors">
+                        <FolderPlus size={12} />
+                        Import to Project
+                    </button>
+                    <button className="flex items-center justify-center gap-1 px-3 py-1.5 rounded bg-zinc-800 text-zinc-400 text-xs hover:bg-zinc-700 transition-colors">
+                        <Download size={12} />
+                    </button>
+                    <button className="flex items-center justify-center gap-1 px-3 py-1.5 rounded bg-zinc-800 text-red-400 text-xs hover:bg-red-500/20 transition-colors">
+                        <Trash2 size={12} />
+                    </button>
+                </div>
+            )}
+        </div>
+    );
+}
+
+// ── Timeline Tab ─────────────────────────────────────────────────────
+
+function TimelineTab() {
+    const [isPlayingAnim, setIsPlayingAnim] = useState(false);
+    const [currentFrame, setCurrentFrame] = useState(0);
+    const [totalFrames] = useState(8);
+    const [fps, setFps] = useState(12);
+
+    return (
+        <div className="flex flex-col flex-1 overflow-hidden">
+            {/* Preview area */}
+            <div className="flex-1 flex items-center justify-center bg-zinc-950 min-h-[120px] relative">
+                {/* Checkerboard */}
+                <div className="absolute inset-0 bg-[length:12px_12px] bg-[position:0_0,6px_6px] bg-[image:linear-gradient(45deg,#111_25%,transparent_25%,transparent_75%,#111_75%),linear-gradient(45deg,#111_25%,transparent_25%,transparent_75%,#111_75%)] opacity-50" />
+                <div className="relative z-10 flex flex-col items-center gap-2 text-zinc-600">
+                    <ImageIcon size={28} strokeWidth={1} />
+                    <span className="text-xs">Select a sprite sheet to animate</span>
+                </div>
+            </div>
+
+            {/* Timeline controls */}
+            <div className="flex-shrink-0 border-t border-white/5">
+                {/* Transport */}
+                <div className="flex items-center justify-between px-3 py-1.5">
+                    <div className="flex items-center gap-1">
+                        <button
+                            onClick={() => setCurrentFrame(0)}
+                            className="p-1 rounded text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors"
+                        >
+                            <SkipBack size={12} />
+                        </button>
+                        <button
+                            onClick={() => setIsPlayingAnim(!isPlayingAnim)}
+                            className={`p-1 rounded transition-colors ${
+                                isPlayingAnim ? 'text-emerald-400 bg-emerald-500/10' : 'text-zinc-500 hover:text-zinc-300 hover:bg-white/5'
+                            }`}
+                        >
+                            {isPlayingAnim ? <Pause size={12} /> : <Play size={12} />}
+                        </button>
+                        <button
+                            onClick={() => setCurrentFrame(totalFrames - 1)}
+                            className="p-1 rounded text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors"
+                        >
+                            <SkipForward size={12} />
+                        </button>
+                    </div>
+                    <span className="text-[10px] text-zinc-500 font-mono">
+                        {currentFrame + 1}/{totalFrames} @ {fps}fps
+                    </span>
+                    <div className="flex items-center gap-1">
+                        <span className="text-[10px] text-zinc-600">FPS</span>
+                        <input
+                            type="number"
+                            min={1}
+                            max={60}
+                            value={fps}
+                            onChange={(e) => setFps(Number(e.target.value))}
+                            className="w-10 bg-zinc-900 border border-white/10 rounded px-1 py-0.5 text-[10px] text-zinc-300 text-center focus:outline-none focus:border-violet-500/50"
+                        />
+                    </div>
+                </div>
+
+                {/* Frame strip */}
+                <div className="flex gap-0.5 px-2 pb-2 overflow-x-auto">
+                    {Array.from({ length: totalFrames }, (_, i) => (
+                        <button
+                            key={i}
+                            onClick={() => setCurrentFrame(i)}
+                            className={`flex-shrink-0 w-8 h-8 rounded border transition-all flex items-center justify-center text-[9px] font-mono ${
+                                currentFrame === i
+                                    ? 'border-violet-500 bg-violet-500/20 text-violet-300'
+                                    : 'border-white/5 bg-zinc-900 text-zinc-600 hover:border-white/10'
+                            }`}
+                        >
+                            {i + 1}
+                        </button>
+                    ))}
+                </div>
+            </div>
+        </div>
+    );
+}
+
+// ── Main Component ───────────────────────────────────────────────────
+
+export default function AssetStudio() {
+    const { assetStudioTab, setAssetStudioTab, setActiveRightPanel } = useEditorStore();
+
+    return (
+        <div className="flex flex-col h-full bg-zinc-950">
+            {/* Header */}
+            <div className="flex items-center justify-between px-3 py-2 border-b border-white/5">
+                <div className="flex items-center gap-2">
+                    <div className="w-5 h-5 rounded bg-gradient-to-br from-violet-500 to-fuchsia-600 flex items-center justify-center">
+                        <Sparkles size={10} className="text-white" />
+                    </div>
+                    <span className="text-sm font-semibold text-zinc-200">Asset Studio</span>
+                </div>
+                <button
+                    onClick={() => setActiveRightPanel('chat')}
+                    className="text-[10px] text-zinc-500 hover:text-zinc-300 px-2 py-0.5 rounded hover:bg-white/5 transition-colors"
+                >
+                    Back to Chat
+                </button>
+            </div>
+
+            {/* Tabs */}
+            <div className="flex border-b border-white/5">
+                {TABS.map((tab) => {
+                    const Icon = tab.icon;
+                    return (
+                        <button
+                            key={tab.id}
+                            onClick={() => setAssetStudioTab(tab.id)}
+                            className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-xs transition-colors ${
+                                assetStudioTab === tab.id
+                                    ? 'text-violet-400 border-b-2 border-violet-500 bg-violet-500/5'
+                                    : 'text-zinc-500 hover:text-zinc-300'
+                            }`}
+                        >
+                            <Icon size={12} />
+                            {tab.label}
+                        </button>
+                    );
+                })}
+            </div>
+
+            {/* Tab content */}
+            {assetStudioTab === 'generate' && <GenerateTab />}
+            {assetStudioTab === 'gallery' && <GalleryTab />}
+            {assetStudioTab === 'timeline' && <TimelineTab />}
+        </div>
+    );
+}
