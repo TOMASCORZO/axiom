@@ -1,8 +1,15 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useEditorStore } from '@/lib/store';
-import { X, Code, Gamepad2, Settings, Image, File } from 'lucide-react';
+import { X, Code, Gamepad2, Settings, Image, File, ZoomIn, ZoomOut, Download } from 'lucide-react';
+
+const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'webp', 'svg', 'gif', 'bmp', 'ico']);
+
+function getImageUrl(storageKey: string): string {
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+    return `${supabaseUrl}/storage/v1/object/public/assets/${storageKey}`;
+}
 
 function getTabIcon(name: string) {
     const ext = name.split('.').pop()?.toLowerCase();
@@ -71,6 +78,88 @@ function highlightLine(line: string, ext: string): React.ReactNode {
     return line;
 }
 
+function ImagePreview({ src, fileName, sizeBytes }: { src: string; fileName: string; sizeBytes: number }) {
+    const [zoom, setZoom] = useState(1);
+    const [imgSize, setImgSize] = useState<{ w: number; h: number } | null>(null);
+
+    const sizeLabel = sizeBytes > 1024 * 1024
+        ? `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`
+        : `${Math.round(sizeBytes / 1024)} KB`;
+
+    return (
+        <div className="flex flex-col h-full">
+            {/* Toolbar */}
+            <div className="flex items-center gap-2 px-3 py-1.5 border-b border-white/5 bg-zinc-900/30">
+                <button
+                    onClick={() => setZoom(z => Math.max(0.25, z / 1.5))}
+                    className="p-1 rounded text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors"
+                    title="Zoom out"
+                >
+                    <ZoomOut size={13} />
+                </button>
+                <span className="text-[10px] text-zinc-500 min-w-[40px] text-center">{Math.round(zoom * 100)}%</span>
+                <button
+                    onClick={() => setZoom(z => Math.min(8, z * 1.5))}
+                    className="p-1 rounded text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors"
+                    title="Zoom in"
+                >
+                    <ZoomIn size={13} />
+                </button>
+                <button
+                    onClick={() => setZoom(1)}
+                    className="px-1.5 py-0.5 rounded text-[10px] text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors"
+                >
+                    1:1
+                </button>
+                <button
+                    onClick={() => setZoom(0)} // 0 = fit
+                    className="px-1.5 py-0.5 rounded text-[10px] text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors"
+                >
+                    Fit
+                </button>
+                <div className="flex-1" />
+                {imgSize && (
+                    <span className="text-[10px] text-zinc-600">{imgSize.w} x {imgSize.h}px</span>
+                )}
+                <span className="text-[10px] text-zinc-600">{sizeLabel}</span>
+                <a
+                    href={src}
+                    download={fileName}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="p-1 rounded text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors"
+                    title="Download"
+                >
+                    <Download size={13} />
+                </a>
+            </div>
+
+            {/* Image area with checkerboard */}
+            <div className="flex-1 overflow-auto flex items-center justify-center p-4 bg-zinc-950">
+                {/* Checkerboard background behind image */}
+                <div className="relative inline-block">
+                    <div className="absolute inset-0 rounded bg-[length:12px_12px] bg-[position:0_0,6px_6px] bg-[image:linear-gradient(45deg,#1a1a2e_25%,transparent_25%,transparent_75%,#1a1a2e_75%),linear-gradient(45deg,#1a1a2e_25%,transparent_25%,transparent_75%,#1a1a2e_75%)]" />
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                        src={src}
+                        alt={fileName}
+                        className="relative block"
+                        style={zoom === 0
+                            ? { maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }
+                            : { width: imgSize ? imgSize.w * zoom : 'auto', imageRendering: zoom >= 2 ? 'pixelated' : 'auto' }
+                        }
+                        onLoad={(e) => {
+                            const img = e.currentTarget;
+                            setImgSize({ w: img.naturalWidth, h: img.naturalHeight });
+                        }}
+                        draggable={false}
+                    />
+                </div>
+            </div>
+        </div>
+    );
+}
+
 export default function CodeEditor() {
     const { activeFile, openFiles, files, setActiveFile, closeFile } = useEditorStore();
 
@@ -80,6 +169,7 @@ export default function CodeEditor() {
     }, [activeFile, files]);
 
     const ext = activeFile?.split('.').pop()?.toLowerCase() ?? '';
+    const isImage = IMAGE_EXTENSIONS.has(ext);
 
     const lines = useMemo(() => {
         if (!activeFileData?.text_content) return [];
@@ -120,9 +210,15 @@ export default function CodeEditor() {
                 })}
             </div>
 
-            {/* Code content */}
+            {/* Content */}
             <div className="flex-1 overflow-auto scrollbar-thin scrollbar-thumb-zinc-800">
-                {activeFileData ? (
+                {isImage && activeFileData?.storage_key ? (
+                    <ImagePreview
+                        src={getImageUrl(activeFileData.storage_key)}
+                        fileName={activeFile?.split('/').pop() ?? 'image'}
+                        sizeBytes={activeFileData.size_bytes}
+                    />
+                ) : activeFileData ? (
                     <div className="font-mono text-[13px] leading-6">
                         {lines.map((line, i) => (
                             <div key={i} className="flex hover:bg-white/[0.02]">
@@ -147,8 +243,8 @@ export default function CodeEditor() {
                 )}
             </div>
 
-            {/* Status bar */}
-            {activeFileData && (
+            {/* Status bar (text files only) */}
+            {activeFileData && !isImage && (
                 <div className="flex items-center gap-4 px-3 py-1 bg-zinc-900/30 border-t border-white/5 text-[10px] text-zinc-600">
                     <span>{activeFile}</span>
                     <span>{lines.length} lines</span>
