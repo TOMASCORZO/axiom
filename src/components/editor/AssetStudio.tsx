@@ -215,10 +215,12 @@ const SOURCE_COLORS: Record<string, string> = {
 };
 
 function FreeAssetSearch() {
+    const { project, addConsoleEntry, refreshProjectFiles } = useEditorStore();
     const [searchQuery, setSearchQuery] = useState('');
     const [searching, setSearching] = useState(false);
     const [results, setResults] = useState<FreeAssetResult[]>([]);
     const [hasSearched, setHasSearched] = useState(false);
+    const [importing, setImporting] = useState<string | null>(null);
     const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     const doSearch = useCallback(async (query: string) => {
@@ -235,6 +237,61 @@ function FreeAssetSearch() {
         } catch { /* network error — silently fail */ }
         setSearching(false);
     }, []);
+
+    const handleImport = useCallback(async (result: FreeAssetResult) => {
+        if (!project?.id || importing) return;
+        const ext = result.download_url?.endsWith('.zip') ? 'zip' : 'png';
+        const safeName = result.title.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 30);
+        const targetPath = `assets/${safeName}.${ext}`;
+
+        setImporting(result.title);
+        addConsoleEntry({
+            id: crypto.randomUUID(),
+            level: 'log',
+            message: `[Asset Studio] Importing "${result.title}" from ${result.source}...`,
+            timestamp: new Date().toISOString(),
+        });
+
+        try {
+            const res = await fetch('/api/assets/import', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    project_id: project.id,
+                    download_url: result.download_url,
+                    preview_url: result.preview_url,
+                    target_path: targetPath,
+                    title: result.title,
+                    source: result.source,
+                }),
+            });
+            const data = await res.json();
+            if (res.ok && data.success) {
+                addConsoleEntry({
+                    id: crypto.randomUUID(),
+                    level: 'log',
+                    message: `[Asset Studio] Imported "${result.title}" → ${targetPath} (${Math.round(data.size_bytes / 1024)}KB)`,
+                    timestamp: new Date().toISOString(),
+                });
+                refreshProjectFiles(project.id);
+            } else {
+                addConsoleEntry({
+                    id: crypto.randomUUID(),
+                    level: 'error',
+                    message: `[Asset Studio] Import failed: ${data.error}`,
+                    timestamp: new Date().toISOString(),
+                });
+            }
+        } catch {
+            addConsoleEntry({
+                id: crypto.randomUUID(),
+                level: 'error',
+                message: `[Asset Studio] Import failed: network error`,
+                timestamp: new Date().toISOString(),
+            });
+        }
+        setImporting(null);
+    }, [project, importing, addConsoleEntry, refreshProjectFiles]);
 
     const handleInput = (value: string) => {
         setSearchQuery(value);
@@ -319,12 +376,18 @@ function FreeAssetSearch() {
                                 >
                                     <ExternalLink size={12} />
                                 </a>
-                                {r.download_url && (
+                                {(r.download_url || r.preview_url) && (
                                     <button
-                                        className="p-1 rounded text-violet-400 hover:text-violet-300 hover:bg-violet-500/10 transition-colors"
+                                        onClick={() => handleImport(r)}
+                                        disabled={importing !== null}
+                                        className="p-1 rounded text-violet-400 hover:text-violet-300 hover:bg-violet-500/10 transition-colors disabled:opacity-40"
                                         title="Import to project"
                                     >
-                                        <FolderPlus size={12} />
+                                        {importing === r.title ? (
+                                            <Loader2 size={12} className="animate-spin" />
+                                        ) : (
+                                            <FolderPlus size={12} />
+                                        )}
                                     </button>
                                 )}
                             </div>
