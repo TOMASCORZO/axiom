@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import type { Project, ProjectFile, FileNode } from '@/types/project';
-import type { ChatMessage, ToolCallDisplay } from '@/types/agent';
+import type { ChatMessage, ToolCallDisplay, ConversationSummary } from '@/types/agent';
 import type { ConsoleEntry, EngineLoadProgress } from '@/types/engine';
 
 // ── Editor Store ───────────────────────────────────────────────────
@@ -22,6 +22,10 @@ interface EditorState {
     messages: ChatMessage[];
     isAgentBusy: boolean;
     activeToolCalls: ToolCallDisplay[];
+    conversations: ConversationSummary[];
+    activeConversationId: string | null;
+    isLoadingConversations: boolean;
+    chatView: 'chat' | 'history';
 
     // Console
     consoleEntries: ConsoleEntry[];
@@ -56,6 +60,13 @@ interface EditorState {
     setActiveBottomTab: (tab: 'console' | 'build' | 'errors') => void;
     refreshProjectFiles: (projectId: string) => Promise<void>;
     addProjectFiles: (newFiles: Array<{ path: string; content: string; size_bytes: number; content_type: string }>) => void;
+    setChatView: (view: 'chat' | 'history') => void;
+    setConversations: (conversations: ConversationSummary[]) => void;
+    setActiveConversationId: (id: string | null) => void;
+    setIsLoadingConversations: (loading: boolean) => void;
+    loadConversations: (projectId: string) => Promise<void>;
+    switchConversation: (conversationId: string, projectId: string) => Promise<void>;
+    newConversation: () => void;
 }
 
 export const useEditorStore = create<EditorState>((set) => ({
@@ -71,6 +82,10 @@ export const useEditorStore = create<EditorState>((set) => ({
     messages: [],
     isAgentBusy: false,
     activeToolCalls: [],
+    conversations: [],
+    activeConversationId: null,
+    isLoadingConversations: false,
+    chatView: 'chat',
     consoleEntries: [],
     leftPanelWidth: 220,
     rightPanelWidth: 340,
@@ -157,6 +172,53 @@ export const useEditorStore = create<EditorState>((set) => ({
 
     setBottomPanelHeight: (height) => set({ bottomPanelHeight: height }),
     setActiveBottomTab: (tab) => set({ activeBottomTab: tab }),
+
+    setChatView: (view) => set({ chatView: view }),
+    setConversations: (conversations) => set({ conversations }),
+    setActiveConversationId: (id) => set({ activeConversationId: id }),
+    setIsLoadingConversations: (loading) => set({ isLoadingConversations: loading }),
+
+    loadConversations: async (projectId: string) => {
+        set({ isLoadingConversations: true });
+        try {
+            const res = await fetch(`/api/projects/${projectId}/conversations`);
+            if (res.ok) {
+                const data = await res.json();
+                set({ conversations: data.conversations ?? [] });
+            }
+        } catch {
+            // Silent fail
+        } finally {
+            set({ isLoadingConversations: false });
+        }
+    },
+
+    switchConversation: async (conversationId: string, projectId: string) => {
+        set({ activeConversationId: conversationId, chatView: 'chat', messages: [], isAgentBusy: false });
+        try {
+            const res = await fetch(`/api/projects/${projectId}/conversations/${conversationId}`);
+            if (!res.ok) return;
+            const data = await res.json();
+            const messages: ChatMessage[] = (data.messages ?? [])
+                .filter((m: any) => m.role === 'user' || m.role === 'assistant')
+                .map((m: any) => ({
+                    id: m.id,
+                    role: m.role as 'user' | 'assistant',
+                    content: m.content,
+                    timestamp: m.created_at,
+                }));
+            set({ messages });
+        } catch {
+            // Silent fail
+        }
+    },
+
+    newConversation: () => set({
+        activeConversationId: null,
+        messages: [],
+        chatView: 'chat',
+        isAgentBusy: false,
+    }),
 
     refreshProjectFiles: async (projectId: string) => {
         try {

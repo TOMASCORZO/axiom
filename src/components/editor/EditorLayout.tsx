@@ -4,7 +4,7 @@ import Toolbar from './Toolbar';
 import FileTree from './FileTree';
 import AxiomViewport from './AxiomViewport';
 import CodeEditor from './CodeEditor';
-import ChatPanel from './ChatPanel';
+import ChatPanel from '@/components/chat/ChatPanel';
 import ConsolePanel from './ConsolePanel';
 import SubsystemsPanel from './SubsystemsPanel';
 import { useEditorStore } from '@/lib/store';

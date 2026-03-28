@@ -78,6 +78,16 @@ export interface ToolCallDisplay {
     filesModified?: string[];
 }
 
+// ── Conversation Types ────────────────────────────────────────────
+
+export interface ConversationSummary {
+    id: string;
+    title: string;
+    messageCount: number;
+    createdAt: string;
+    lastMessageAt: string;
+}
+
 // ── Memory Types ───────────────────────────────────────────────────
 
 export interface ProjectMemory {
