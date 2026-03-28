@@ -14,7 +14,7 @@ export async function GET(
         const admin = getAdminClient();
         const { data: files, error } = await admin
             .from('project_files')
-            .select('id, path, content_type, text_content, size_bytes, updated_at')
+            .select('id, path, content_type, text_content, storage_key, size_bytes, updated_at')
             .eq('project_id', id)
             .order('path');
 
