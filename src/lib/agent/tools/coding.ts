@@ -30,16 +30,15 @@ async function upsertFile(ctx: ToolContext, path: string, content: string): Prom
     ctx.createdFiles.push({ path, content, size_bytes: sizeBytes, content_type: 'text' });
     try {
         const admin = getAdmin();
-        admin.from('project_files').upsert({
+        const { error } = await admin.from('project_files').upsert({
             project_id: ctx.projectId,
             path,
             content_type: 'text',
             text_content: content,
             size_bytes: sizeBytes,
             updated_at: new Date().toISOString(),
-        }, { onConflict: 'project_id,path' }).select('id').then(({ error }) => {
-            if (error) console.error(`[axiom] File write failed for ${path}:`, error.message);
-        });
+        }, { onConflict: 'project_id,path' }).select('id');
+        if (error) console.error(`[axiom] File write failed for ${path}:`, error.message);
     } catch { /* Supabase not configured */ }
 }
 

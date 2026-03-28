@@ -208,8 +208,14 @@ export interface ProjectFile {
  * This is the main entry point — call it right before sending files to the engine.
  */
 export function translateProjectFiles(axiomFiles: ProjectFile[]): ProjectFile[] {
-    return axiomFiles.map((file) => ({
+    const result = axiomFiles.map((file) => ({
         path: translatePath(file.path),
         content: translateContent(file.path, file.content),
     }));
+    console.log('[axiom-translate] Input files:', axiomFiles.map(f => f.path));
+    console.log('[axiom-translate] Output files:', result.map(f => f.path));
+    for (const f of result) {
+        console.log(`[axiom-translate] ${f.path} (${f.content.length} chars, starts: ${f.content.slice(0, 80).replace(/\n/g, '\\n')})`);
+    }
+    return result;
 }

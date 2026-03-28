@@ -49,6 +49,12 @@ export class AxiomEngineBridge {
         this.iframe = iframe;
         this.boundListener = this.handleMessage.bind(this);
         window.addEventListener('message', this.boundListener);
+
+        // Send a ping — the shell will respond with 'ready' if it's already loaded.
+        // This handles the case where 'ready' was sent before the bridge connected.
+        try {
+            iframe.contentWindow?.postMessage({ source: 'axiom-app', type: 'ping' }, '*');
+        } catch { /* cross-origin or not loaded yet — shell will send ready when it loads */ }
     }
 
     /**

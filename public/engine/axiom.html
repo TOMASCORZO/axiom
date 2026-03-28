@@ -73,6 +73,10 @@
             if (!data || data.source !== 'axiom-app') return;
 
             switch (data.type) {
+                case 'ping':
+                    // Parent bridge connected after shell loaded — re-send ready
+                    sendToParent({ type: 'ready' });
+                    break;
                 case 'start':
                     startEngine(data.files || []);
                     break;

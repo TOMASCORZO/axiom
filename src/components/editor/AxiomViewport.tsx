@@ -177,6 +177,11 @@ function WasmEngine({ isPlaying }: { isPlaying: boolean }) {
             engineBridge.connect(iframe);
         };
 
+        // If iframe already loaded (cached), connect immediately
+        if (iframe.contentDocument?.readyState === 'complete') {
+            engineBridge.connect(iframe);
+        }
+
         iframe.addEventListener('load', handleLoad);
 
         const unsubscribe = engineBridge.onMessage((msg) => {
@@ -229,11 +234,12 @@ function WasmEngine({ isPlaying }: { isPlaying: boolean }) {
                 .filter((f) => f.text_content != null)
                 .map((f) => ({ path: f.path, content: f.text_content ?? '' }));
             const godotFiles = translateProjectFiles(axiomFiles);
+            console.log('[axiom] Starting engine with', godotFiles.length, 'files:', godotFiles.map(f => f.path));
             engineBridge.startGame(godotFiles);
         } else if (!isPlaying && engineBridge.isRunning) {
             engineBridge.stopGame();
         }
-    }, [isPlaying, files]);
+    }, [isPlaying, files, engineState]);
 
     return (
         <div className="relative w-full h-full">

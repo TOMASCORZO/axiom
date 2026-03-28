@@ -228,8 +228,18 @@ export const useEditorStore = create<EditorState>((set) => ({
                 return;
             }
             const data = await res.json();
-            console.log('[axiom] refreshProjectFiles:', data.files?.length ?? 0, 'files');
-            const files = data.files ?? [];
+            const dbFiles: ProjectFile[] = data.files ?? [];
+            console.log('[axiom] refreshProjectFiles:', dbFiles.length, 'files from DB');
+
+            // Merge: DB files win, but preserve any in-memory files not yet in DB
+            const dbMap = new Map(dbFiles.map(f => [f.path, f]));
+            const currentFiles = useEditorStore.getState().files;
+            for (const cf of currentFiles) {
+                if (!dbMap.has(cf.path) && cf.text_content != null) {
+                    dbMap.set(cf.path, cf);
+                }
+            }
+            const files = Array.from(dbMap.values());
             set({ files });
 
             // Rebuild file tree
