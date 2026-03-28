@@ -18,17 +18,21 @@ async function resolveImageUrl(pageUrl: string): Promise<string | null> {
         if (!res.ok) return null;
         const html = await res.text();
 
-        // Try og:image first (works for Kenney, many others)
-        const ogMatch = html.match(/<meta\s+property="og:image"\s+content="([^"]+)"/);
+        // Try og:image first (handles both single and double quotes)
+        const ogMatch = html.match(/<meta\s+property=["']og:image["']\s+content=["']([^"']+)["']/);
         if (ogMatch) return ogMatch[1];
 
         // Try twitter:image
-        const twMatch = html.match(/<meta\s+name="twitter:image"\s+content="([^"]+)"/);
+        const twMatch = html.match(/<meta\s+name=["']twitter:image["']\s+content=["']([^"']+)["']/);
         if (twMatch) return twMatch[1];
 
-        // Try first large image in page content
-        const imgMatch = html.match(/<img[^>]+src="(https?:\/\/[^"]+(?:preview|thumbnail|cover|banner)[^"]*\.(?:png|jpg|webp))"/i);
+        // Try img with preview/thumbnail/cover/banner in src (single or double quotes)
+        const imgMatch = html.match(/<img[^>]+src=["'](https?:\/\/[^"']+(?:preview|thumbnail|cover|banner)[^"']*\.(?:png|jpg|webp))["']/i);
         if (imgMatch) return imgMatch[1];
+
+        // Fallback: any img with a common image extension on the same domain
+        const genericMatch = html.match(/<img[^>]+src=["'](https?:\/\/[^"']+\.(?:png|jpg|webp))["']/i);
+        if (genericMatch) return genericMatch[1];
 
         return null;
     } catch {
