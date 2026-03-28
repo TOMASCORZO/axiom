@@ -1,8 +1,9 @@
 'use client';
 
-import { useState, useRef } from 'react';
+import { useState, useRef, useCallback } from 'react';
 import { useEditorStore } from '@/lib/store';
-import type { Asset, AssetType, AssetStyle } from '@/types/asset';
+import type { AssetType, AssetStyle } from '@/types/asset';
+import type { FreeAssetResult } from '@/lib/assets/search';
 import {
     Sparkles,
     Image as ImageIcon,
@@ -16,10 +17,9 @@ import {
     FolderPlus,
     Trash2,
     Loader2,
-    ChevronLeft,
-    ChevronRight,
     Wand2,
     Search,
+    ExternalLink,
 } from 'lucide-react';
 
 // ── Tab Navigation ───────────────────────────────────────────────────
@@ -200,18 +200,145 @@ function GenerateTab() {
                 )}
             </button>
 
-            {/* Quick Search */}
-            <div className="pt-2 border-t border-white/5">
-                <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">Or search free assets</label>
-                <div className="relative">
-                    <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-600" />
-                    <input
-                        type="text"
-                        placeholder="Search Kenney, OpenGameArt, itch.io..."
-                        className="w-full bg-zinc-900 border border-white/10 rounded-lg pl-7 pr-3 py-2 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-violet-500/50 transition-colors"
-                    />
-                </div>
+            {/* Free Asset Search */}
+            <FreeAssetSearch />
+        </div>
+    );
+}
+
+// ── Free Asset Search ────────────────────────────────────────────────
+
+const SOURCE_COLORS: Record<string, string> = {
+    Kenney: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20',
+    OpenGameArt: 'text-sky-400 bg-sky-500/10 border-sky-500/20',
+    'itch.io': 'text-rose-400 bg-rose-500/10 border-rose-500/20',
+};
+
+function FreeAssetSearch() {
+    const [searchQuery, setSearchQuery] = useState('');
+    const [searching, setSearching] = useState(false);
+    const [results, setResults] = useState<FreeAssetResult[]>([]);
+    const [hasSearched, setHasSearched] = useState(false);
+    const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    const doSearch = useCallback(async (query: string) => {
+        if (!query.trim()) { setResults([]); setHasSearched(false); return; }
+        setSearching(true);
+        setHasSearched(true);
+        try {
+            const params = new URLSearchParams({ q: query.trim(), type: 'sprite' });
+            const res = await fetch(`/api/assets/search?${params}`);
+            if (res.ok) {
+                const data = await res.json();
+                setResults(data.results ?? []);
+            }
+        } catch { /* network error — silently fail */ }
+        setSearching(false);
+    }, []);
+
+    const handleInput = (value: string) => {
+        setSearchQuery(value);
+        if (debounceRef.current) clearTimeout(debounceRef.current);
+        debounceRef.current = setTimeout(() => doSearch(value), 400);
+    };
+
+    const handleKeyDown = (e: React.KeyboardEvent) => {
+        if (e.key === 'Enter') {
+            if (debounceRef.current) clearTimeout(debounceRef.current);
+            doSearch(searchQuery);
+        }
+    };
+
+    return (
+        <div className="pt-2 border-t border-white/5">
+            <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">
+                Or search free assets
+            </label>
+            <div className="relative">
+                <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-600" />
+                {searching && (
+                    <Loader2 size={12} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-violet-400 animate-spin" />
+                )}
+                <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => handleInput(e.target.value)}
+                    onKeyDown={handleKeyDown}
+                    placeholder="Search Kenney, OpenGameArt, itch.io..."
+                    className="w-full bg-zinc-900 border border-white/10 rounded-lg pl-7 pr-8 py-2 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-violet-500/50 transition-colors"
+                />
             </div>
+
+            {/* Results */}
+            {results.length > 0 && (
+                <div className="mt-2 flex flex-col gap-1 max-h-[240px] overflow-y-auto">
+                    {results.map((r, i) => (
+                        <div
+                            key={`${r.source}-${i}`}
+                            className="flex items-start gap-2 p-2 rounded-lg bg-zinc-900/50 border border-white/5 hover:border-white/10 transition-colors group"
+                        >
+                            {/* Preview thumbnail */}
+                            <div className="flex-shrink-0 w-10 h-10 rounded bg-zinc-800 border border-white/5 flex items-center justify-center overflow-hidden">
+                                {r.preview_url ? (
+                                    <img
+                                        src={r.preview_url}
+                                        alt={r.title}
+                                        className="w-full h-full object-cover"
+                                        onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                                    />
+                                ) : (
+                                    <ImageIcon size={14} className="text-zinc-600" />
+                                )}
+                            </div>
+
+                            {/* Info */}
+                            <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-1.5 mb-0.5">
+                                    <span className="text-xs text-zinc-200 truncate font-medium">
+                                        {r.title}
+                                    </span>
+                                </div>
+                                <div className="flex items-center gap-1.5">
+                                    <span className={`text-[9px] px-1.5 py-0.5 rounded-full border ${SOURCE_COLORS[r.source] ?? 'text-zinc-400 bg-zinc-800 border-zinc-700'}`}>
+                                        {r.source}
+                                    </span>
+                                    <span className="text-[9px] text-zinc-600 truncate">
+                                        {r.license}
+                                    </span>
+                                </div>
+                            </div>
+
+                            {/* Actions */}
+                            <div className="flex-shrink-0 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                <a
+                                    href={r.url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="p-1 rounded text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors"
+                                    title="View on source"
+                                >
+                                    <ExternalLink size={12} />
+                                </a>
+                                {r.download_url && (
+                                    <button
+                                        className="p-1 rounded text-violet-400 hover:text-violet-300 hover:bg-violet-500/10 transition-colors"
+                                        title="Import to project"
+                                    >
+                                        <FolderPlus size={12} />
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            )}
+
+            {/* Empty state */}
+            {hasSearched && !searching && results.length === 0 && (
+                <div className="mt-2 text-center py-3 text-xs text-zinc-600">
+                    No results for &quot;{searchQuery}&quot;
+                </div>
+            )}
         </div>
     );
 }
