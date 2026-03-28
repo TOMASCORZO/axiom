@@ -20,6 +20,8 @@ import {
     Wand2,
     Search,
     ExternalLink,
+    Check,
+    X,
 } from 'lucide-react';
 
 // ── Tab Navigation ───────────────────────────────────────────────────
@@ -214,19 +216,25 @@ const SOURCE_COLORS: Record<string, string> = {
     'itch.io': 'text-rose-400 bg-rose-500/10 border-rose-500/20',
 };
 
+type ImportStatus = 'idle' | 'importing' | 'success' | 'error';
+interface ResultState { status: ImportStatus; error?: string; path?: string; sizeKb?: number }
+
 function FreeAssetSearch() {
-    const { project, addConsoleEntry, refreshProjectFiles } = useEditorStore();
+    const { project, addConsoleEntry, addAsset, refreshProjectFiles, setAssetStudioTab } = useEditorStore();
     const [searchQuery, setSearchQuery] = useState('');
     const [searching, setSearching] = useState(false);
     const [results, setResults] = useState<FreeAssetResult[]>([]);
     const [hasSearched, setHasSearched] = useState(false);
-    const [importing, setImporting] = useState<string | null>(null);
+    const [importStates, setImportStates] = useState<Record<string, ResultState>>({});
     const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    const resultKey = (r: FreeAssetResult, i: number) => `${r.source}-${r.title}-${i}`;
 
     const doSearch = useCallback(async (query: string) => {
         if (!query.trim()) { setResults([]); setHasSearched(false); return; }
         setSearching(true);
         setHasSearched(true);
+        setImportStates({});
         try {
             const params = new URLSearchParams({ q: query.trim(), type: 'sprite' });
             const res = await fetch(`/api/assets/search?${params}`);
@@ -234,23 +242,19 @@ function FreeAssetSearch() {
                 const data = await res.json();
                 setResults(data.results ?? []);
             }
-        } catch { /* network error — silently fail */ }
+        } catch { /* network error */ }
         setSearching(false);
     }, []);
 
-    const handleImport = useCallback(async (result: FreeAssetResult) => {
-        if (!project?.id || importing) return;
-        const ext = result.download_url?.endsWith('.zip') ? 'zip' : 'png';
-        const safeName = result.title.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 30);
-        const targetPath = `assets/${safeName}.${ext}`;
+    const handleImport = useCallback(async (result: FreeAssetResult, idx: number) => {
+        if (!project?.id) return;
+        const key = resultKey(result, idx);
+        if (importStates[key]?.status === 'importing' || importStates[key]?.status === 'success') return;
 
-        setImporting(result.title);
-        addConsoleEntry({
-            id: crypto.randomUUID(),
-            level: 'log',
-            message: `[Asset Studio] Importing "${result.title}" from ${result.source}...`,
-            timestamp: new Date().toISOString(),
-        });
+        const safeName = result.title.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 30);
+        const targetPath = `assets/${safeName}.png`;
+
+        setImportStates(prev => ({ ...prev, [key]: { status: 'importing' } }));
 
         try {
             const res = await fetch('/api/assets/import', {
@@ -260,6 +264,7 @@ function FreeAssetSearch() {
                     project_id: project.id,
                     download_url: result.download_url,
                     preview_url: result.preview_url,
+                    page_url: result.url,
                     target_path: targetPath,
                     title: result.title,
                     source: result.source,
@@ -267,31 +272,42 @@ function FreeAssetSearch() {
             });
             const data = await res.json();
             if (res.ok && data.success) {
+                const sizeKb = Math.round(data.size_bytes / 1024);
+                setImportStates(prev => ({ ...prev, [key]: { status: 'success', path: targetPath, sizeKb } }));
                 addConsoleEntry({
-                    id: crypto.randomUUID(),
-                    level: 'log',
-                    message: `[Asset Studio] Imported "${result.title}" → ${targetPath} (${Math.round(data.size_bytes / 1024)}KB)`,
+                    id: crypto.randomUUID(), level: 'log',
+                    message: `[Asset Studio] Imported "${result.title}" → ${targetPath} (${sizeKb}KB)`,
                     timestamp: new Date().toISOString(),
+                });
+                // Add to gallery
+                addAsset({
+                    id: crypto.randomUUID(),
+                    project_id: project.id,
+                    name: result.title,
+                    asset_type: 'sprite',
+                    storage_key: data.storage_key,
+                    thumbnail_key: data.public_url || null,
+                    file_format: 'png',
+                    width: null, height: null,
+                    metadata: { tags: [result.source, result.license] },
+                    generation_prompt: null,
+                    generation_model: null,
+                    size_bytes: data.size_bytes,
+                    created_at: new Date().toISOString(),
                 });
                 refreshProjectFiles(project.id);
             } else {
+                setImportStates(prev => ({ ...prev, [key]: { status: 'error', error: data.error } }));
                 addConsoleEntry({
-                    id: crypto.randomUUID(),
-                    level: 'error',
-                    message: `[Asset Studio] Import failed: ${data.error}`,
+                    id: crypto.randomUUID(), level: 'error',
+                    message: `[Asset Studio] Failed: ${data.error}`,
                     timestamp: new Date().toISOString(),
                 });
             }
         } catch {
-            addConsoleEntry({
-                id: crypto.randomUUID(),
-                level: 'error',
-                message: `[Asset Studio] Import failed: network error`,
-                timestamp: new Date().toISOString(),
-            });
+            setImportStates(prev => ({ ...prev, [key]: { status: 'error', error: 'Network error' } }));
         }
-        setImporting(null);
-    }, [project, importing, addConsoleEntry, refreshProjectFiles]);
+    }, [project, importStates, addConsoleEntry, addAsset, refreshProjectFiles]);
 
     const handleInput = (value: string) => {
         setSearchQuery(value);
@@ -305,6 +321,8 @@ function FreeAssetSearch() {
             doSearch(searchQuery);
         }
     };
+
+    const importedCount = Object.values(importStates).filter(s => s.status === 'success').length;
 
     return (
         <div className="pt-2 border-t border-white/5">
@@ -326,73 +344,112 @@ function FreeAssetSearch() {
                 />
             </div>
 
+            {/* Imported count banner */}
+            {importedCount > 0 && (
+                <button
+                    onClick={() => setAssetStudioTab('gallery')}
+                    className="mt-2 w-full py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs flex items-center justify-center gap-1.5 hover:bg-emerald-500/20 transition-colors"
+                >
+                    <Check size={12} />
+                    {importedCount} asset{importedCount > 1 ? 's' : ''} imported — View in Gallery
+                </button>
+            )}
+
             {/* Results */}
             {results.length > 0 && (
                 <div className="mt-2 flex flex-col gap-1 max-h-[240px] overflow-y-auto">
-                    {results.map((r, i) => (
-                        <div
-                            key={`${r.source}-${i}`}
-                            className="flex items-start gap-2 p-2 rounded-lg bg-zinc-900/50 border border-white/5 hover:border-white/10 transition-colors group"
-                        >
-                            {/* Preview thumbnail */}
-                            <div className="flex-shrink-0 w-10 h-10 rounded bg-zinc-800 border border-white/5 flex items-center justify-center overflow-hidden">
-                                {r.preview_url ? (
-                                    <img
-                                        src={r.preview_url}
-                                        alt={r.title}
-                                        className="w-full h-full object-cover"
-                                        onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-                                    />
-                                ) : (
-                                    <ImageIcon size={14} className="text-zinc-600" />
-                                )}
-                            </div>
+                    {results.map((r, i) => {
+                        const key = resultKey(r, i);
+                        const state = importStates[key] ?? { status: 'idle' as ImportStatus };
+                        const isSuccess = state.status === 'success';
+                        const isError = state.status === 'error';
+                        const isImporting = state.status === 'importing';
 
-                            {/* Info */}
-                            <div className="flex-1 min-w-0">
-                                <div className="flex items-center gap-1.5 mb-0.5">
-                                    <span className="text-xs text-zinc-200 truncate font-medium">
+                        return (
+                            <div
+                                key={key}
+                                className={`flex items-start gap-2 p-2 rounded-lg border transition-colors ${
+                                    isSuccess
+                                        ? 'bg-emerald-500/5 border-emerald-500/20'
+                                        : isError
+                                        ? 'bg-red-500/5 border-red-500/20'
+                                        : 'bg-zinc-900/50 border-white/5 hover:border-white/10'
+                                }`}
+                            >
+                                {/* Thumbnail */}
+                                <div className="flex-shrink-0 w-10 h-10 rounded bg-zinc-800 border border-white/5 flex items-center justify-center overflow-hidden">
+                                    {isSuccess ? (
+                                        <Check size={16} className="text-emerald-400" />
+                                    ) : (
+                                        <ImageIcon size={14} className="text-zinc-600" />
+                                    )}
+                                </div>
+
+                                {/* Info */}
+                                <div className="flex-1 min-w-0">
+                                    <span className="text-xs text-zinc-200 truncate font-medium block">
                                         {r.title}
                                     </span>
+                                    <div className="flex items-center gap-1.5 mt-0.5">
+                                        <span className={`text-[9px] px-1.5 py-0.5 rounded-full border ${SOURCE_COLORS[r.source] ?? 'text-zinc-400 bg-zinc-800 border-zinc-700'}`}>
+                                            {r.source}
+                                        </span>
+                                        <span className="text-[9px] text-zinc-600 truncate">
+                                            {r.license}
+                                        </span>
+                                    </div>
+                                    {/* Status messages */}
+                                    {isSuccess && (
+                                        <span className="text-[10px] text-emerald-400 mt-0.5 block">
+                                            Imported to {state.path} ({state.sizeKb}KB)
+                                        </span>
+                                    )}
+                                    {isError && (
+                                        <span className="text-[10px] text-red-400 mt-0.5 block truncate">
+                                            {state.error}
+                                        </span>
+                                    )}
                                 </div>
-                                <div className="flex items-center gap-1.5">
-                                    <span className={`text-[9px] px-1.5 py-0.5 rounded-full border ${SOURCE_COLORS[r.source] ?? 'text-zinc-400 bg-zinc-800 border-zinc-700'}`}>
-                                        {r.source}
-                                    </span>
-                                    <span className="text-[9px] text-zinc-600 truncate">
-                                        {r.license}
-                                    </span>
-                                </div>
-                            </div>
 
-                            {/* Actions */}
-                            <div className="flex-shrink-0 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                                <a
-                                    href={r.url}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="p-1 rounded text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors"
-                                    title="View on source"
-                                >
-                                    <ExternalLink size={12} />
-                                </a>
-                                {(r.download_url || r.preview_url) && (
-                                    <button
-                                        onClick={() => handleImport(r)}
-                                        disabled={importing !== null}
-                                        className="p-1 rounded text-violet-400 hover:text-violet-300 hover:bg-violet-500/10 transition-colors disabled:opacity-40"
-                                        title="Import to project"
+                                {/* Actions */}
+                                <div className="flex-shrink-0 flex gap-1">
+                                    <a
+                                        href={r.url}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="p-1 rounded text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors"
+                                        title="View on source"
                                     >
-                                        {importing === r.title ? (
-                                            <Loader2 size={12} className="animate-spin" />
-                                        ) : (
-                                            <FolderPlus size={12} />
-                                        )}
-                                    </button>
-                                )}
+                                        <ExternalLink size={12} />
+                                    </a>
+                                    {isSuccess ? (
+                                        <span className="p-1 text-emerald-400"><Check size={12} /></span>
+                                    ) : isError ? (
+                                        <button
+                                            onClick={() => handleImport(r, i)}
+                                            className="p-1 rounded text-red-400 hover:text-red-300 hover:bg-red-500/10 transition-colors"
+                                            title="Retry import"
+                                        >
+                                            <X size={12} />
+                                        </button>
+                                    ) : (
+                                        <button
+                                            onClick={() => handleImport(r, i)}
+                                            disabled={isImporting}
+                                            className="p-1 rounded text-violet-400 hover:text-violet-300 hover:bg-violet-500/10 transition-colors disabled:opacity-40"
+                                            title="Import to project"
+                                        >
+                                            {isImporting ? (
+                                                <Loader2 size={12} className="animate-spin" />
+                                            ) : (
+                                                <FolderPlus size={12} />
+                                            )}
+                                        </button>
+                                    )}
+                                </div>
                             </div>
-                        </div>
-                    ))}
+                        );
+                    })}
                 </div>
             )}
 

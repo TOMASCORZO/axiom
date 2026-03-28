@@ -54,8 +54,10 @@ export function searchKenney(query: string, assetType: string): FreeAssetResult[
     return scored.map(({ pack: p }) => ({
         title: p.name,
         url: `https://kenney.nl/assets/${p.slug}`,
-        download_url: `https://kenney.nl/media/pages/assets/${p.slug}/*/content.zip`,
-        preview_url: `https://kenney.nl/media/pages/assets/${p.slug}/*/preview.png`,
+        // Kenney CDN URLs require a hash we don't know — import route resolves them
+        // by scraping the og:image from the page
+        download_url: null,
+        preview_url: null,
         license: 'CC0 (Public Domain)',
         source: 'Kenney',
         author: 'Kenney.nl',
