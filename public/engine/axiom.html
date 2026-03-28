@@ -152,6 +152,13 @@
                     },
                 });
 
+                // Initialize engine — loads the 99MB WASM module
+                statusText.textContent = 'Loading WASM engine...';
+                await engine.init('/engine/axiom');
+
+                progressFill.style.width = '70%';
+                statusText.textContent = 'Loading project files...';
+
                 // Preload project files into the virtual filesystem
                 for (const file of projectFiles) {
                     if (file.content) {
