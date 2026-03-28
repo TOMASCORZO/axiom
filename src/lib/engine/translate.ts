@@ -48,12 +48,17 @@ function translateNodeTypes(content: string): string {
 
 // ── Script Content Translation ────────────────────────────────────
 
-/** Translate .axs script content — maps `extends Entity2D` → `extends Node2D` etc. */
+/** Translate .axs script content — maps `extends Entity2D` → `extends Node2D`, path refs, etc. */
 function translateScript(content: string): string {
     let result = content;
     for (const [axiom, godot] of Object.entries(NODE_TYPE_MAP)) {
         result = result.replaceAll(`extends ${axiom}`, `extends ${godot}`);
     }
+    // Translate file path references inside preload()/load() calls and string literals
+    result = result.replace(/\.axs"/g, '.gd"');
+    result = result.replace(/\.axs'/g, ".gd'");
+    result = result.replace(/\.scene"/g, '.tscn"');
+    result = result.replace(/\.scene'/g, ".tscn'");
     return result;
 }
 
