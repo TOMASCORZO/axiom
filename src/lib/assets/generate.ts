@@ -48,6 +48,11 @@ function pickProvider(preferred?: Provider): Provider {
 export type Model2D = 'sdxl' | 'flux-schnell' | 'flux-dev';
 export type Model3D = 'trellis' | 'hunyuan3d';
 
+export interface LoraWeight {
+    url: string;       // HuggingFace URL, Civitai URL, or direct .safetensors URL
+    scale?: number;    // 0.0–2.0, default 1.0
+}
+
 export interface Generate2DOptions {
     prompt: string;
     model?: Model2D;
@@ -58,6 +63,7 @@ export interface Generate2DOptions {
     steps?: number;
     format?: 'png' | 'jpeg';
     style?: string;
+    loras?: LoraWeight[];
 }
 
 export interface Generate3DOptions {
@@ -179,6 +185,11 @@ async function generate2DFal(opts: Generate2DOptions, model: Model2D): Promise<G
             input.guidance_scale = 3.5;
         }
 
+        // LoRA support — fal.ai accepts loras on SDXL and Flux models
+        if (opts.loras?.length) {
+            input.loras = opts.loras.map(l => ({ path: l.url, scale: l.scale ?? 1.0 }));
+        }
+
         const result = await fal.subscribe(falModel, { input });
         const data = result.data as { images?: Array<{ url: string; width: number; height: number }> };
         const img = data.images?.[0];
@@ -209,10 +220,16 @@ async function generate2DReplicate(opts: Generate2DOptions, model: Model2D): Pro
         return { success: false, model: model, provider: 'replicate', cost: 0, error: 'REPLICATE_API_TOKEN not set' };
     }
 
-    const repModel = REPLICATE_2D_MAP[model];
+    let repModel = REPLICATE_2D_MAP[model];
     const w = opts.width ?? 512;
     const h = opts.height ?? 512;
     const prompt = buildPrompt(opts.prompt, opts.style);
+    const hasLoras = opts.loras && opts.loras.length > 0;
+
+    // Replicate uses a dedicated model for Flux + LoRA
+    if (hasLoras && model === 'flux-dev') {
+        repModel = 'lucataco/flux-dev-lora';
+    }
 
     try {
         let input: Record<string, unknown>;
@@ -242,6 +259,21 @@ async function generate2DReplicate(opts: Generate2DOptions, model: Model2D): Pro
             } else {
                 input.num_inference_steps = opts.steps ?? 28;
                 input.guidance = 3.5;
+            }
+        }
+
+        // LoRA support for Replicate
+        if (hasLoras) {
+            const lora = opts.loras![0]; // Replicate typically takes one LoRA at a time
+            if (model === 'flux-dev') {
+                // lucataco/flux-dev-lora uses hf_lora param
+                input.hf_lora = lora.url;
+                input.lora_scale = lora.scale ?? 1.0;
+            } else if (model === 'sdxl') {
+                // SDXL on Replicate doesn't natively support LoRAs in the base model,
+                // but some fine-tuned versions do. Pass as extra_lora_scale.
+                input.lora_url = lora.url;
+                input.lora_scale = lora.scale ?? 0.8;
             }
         }
 

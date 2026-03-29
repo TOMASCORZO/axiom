@@ -103,6 +103,8 @@ function GenerateTab() {
     const [provider, setProvider] = useState<ProviderChoice>('fal');
     const [model2d, setModel2d] = useState<Model2DChoice>('flux-schnell');
     const [model3d, setModel3d] = useState<Model3DChoice>('trellis');
+    const [loraUrl, setLoraUrl] = useState('');
+    const [loraScale, setLoraScale] = useState(1.0);
     const [genError, setGenError] = useState<string | null>(null);
     const [lastCost, setLastCost] = useState<number | null>(null);
 
@@ -144,6 +146,7 @@ function GenerateTab() {
                         model_2d: is3D ? undefined : model2d,
                         model_3d: is3D ? model3d : undefined,
                         provider,
+                        loras: loraUrl.trim() ? [{ url: loraUrl.trim(), scale: loraScale }] : undefined,
                     },
                 }),
             });
@@ -291,6 +294,36 @@ function GenerateTab() {
                     </div>
                 )}
             </div>
+
+            {/* LoRA (2D only) */}
+            {!is3D && (
+                <div>
+                    <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">
+                        LoRA <span className="normal-case text-zinc-600">(optional)</span>
+                    </label>
+                    <div className="flex gap-1.5">
+                        <input
+                            type="text"
+                            value={loraUrl}
+                            onChange={(e) => setLoraUrl(e.target.value)}
+                            placeholder="HuggingFace or Civitai URL..."
+                            className="flex-1 bg-zinc-900 border border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-violet-500/50 transition-colors"
+                        />
+                        <div className="flex items-center gap-1">
+                            <span className="text-[10px] text-zinc-600">Scale</span>
+                            <input
+                                type="number"
+                                min={0}
+                                max={2}
+                                step={0.1}
+                                value={loraScale}
+                                onChange={(e) => setLoraScale(Number(e.target.value))}
+                                className="w-12 bg-zinc-900 border border-white/10 rounded px-1.5 py-1.5 text-xs text-zinc-200 text-center focus:outline-none focus:border-violet-500/50"
+                            />
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {/* Provider + AI Model Selection */}
             <div>
