@@ -210,7 +210,7 @@ async function generate2DFal(opts: Generate2DOptions, model: Model2D): Promise<G
 // ── Replicate 2D ─────────────────────────────────────────────────────
 
 const REPLICATE_2D_MAP: Record<Model2D, string> = {
-    'sdxl':         'stability-ai/sdxl',
+    'sdxl':         'stability-ai/sdxl:7762fd07cf82c948538e41f63f77d685e02b063e37e496e96eefd46c929f9bdc',
     'flux-schnell': 'black-forest-labs/flux-schnell',
     'flux-dev':     'black-forest-labs/flux-dev',
 };
