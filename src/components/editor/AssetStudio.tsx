@@ -58,27 +58,116 @@ const SIZE_PRESETS = [
     { label: '512', w: 512, h: 512 },
 ];
 
+// ── Model & Pricing Info ─────────────────────────────────────────────
+
+type Model2DChoice = 'sdxl' | 'flux-schnell' | 'flux-dev';
+type Model3DChoice = 'trellis' | 'hunyuan3d';
+
+const MODELS_2D: { value: Model2DChoice; label: string; cost: string; desc: string }[] = [
+    { value: 'sdxl',         label: 'SDXL',         cost: 'Free',    desc: 'Fast, good quality' },
+    { value: 'flux-schnell', label: 'Flux Schnell',  cost: '$0.003',  desc: 'Best value' },
+    { value: 'flux-dev',     label: 'Flux Dev',      cost: '$0.025',  desc: 'Highest quality' },
+];
+
+const MODELS_3D: { value: Model3DChoice; label: string; cost: string; desc: string }[] = [
+    { value: 'trellis',   label: 'Trellis',      cost: '$0.02',  desc: 'Fast, cheap' },
+    { value: 'hunyuan3d', label: 'Hunyuan3D v3', cost: '$0.375', desc: 'High quality' },
+];
+
 function GenerateTab() {
-    const { assetGenerating, addConsoleEntry } = useEditorStore();
+    const { project, assetGenerating, setAssetGenerating, addConsoleEntry, addAsset, setAssetStudioTab, refreshProjectFiles } = useEditorStore();
     const [prompt, setPrompt] = useState('');
     const [assetType, setAssetType] = useState<AssetType>('sprite');
     const [style, setStyle] = useState<AssetStyle>('pixel_art');
     const [sizeIdx, setSizeIdx] = useState(1); // 128x128 default
     const [transparentBg, setTransparentBg] = useState(true);
     const [frameCount, setFrameCount] = useState(4);
+    const [model2d, setModel2d] = useState<Model2DChoice>('flux-schnell');
+    const [model3d, setModel3d] = useState<Model3DChoice>('trellis');
+    const [genError, setGenError] = useState<string | null>(null);
+    const [lastCost, setLastCost] = useState<number | null>(null);
 
     const size = SIZE_PRESETS[sizeIdx];
     const isSheet = assetType === 'sprite_sheet';
+    const is3D = assetType === 'model_3d';
 
-    const handleGenerate = () => {
-        if (!prompt.trim()) return;
+    const handleGenerate = async () => {
+        if (!prompt.trim() || !project?.id) return;
+        setAssetGenerating(true);
+        setGenError(null);
+        setLastCost(null);
+
+        const safeName = prompt.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 30);
+        const ext = is3D ? 'glb' : 'png';
+        const targetPath = `assets/${safeName}.${ext}`;
+
         addConsoleEntry({
-            id: crypto.randomUUID(),
-            level: 'log',
-            message: `[Asset Studio] Queued: "${prompt}" (${assetType}, ${style}, ${size.w}x${size.h})`,
+            id: crypto.randomUUID(), level: 'log',
+            message: `[Asset Studio] Generating "${prompt}" (${assetType}, ${is3D ? model3d : model2d})...`,
             timestamp: new Date().toISOString(),
         });
-        // Generation will be wired to AI backends later
+
+        try {
+            const res = await fetch('/api/assets/generate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    project_id: project.id,
+                    prompt: prompt.trim(),
+                    asset_type: assetType,
+                    style,
+                    target_path: targetPath,
+                    options: {
+                        width: size.w,
+                        height: size.h,
+                        transparent_bg: transparentBg,
+                        frame_count: isSheet ? frameCount : undefined,
+                        model_2d: is3D ? undefined : model2d,
+                        model_3d: is3D ? model3d : undefined,
+                    },
+                }),
+            });
+
+            const data = await res.json();
+
+            if (res.ok && data.success) {
+                setLastCost(data.credits_used);
+                addConsoleEntry({
+                    id: crypto.randomUUID(), level: 'log',
+                    message: `[Asset Studio] Generated "${prompt}" → ${targetPath} (${data.credits_used} credits)`,
+                    timestamp: new Date().toISOString(),
+                });
+                addAsset({
+                    id: crypto.randomUUID(),
+                    project_id: project.id,
+                    name: `${prompt.trim().slice(0, 40)}`,
+                    asset_type: assetType,
+                    storage_key: targetPath,
+                    thumbnail_key: null,
+                    file_format: ext,
+                    width: is3D ? null : size.w,
+                    height: is3D ? null : size.h,
+                    metadata: { tags: [style, is3D ? model3d : model2d] },
+                    generation_prompt: prompt.trim(),
+                    generation_model: is3D ? model3d : model2d,
+                    size_bytes: 0,
+                    created_at: new Date().toISOString(),
+                });
+                refreshProjectFiles(project.id);
+                setAssetStudioTab('gallery');
+            } else {
+                setGenError(data.error || 'Generation failed');
+                addConsoleEntry({
+                    id: crypto.randomUUID(), level: 'error',
+                    message: `[Asset Studio] Failed: ${data.error}`,
+                    timestamp: new Date().toISOString(),
+                });
+            }
+        } catch {
+            setGenError('Network error — check your connection');
+        } finally {
+            setAssetGenerating(false);
+        }
     };
 
     return (
@@ -182,6 +271,46 @@ function GenerateTab() {
                     </div>
                 )}
             </div>
+
+            {/* AI Model Selection */}
+            <div>
+                <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">
+                    {is3D ? '3D Model' : '2D Model'}
+                </label>
+                <div className="flex flex-col gap-1">
+                    {(is3D ? MODELS_3D : MODELS_2D).map((m) => (
+                        <button
+                            key={m.value}
+                            onClick={() => is3D ? setModel3d(m.value as Model3DChoice) : setModel2d(m.value as Model2DChoice)}
+                            className={`flex items-center justify-between px-2.5 py-1.5 rounded text-xs transition-colors ${
+                                (is3D ? model3d : model2d) === m.value
+                                    ? 'bg-violet-500/20 text-violet-300 border border-violet-500/30'
+                                    : 'bg-zinc-900 text-zinc-500 border border-white/5 hover:text-zinc-300'
+                            }`}
+                        >
+                            <span className="font-medium">{m.label}</span>
+                            <span className="flex items-center gap-2">
+                                <span className="text-zinc-600">{m.desc}</span>
+                                <span className={`font-mono ${m.cost === 'Free' ? 'text-emerald-400' : 'text-amber-400'}`}>
+                                    {m.cost}
+                                </span>
+                            </span>
+                        </button>
+                    ))}
+                </div>
+            </div>
+
+            {/* Error / Cost display */}
+            {genError && (
+                <div className="px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-xs">
+                    {genError}
+                </div>
+            )}
+            {lastCost !== null && (
+                <div className="px-3 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs text-center">
+                    Generated — {lastCost} credits used
+                </div>
+            )}
 
             {/* Generate Button */}
             <button

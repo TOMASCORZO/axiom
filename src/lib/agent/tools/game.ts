@@ -63,45 +63,24 @@ async function uploadBinaryAsset(ctx: ToolContext, path: string, buffer: ArrayBu
     return storageKey;
 }
 
-// ── Image Generation ───────────────────────────────────────────────
+// ── Image / 3D Generation (via fal.ai) ─────────────────────────────
 
-async function generateImage(params: { prompt: string; width: number; height: number }): Promise<ArrayBuffer | null> {
-    const openaiKey = process.env.OPENAI_API_KEY;
-    if (openaiKey) {
-        try {
-            const size = params.width <= 256 && params.height <= 256 ? '256x256' : params.width <= 512 && params.height <= 512 ? '512x512' : '1024x1024';
-            const res = await fetch('https://api.openai.com/v1/images/generations', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${openaiKey}` },
-                body: JSON.stringify({ model: 'dall-e-3', prompt: params.prompt, n: 1, size, response_format: 'b64_json' }),
-            });
-            if (res.ok) {
-                const data = await res.json() as { data: Array<{ b64_json: string }> };
-                const b64 = data.data[0]?.b64_json;
-                if (b64) {
-                    const binary = atob(b64);
-                    const bytes = new Uint8Array(binary.length);
-                    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-                    return bytes.buffer;
-                }
-            }
-        } catch (err) { console.error('OpenAI image gen failed:', err); }
+import { generate2D, generate3D, downloadResult, type Model2D } from '@/lib/assets/generate';
+
+async function generateImage(params: { prompt: string; width: number; height: number; style?: string; model_2d?: string }): Promise<ArrayBuffer | null> {
+    const model: Model2D = (params.model_2d as Model2D) || (process.env.FAL_KEY ? 'flux-schnell' : 'sdxl');
+    const result = await generate2D({
+        prompt: params.prompt,
+        model,
+        width: params.width,
+        height: params.height,
+        style: params.style,
+        format: 'png',
+    });
+    if (result.success && result.imageUrl) {
+        return downloadResult(result.imageUrl);
     }
-    const fluxKey = process.env.FLUX_API_KEY;
-    if (fluxKey) {
-        try {
-            const res = await fetch('https://fal.run/fal-ai/flux/dev', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Key ${fluxKey}` },
-                body: JSON.stringify({ prompt: params.prompt, image_size: { width: params.width, height: params.height }, num_images: 1 }),
-            });
-            if (res.ok) {
-                const data = await res.json() as { images: Array<{ url: string }> };
-                const imageUrl = data.images?.[0]?.url;
-                if (imageUrl) { const imgRes = await fetch(imageUrl); return imgRes.arrayBuffer(); }
-            }
-        } catch (err) { console.error('FLUX image gen failed:', err); }
-    }
+    console.error('Image generation failed:', result.error);
     return null;
 }
 
@@ -330,7 +309,9 @@ registerTool({
         const width = (input.width as number) || 128;
         const height = (input.height as number) || 128;
         const targetPath = input.target_path as string;
-        const buf = await generateImage({ prompt: `Game sprite: ${prompt}. ${width}x${height}px.`, width, height });
+        const style = input.style as string | undefined;
+        const model2d = input.model_2d as string | undefined;
+        const buf = await generateImage({ prompt: `Game sprite: ${prompt}`, width, height, style, model_2d: model2d });
         if (buf) { await uploadBinaryAsset(ctx, targetPath, buf, 'image/png'); return { callId: '', success: true, output: { message: `Sprite generated at ${targetPath}`, path: targetPath }, filesModified: [targetPath], duration_ms: Date.now() - start }; }
         const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><rect width="100%" height="100%" fill="#8b5cf6" opacity="0.3"/><text x="50%" y="50%" text-anchor="middle" dy=".3em" fill="#fff" font-size="12">${prompt.slice(0, 20)}</text></svg>`;
         await upsertProjectFile(ctx, targetPath, svg, 'text');
@@ -353,7 +334,9 @@ registerTool({
         const width = (input.width as number) || 512;
         const height = (input.height as number) || 512;
         const targetPath = input.target_path as string;
-        const buf = await generateImage({ prompt: `Seamless game texture: ${prompt}. ${width}x${height}px.`, width, height });
+        const tStyle = input.style as string | undefined;
+        const tModel = input.model_2d as string | undefined;
+        const buf = await generateImage({ prompt: `Seamless game texture: ${prompt}`, width, height, style: tStyle, model_2d: tModel });
         if (buf) { await uploadBinaryAsset(ctx, targetPath, buf, 'image/png'); return { callId: '', success: true, output: { message: `Texture at ${targetPath}`, path: targetPath }, filesModified: [targetPath], duration_ms: Date.now() - start }; }
         await upsertProjectFile(ctx, targetPath, `# Placeholder: ${prompt}`, 'text');
         return { callId: '', success: true, output: { message: `Placeholder at ${targetPath}`, placeholder: true }, filesModified: [targetPath], duration_ms: Date.now() - start };
@@ -362,10 +345,15 @@ registerTool({
 
 registerTool({
     name: 'generate_3d_model',
-    description: 'AI-generate a 3D model (GLB) using Meshy AI. Costs 10 credits.',
+    description: 'AI-generate a 3D model (GLB) via fal.ai (Trellis $0.02 or Hunyuan3D $0.375). Costs 10 credits.',
     parameters: {
         type: 'object',
-        properties: { prompt: { type: 'string' }, topology: { type: 'string', enum: ['low_poly', 'standard', 'high_poly'], default: 'standard' }, textured: { type: 'boolean', default: true }, target_path: { type: 'string' } },
+        properties: {
+            prompt: { type: 'string' },
+            model: { type: 'string', enum: ['trellis', 'hunyuan3d'], default: 'trellis', description: 'trellis=$0.02 fast, hunyuan3d=$0.375 high quality' },
+            image_url: { type: 'string', description: 'Optional: reference image for image-to-3D' },
+            target_path: { type: 'string' },
+        },
         required: ['prompt', 'target_path'],
     },
     access: ['build'],
@@ -373,22 +361,19 @@ registerTool({
         const start = Date.now();
         const prompt = input.prompt as string;
         const targetPath = input.target_path as string;
-        const meshyKey = process.env.MESHY_API_KEY;
-        if (meshyKey) {
-            try {
-                const createRes = await fetch('https://api.meshy.ai/v2/text-to-3d', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${meshyKey}` }, body: JSON.stringify({ mode: 'preview', prompt, art_style: 'game-asset', topology: 'quad' }) });
-                if (createRes.ok) {
-                    const { result: taskId } = await createRes.json() as { result: string };
-                    for (let i = 0; i < 30; i++) {
-                        await new Promise(r => setTimeout(r, 2000));
-                        const statusRes = await fetch(`https://api.meshy.ai/v2/text-to-3d/${taskId}`, { headers: { 'Authorization': `Bearer ${meshyKey}` } });
-                        if (statusRes.ok) { const s = await statusRes.json() as { status: string; model_urls?: { glb?: string } }; if (s.status === 'SUCCEEDED' && s.model_urls?.glb) { const modelRes = await fetch(s.model_urls.glb); const buf = await modelRes.arrayBuffer(); await uploadBinaryAsset(ctx, targetPath, buf, 'model/gltf-binary'); return { callId: '', success: true, output: { message: `3D model at ${targetPath}`, path: targetPath }, filesModified: [targetPath], duration_ms: Date.now() - start }; } if (s.status === 'FAILED') break; }
-                    }
-                }
-            } catch (err) { console.error('Meshy error:', err); }
+        const model3d = (input.model as 'trellis' | 'hunyuan3d') || 'trellis';
+        const imageUrl = input.image_url as string | undefined;
+
+        const result = await generate3D({ prompt, imageUrl, model: model3d });
+        if (result.success && result.modelUrl) {
+            const buf = await downloadResult(result.modelUrl);
+            await uploadBinaryAsset(ctx, targetPath, buf, 'model/gltf-binary');
+            return { callId: '', success: true, output: { message: `3D model at ${targetPath} (${result.model}, ~$${result.cost.toFixed(3)})`, path: targetPath, model_used: result.model, cost: result.cost }, filesModified: [targetPath], duration_ms: Date.now() - start };
         }
+
+        // Fallback placeholder
         await upsertProjectFile(ctx, targetPath.replace('.glb', '.res'), `# 3D placeholder: ${prompt}\n[resource]\ntype = "PrimitiveMesh"\nprimitive = "Box"`, 'text');
-        return { callId: '', success: true, output: { message: `Placeholder 3D at ${targetPath}`, placeholder: true }, filesModified: [targetPath], duration_ms: Date.now() - start };
+        return { callId: '', success: true, output: { message: `Placeholder 3D at ${targetPath}: ${result.error}`, placeholder: true }, filesModified: [targetPath], duration_ms: Date.now() - start };
     },
 });
 
