@@ -22,6 +22,8 @@ import {
     ExternalLink,
     Check,
     X,
+    Upload,
+    Link,
 } from 'lucide-react';
 
 // ── Tab Navigation ───────────────────────────────────────────────────
@@ -91,6 +93,143 @@ const MODELS_3D: Record<ProviderChoice, { value: Model3DChoice; label: string; c
         { value: 'hunyuan3d', label: 'Hunyuan3D v2', cost: '$0.18',  desc: 'High quality' },
     ],
 };
+
+// ── LoRA Input (URL or File Upload) ──────────────────────────────────
+
+function LoraInput({
+    loraUrl, setLoraUrl, loraScale, setLoraScale,
+}: {
+    loraUrl: string; setLoraUrl: (v: string) => void;
+    loraScale: number; setLoraScale: (v: number) => void;
+}) {
+    const [mode, setMode] = useState<'url' | 'upload'>('upload');
+    const [uploading, setUploading] = useState(false);
+    const [uploadedName, setUploadedName] = useState<string | null>(null);
+    const [error, setError] = useState<string | null>(null);
+    const fileRef = useRef<HTMLInputElement>(null);
+
+    const handleFile = async (file: File) => {
+        if (!file.name.endsWith('.safetensors')) {
+            setError('Only .safetensors files are supported');
+            return;
+        }
+        if (file.size > 500 * 1024 * 1024) {
+            setError('File too large (max 500MB)');
+            return;
+        }
+        setUploading(true);
+        setError(null);
+        try {
+            const fd = new FormData();
+            fd.append('file', file);
+            const res = await fetch('/api/assets/lora', { method: 'POST', body: fd });
+            const data = await res.json();
+            if (res.ok && data.success) {
+                setLoraUrl(data.url);
+                setUploadedName(data.name);
+            } else {
+                setError(data.error || 'Upload failed');
+            }
+        } catch {
+            setError('Network error');
+        } finally {
+            setUploading(false);
+        }
+    };
+
+    const handleDrop = (e: React.DragEvent) => {
+        e.preventDefault();
+        const file = e.dataTransfer.files[0];
+        if (file) handleFile(file);
+    };
+
+    const clear = () => {
+        setLoraUrl('');
+        setUploadedName(null);
+        setError(null);
+        if (fileRef.current) fileRef.current.value = '';
+    };
+
+    return (
+        <div>
+            <div className="flex items-center justify-between mb-1">
+                <label className="text-[10px] uppercase tracking-wider text-zinc-500">LoRA (optional)</label>
+                <div className="flex gap-0.5">
+                    <button
+                        onClick={() => { setMode('upload'); clear(); }}
+                        className={`p-1 rounded transition-colors ${mode === 'upload' ? 'text-violet-400 bg-violet-500/10' : 'text-zinc-600 hover:text-zinc-400'}`}
+                        title="Upload file"
+                    >
+                        <Upload size={11} />
+                    </button>
+                    <button
+                        onClick={() => { setMode('url'); clear(); }}
+                        className={`p-1 rounded transition-colors ${mode === 'url' ? 'text-violet-400 bg-violet-500/10' : 'text-zinc-600 hover:text-zinc-400'}`}
+                        title="Paste URL"
+                    >
+                        <Link size={11} />
+                    </button>
+                </div>
+            </div>
+
+            {mode === 'url' ? (
+                <input
+                    type="text"
+                    value={loraUrl}
+                    onChange={(e) => setLoraUrl(e.target.value)}
+                    placeholder="https://huggingface.co/... or .safetensors URL"
+                    className="w-full bg-zinc-900 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-violet-500/50 transition-colors"
+                />
+            ) : uploadedName ? (
+                <div className="flex items-center gap-2 bg-zinc-900 border border-emerald-500/20 rounded-lg px-3 py-1.5">
+                    <Check size={12} className="text-emerald-400 flex-shrink-0" />
+                    <span className="text-xs text-emerald-300 truncate flex-1">{uploadedName}</span>
+                    <button onClick={clear} className="text-zinc-500 hover:text-zinc-300 flex-shrink-0"><X size={12} /></button>
+                </div>
+            ) : (
+                <div
+                    onClick={() => fileRef.current?.click()}
+                    onDragOver={(e) => e.preventDefault()}
+                    onDrop={handleDrop}
+                    className="flex flex-col items-center gap-1 py-3 rounded-lg border border-dashed border-white/10 bg-zinc-900/50 cursor-pointer hover:border-violet-500/30 transition-colors"
+                >
+                    {uploading ? (
+                        <Loader2 size={16} className="text-violet-400 animate-spin" />
+                    ) : (
+                        <Upload size={16} className="text-zinc-600" />
+                    )}
+                    <span className="text-[10px] text-zinc-500">
+                        {uploading ? 'Uploading...' : 'Drop .safetensors or click to browse'}
+                    </span>
+                    <input
+                        ref={fileRef}
+                        type="file"
+                        accept=".safetensors"
+                        className="hidden"
+                        onChange={(e) => { if (e.target.files?.[0]) handleFile(e.target.files[0]); }}
+                    />
+                </div>
+            )}
+
+            {error && <p className="text-[10px] text-red-400 mt-1">{error}</p>}
+
+            {/* Scale slider — show when a LoRA is active */}
+            {loraUrl && (
+                <div className="flex items-center gap-2 mt-1.5">
+                    <span className="text-[10px] text-zinc-500 w-10">Scale</span>
+                    <input
+                        type="range"
+                        min={0} max={2} step={0.05}
+                        value={loraScale}
+                        onChange={(e) => setLoraScale(Number(e.target.value))}
+                        className="flex-1 h-1 accent-violet-500"
+                    />
+                    <span className="text-[10px] text-zinc-400 font-mono w-7 text-right">{loraScale.toFixed(2)}</span>
+                </div>
+            )}
+        </div>
+    );
+}
 
 function GenerateTab() {
     const { project, assetGenerating, setAssetGenerating, addConsoleEntry, addAsset, setAssetStudioTab, refreshProjectFiles } = useEditorStore();
@@ -296,34 +435,7 @@ function GenerateTab() {
             </div>
 
             {/* LoRA (2D only) */}
-            {!is3D && (
-                <div>
-                    <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">
-                        LoRA <span className="normal-case text-zinc-600">(optional)</span>
-                    </label>
-                    <div className="flex gap-1.5">
-                        <input
-                            type="text"
-                            value={loraUrl}
-                            onChange={(e) => setLoraUrl(e.target.value)}
-                            placeholder="HuggingFace or Civitai URL..."
-                            className="flex-1 bg-zinc-900 border border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-violet-500/50 transition-colors"
-                        />
-                        <div className="flex items-center gap-1">
-                            <span className="text-[10px] text-zinc-600">Scale</span>
-                            <input
-                                type="number"
-                                min={0}
-                                max={2}
-                                step={0.1}
-                                value={loraScale}
-                                onChange={(e) => setLoraScale(Number(e.target.value))}
-                                className="w-12 bg-zinc-900 border border-white/10 rounded px-1.5 py-1.5 text-xs text-zinc-200 text-center focus:outline-none focus:border-violet-500/50"
-                            />
-                        </div>
-                    </div>
-                </div>
-            )}
+            {!is3D && <LoraInput loraUrl={loraUrl} setLoraUrl={setLoraUrl} loraScale={loraScale} setLoraScale={setLoraScale} />}
 
             {/* Provider + AI Model Selection */}
             <div>
