@@ -41,7 +41,8 @@ interface EditorState {
     // Asset Studio
     assets: Asset[];
     assetGenerating: boolean;
-    assetStudioTab: 'generate' | 'gallery' | 'timeline';
+    assetStudioTab: 'generate' | 'gallery';
+    previewAssetId: string | null;
 
     // Actions
     setProject: (project: Project) => void;
@@ -69,7 +70,8 @@ interface EditorState {
     setAssets: (assets: Asset[]) => void;
     addAsset: (asset: Asset) => void;
     setAssetGenerating: (generating: boolean) => void;
-    setAssetStudioTab: (tab: 'generate' | 'gallery' | 'timeline') => void;
+    setAssetStudioTab: (tab: 'generate' | 'gallery') => void;
+    setPreviewAssetId: (id: string | null) => void;
     refreshProjectFiles: (projectId: string) => Promise<void>;
     addProjectFiles: (newFiles: Array<{ path: string; content: string; size_bytes: number; content_type: string }>) => void;
     setChatView: (view: 'chat' | 'history') => void;
@@ -107,6 +109,7 @@ export const useEditorStore = create<EditorState>((set) => ({
     assets: [],
     assetGenerating: false,
     assetStudioTab: 'generate',
+    previewAssetId: null,
 
     // Actions
     setProject: (project) => set({ project }),
@@ -193,6 +196,7 @@ export const useEditorStore = create<EditorState>((set) => ({
     addAsset: (asset) => set((state) => ({ assets: [...state.assets, asset] })),
     setAssetGenerating: (generating) => set({ assetGenerating: generating }),
     setAssetStudioTab: (tab) => set({ assetStudioTab: tab }),
+    setPreviewAssetId: (id) => set({ previewAssetId: id }),
 
     setChatView: (view) => set({ chatView: view }),
     setConversations: (conversations) => set({ conversations }),

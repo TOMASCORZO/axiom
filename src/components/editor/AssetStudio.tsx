@@ -8,11 +8,6 @@ import {
     Sparkles,
     Image as ImageIcon,
     Grid3X3,
-    Clock,
-    Play,
-    Pause,
-    SkipBack,
-    SkipForward,
     Download,
     FolderPlus,
     Trash2,
@@ -31,7 +26,6 @@ import {
 const TABS = [
     { id: 'generate' as const, label: 'Generate', icon: Wand2 },
     { id: 'gallery' as const, label: 'Gallery', icon: Grid3X3 },
-    { id: 'timeline' as const, label: 'Timeline', icon: Clock },
 ];
 
 // ── Generate Tab ─────────────────────────────────────────────────────
@@ -232,7 +226,7 @@ function LoraInput({
 }
 
 function GenerateTab() {
-    const { project, assetGenerating, setAssetGenerating, addConsoleEntry, addAsset, setAssetStudioTab, refreshProjectFiles } = useEditorStore();
+    const { project, assetGenerating, setAssetGenerating, addConsoleEntry, addAsset, setAssetStudioTab, setPreviewAssetId, refreshProjectFiles } = useEditorStore();
     const [prompt, setPrompt] = useState('');
     const [assetType, setAssetType] = useState<AssetType>('sprite');
     const [style, setStyle] = useState<AssetStyle>('pixel_art');
@@ -299,8 +293,9 @@ function GenerateTab() {
                     message: `[Asset Studio] Generated "${prompt}" → ${targetPath} (${data.credits_used} credits)`,
                     timestamp: new Date().toISOString(),
                 });
+                const assetId = crypto.randomUUID();
                 addAsset({
-                    id: crypto.randomUUID(),
+                    id: assetId,
                     project_id: project.id,
                     name: `${prompt.trim().slice(0, 40)}`,
                     asset_type: assetType,
@@ -315,6 +310,7 @@ function GenerateTab() {
                     size_bytes: 0,
                     created_at: new Date().toISOString(),
                 });
+                setPreviewAssetId(assetId);
                 refreshProjectFiles(project.id);
                 setAssetStudioTab('gallery');
             } else {
@@ -817,8 +813,7 @@ function FreeAssetSearch() {
 // ── Gallery Tab ──────────────────────────────────────────────────────
 
 function GalleryTab() {
-    const { assets } = useEditorStore();
-    const [selectedAsset, setSelectedAsset] = useState<string | null>(null);
+    const { assets, previewAssetId, setPreviewAssetId } = useEditorStore();
 
     if (assets.length === 0) {
         return (
@@ -841,9 +836,9 @@ function GalleryTab() {
                     {assets.map((asset) => (
                         <button
                             key={asset.id}
-                            onClick={() => setSelectedAsset(asset.id === selectedAsset ? null : asset.id)}
+                            onClick={() => setPreviewAssetId(asset.id === previewAssetId ? null : asset.id)}
                             className={`relative aspect-square rounded-lg overflow-hidden border transition-all ${
-                                selectedAsset === asset.id
+                                previewAssetId === asset.id
                                     ? 'border-violet-500 ring-1 ring-violet-500/30'
                                     : 'border-white/5 hover:border-white/10'
                             }`}
@@ -871,7 +866,7 @@ function GalleryTab() {
             </div>
 
             {/* Selected asset actions */}
-            {selectedAsset && (
+            {previewAssetId && (
                 <div className="flex-shrink-0 border-t border-white/5 p-2 flex gap-1.5">
                     <button className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded bg-violet-500/20 text-violet-300 text-xs hover:bg-violet-500/30 transition-colors">
                         <FolderPlus size={12} />
@@ -885,89 +880,6 @@ function GalleryTab() {
                     </button>
                 </div>
             )}
-        </div>
-    );
-}
-
-// ── Timeline Tab ─────────────────────────────────────────────────────
-
-function TimelineTab() {
-    const [isPlayingAnim, setIsPlayingAnim] = useState(false);
-    const [currentFrame, setCurrentFrame] = useState(0);
-    const [totalFrames] = useState(8);
-    const [fps, setFps] = useState(12);
-
-    return (
-        <div className="flex flex-col flex-1 overflow-hidden">
-            {/* Preview area */}
-            <div className="flex-1 flex items-center justify-center bg-zinc-950 min-h-[120px] relative">
-                {/* Checkerboard */}
-                <div className="absolute inset-0 bg-[length:12px_12px] bg-[position:0_0,6px_6px] bg-[image:linear-gradient(45deg,#111_25%,transparent_25%,transparent_75%,#111_75%),linear-gradient(45deg,#111_25%,transparent_25%,transparent_75%,#111_75%)] opacity-50" />
-                <div className="relative z-10 flex flex-col items-center gap-2 text-zinc-600">
-                    <ImageIcon size={28} strokeWidth={1} />
-                    <span className="text-xs">Select a sprite sheet to animate</span>
-                </div>
-            </div>
-
-            {/* Timeline controls */}
-            <div className="flex-shrink-0 border-t border-white/5">
-                {/* Transport */}
-                <div className="flex items-center justify-between px-3 py-1.5">
-                    <div className="flex items-center gap-1">
-                        <button
-                            onClick={() => setCurrentFrame(0)}
-                            className="p-1 rounded text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors"
-                        >
-                            <SkipBack size={12} />
-                        </button>
-                        <button
-                            onClick={() => setIsPlayingAnim(!isPlayingAnim)}
-                            className={`p-1 rounded transition-colors ${
-                                isPlayingAnim ? 'text-emerald-400 bg-emerald-500/10' : 'text-zinc-500 hover:text-zinc-300 hover:bg-white/5'
-                            }`}
-                        >
-                            {isPlayingAnim ? <Pause size={12} /> : <Play size={12} />}
-                        </button>
-                        <button
-                            onClick={() => setCurrentFrame(totalFrames - 1)}
-                            className="p-1 rounded text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors"
-                        >
-                            <SkipForward size={12} />
-                        </button>
-                    </div>
-                    <span className="text-[10px] text-zinc-500 font-mono">
-                        {currentFrame + 1}/{totalFrames} @ {fps}fps
-                    </span>
-                    <div className="flex items-center gap-1">
-                        <span className="text-[10px] text-zinc-600">FPS</span>
-                        <input
-                            type="number"
-                            min={1}
-                            max={60}
-                            value={fps}
-                            onChange={(e) => setFps(Number(e.target.value))}
-                            className="w-10 bg-zinc-900 border border-white/10 rounded px-1 py-0.5 text-[10px] text-zinc-300 text-center focus:outline-none focus:border-violet-500/50"
-                        />
-                    </div>
-                </div>
-
-                {/* Frame strip */}
-                <div className="flex gap-0.5 px-2 pb-2 overflow-x-auto">
-                    {Array.from({ length: totalFrames }, (_, i) => (
-                        <button
-                            key={i}
-                            onClick={() => setCurrentFrame(i)}
-                            className={`flex-shrink-0 w-8 h-8 rounded border transition-all flex items-center justify-center text-[9px] font-mono ${
-                                currentFrame === i
-                                    ? 'border-violet-500 bg-violet-500/20 text-violet-300'
-                                    : 'border-white/5 bg-zinc-900 text-zinc-600 hover:border-white/10'
-                            }`}
-                        >
-                            {i + 1}
-                        </button>
-                    ))}
-                </div>
-            </div>
         </div>
     );
 }
@@ -1019,7 +931,6 @@ export default function AssetStudio() {
             {/* Tab content */}
             {assetStudioTab === 'generate' && <GenerateTab />}
             {assetStudioTab === 'gallery' && <GalleryTab />}
-            {assetStudioTab === 'timeline' && <TimelineTab />}
         </div>
     );
 }

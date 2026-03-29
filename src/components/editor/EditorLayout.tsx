@@ -3,6 +3,7 @@
 import Toolbar from './Toolbar';
 import FileTree from './FileTree';
 import AxiomViewport from './AxiomViewport';
+import AssetPreview from './AssetPreview';
 import CodeEditor from './CodeEditor';
 import ChatPanel from '@/components/chat/ChatPanel';
 import AssetStudio from './AssetStudio';
@@ -35,7 +36,7 @@ export default function EditorLayout({ projectId }: EditorLayoutProps) {
 
                 {/* Center + Bottom */}
                 <div className="flex-1 flex flex-col overflow-hidden">
-                    {/* Center — split between Code Editor and Engine Viewport */}
+                    {/* Center — split between Code Editor and Engine Viewport / Asset Preview */}
                     <div className="flex-1 flex flex-col overflow-hidden">
                         {hasOpenFiles ? (
                             <>
@@ -43,15 +44,15 @@ export default function EditorLayout({ projectId }: EditorLayoutProps) {
                                 <div className="flex-1 overflow-hidden min-h-0" style={{ flex: '1 1 50%' }}>
                                     <CodeEditor />
                                 </div>
-                                {/* Engine Viewport — bottom half */}
+                                {/* Engine Viewport or Asset Preview — bottom half */}
                                 <div className="flex-1 overflow-hidden min-h-0 border-t border-white/5" style={{ flex: '1 1 50%' }}>
-                                    <AxiomViewport />
+                                    {activeRightPanel === 'assets' ? <AssetPreview /> : <AxiomViewport />}
                                 </div>
                             </>
                         ) : (
-                            /* No files open — viewport takes full center */
+                            /* No files open — full center */
                             <div className="flex-1 overflow-hidden">
-                                <AxiomViewport />
+                                {activeRightPanel === 'assets' ? <AssetPreview /> : <AxiomViewport />}
                             </div>
                         )}
                     </div>
