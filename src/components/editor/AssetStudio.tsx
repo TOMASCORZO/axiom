@@ -60,19 +60,37 @@ const SIZE_PRESETS = [
 
 // ── Model & Pricing Info ─────────────────────────────────────────────
 
+type ProviderChoice = 'fal' | 'replicate';
 type Model2DChoice = 'sdxl' | 'flux-schnell' | 'flux-dev';
 type Model3DChoice = 'trellis' | 'hunyuan3d';
 
-const MODELS_2D: { value: Model2DChoice; label: string; cost: string; desc: string }[] = [
-    { value: 'sdxl',         label: 'SDXL',         cost: 'Free',    desc: 'Fast, good quality' },
-    { value: 'flux-schnell', label: 'Flux Schnell',  cost: '$0.003',  desc: 'Best value' },
-    { value: 'flux-dev',     label: 'Flux Dev',      cost: '$0.025',  desc: 'Highest quality' },
+const PROVIDERS: { value: ProviderChoice; label: string; envHint: string }[] = [
+    { value: 'fal',       label: 'fal.ai',     envHint: 'FAL_KEY' },
+    { value: 'replicate', label: 'Replicate',   envHint: 'REPLICATE_API_TOKEN' },
 ];
 
-const MODELS_3D: { value: Model3DChoice; label: string; cost: string; desc: string }[] = [
-    { value: 'trellis',   label: 'Trellis',      cost: '$0.02',  desc: 'Fast, cheap' },
-    { value: 'hunyuan3d', label: 'Hunyuan3D v3', cost: '$0.375', desc: 'High quality' },
-];
+const MODELS_2D: Record<ProviderChoice, { value: Model2DChoice; label: string; cost: string; desc: string }[]> = {
+    fal: [
+        { value: 'sdxl',         label: 'SDXL',         cost: 'Free',    desc: 'Fast, good quality' },
+        { value: 'flux-schnell', label: 'Flux Schnell',  cost: '$0.003',  desc: 'Best value' },
+        { value: 'flux-dev',     label: 'Flux Dev',      cost: '$0.025',  desc: 'Highest quality' },
+    ],
+    replicate: [
+        { value: 'sdxl',         label: 'SDXL',         cost: '$0.005',  desc: 'Fast, good quality' },
+        { value: 'flux-schnell', label: 'Flux Schnell',  cost: '$0.003',  desc: 'Best value' },
+        { value: 'flux-dev',     label: 'Flux Dev',      cost: '$0.025',  desc: 'Highest quality' },
+    ],
+};
+
+const MODELS_3D: Record<ProviderChoice, { value: Model3DChoice; label: string; cost: string; desc: string }[]> = {
+    fal: [
+        { value: 'trellis',   label: 'Trellis',      cost: '$0.02',  desc: 'Fast, cheap' },
+        { value: 'hunyuan3d', label: 'Hunyuan3D v3', cost: '$0.375', desc: 'High quality' },
+    ],
+    replicate: [
+        { value: 'hunyuan3d', label: 'Hunyuan3D v2', cost: '$0.18',  desc: 'High quality' },
+    ],
+};
 
 function GenerateTab() {
     const { project, assetGenerating, setAssetGenerating, addConsoleEntry, addAsset, setAssetStudioTab, refreshProjectFiles } = useEditorStore();
@@ -82,6 +100,7 @@ function GenerateTab() {
     const [sizeIdx, setSizeIdx] = useState(1); // 128x128 default
     const [transparentBg, setTransparentBg] = useState(true);
     const [frameCount, setFrameCount] = useState(4);
+    const [provider, setProvider] = useState<ProviderChoice>('fal');
     const [model2d, setModel2d] = useState<Model2DChoice>('flux-schnell');
     const [model3d, setModel3d] = useState<Model3DChoice>('trellis');
     const [genError, setGenError] = useState<string | null>(null);
@@ -124,6 +143,7 @@ function GenerateTab() {
                         frame_count: isSheet ? frameCount : undefined,
                         model_2d: is3D ? undefined : model2d,
                         model_3d: is3D ? model3d : undefined,
+                        provider,
                     },
                 }),
             });
@@ -272,13 +292,34 @@ function GenerateTab() {
                 )}
             </div>
 
-            {/* AI Model Selection */}
+            {/* Provider + AI Model Selection */}
             <div>
+                <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">Provider</label>
+                <div className="flex gap-1 mb-2">
+                    {PROVIDERS.map((p) => (
+                        <button
+                            key={p.value}
+                            onClick={() => {
+                                setProvider(p.value);
+                                // Reset 3D model if switching to replicate (no Trellis)
+                                if (p.value === 'replicate' && model3d === 'trellis') setModel3d('hunyuan3d');
+                            }}
+                            className={`flex-1 py-1 rounded text-xs transition-colors ${
+                                provider === p.value
+                                    ? 'bg-violet-500/20 text-violet-300 border border-violet-500/30'
+                                    : 'bg-zinc-900 text-zinc-500 border border-white/5 hover:text-zinc-300'
+                            }`}
+                        >
+                            {p.label}
+                        </button>
+                    ))}
+                </div>
+
                 <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">
                     {is3D ? '3D Model' : '2D Model'}
                 </label>
                 <div className="flex flex-col gap-1">
-                    {(is3D ? MODELS_3D : MODELS_2D).map((m) => (
+                    {(is3D ? MODELS_3D[provider] : MODELS_2D[provider]).map((m) => (
                         <button
                             key={m.value}
                             onClick={() => is3D ? setModel3d(m.value as Model3DChoice) : setModel2d(m.value as Model2DChoice)}

@@ -65,13 +65,15 @@ async function uploadBinaryAsset(ctx: ToolContext, path: string, buffer: ArrayBu
 
 // ── Image / 3D Generation (via fal.ai) ─────────────────────────────
 
-import { generate2D, generate3D, downloadResult, type Model2D } from '@/lib/assets/generate';
+import { generate2D, generate3D, downloadResult, type Model2D, type Provider } from '@/lib/assets/generate';
 
-async function generateImage(params: { prompt: string; width: number; height: number; style?: string; model_2d?: string }): Promise<ArrayBuffer | null> {
+async function generateImage(params: { prompt: string; width: number; height: number; style?: string; model_2d?: string; provider?: string }): Promise<ArrayBuffer | null> {
     const model: Model2D = (params.model_2d as Model2D) || (process.env.FAL_KEY ? 'flux-schnell' : 'sdxl');
+    const provider = params.provider as Provider | undefined;
     const result = await generate2D({
         prompt: params.prompt,
         model,
+        provider,
         width: params.width,
         height: params.height,
         style: params.style,
@@ -311,7 +313,8 @@ registerTool({
         const targetPath = input.target_path as string;
         const style = input.style as string | undefined;
         const model2d = input.model_2d as string | undefined;
-        const buf = await generateImage({ prompt: `Game sprite: ${prompt}`, width, height, style, model_2d: model2d });
+        const prov = input.provider as string | undefined;
+        const buf = await generateImage({ prompt: `Game sprite: ${prompt}`, width, height, style, model_2d: model2d, provider: prov });
         if (buf) { await uploadBinaryAsset(ctx, targetPath, buf, 'image/png'); return { callId: '', success: true, output: { message: `Sprite generated at ${targetPath}`, path: targetPath }, filesModified: [targetPath], duration_ms: Date.now() - start }; }
         const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><rect width="100%" height="100%" fill="#8b5cf6" opacity="0.3"/><text x="50%" y="50%" text-anchor="middle" dy=".3em" fill="#fff" font-size="12">${prompt.slice(0, 20)}</text></svg>`;
         await upsertProjectFile(ctx, targetPath, svg, 'text');
@@ -336,7 +339,8 @@ registerTool({
         const targetPath = input.target_path as string;
         const tStyle = input.style as string | undefined;
         const tModel = input.model_2d as string | undefined;
-        const buf = await generateImage({ prompt: `Seamless game texture: ${prompt}`, width, height, style: tStyle, model_2d: tModel });
+        const tProv = input.provider as string | undefined;
+        const buf = await generateImage({ prompt: `Seamless game texture: ${prompt}`, width, height, style: tStyle, model_2d: tModel, provider: tProv });
         if (buf) { await uploadBinaryAsset(ctx, targetPath, buf, 'image/png'); return { callId: '', success: true, output: { message: `Texture at ${targetPath}`, path: targetPath }, filesModified: [targetPath], duration_ms: Date.now() - start }; }
         await upsertProjectFile(ctx, targetPath, `# Placeholder: ${prompt}`, 'text');
         return { callId: '', success: true, output: { message: `Placeholder at ${targetPath}`, placeholder: true }, filesModified: [targetPath], duration_ms: Date.now() - start };
@@ -363,8 +367,9 @@ registerTool({
         const targetPath = input.target_path as string;
         const model3d = (input.model as 'trellis' | 'hunyuan3d') || 'trellis';
         const imageUrl = input.image_url as string | undefined;
+        const gen3dProv = input.provider as Provider | undefined;
 
-        const result = await generate3D({ prompt, imageUrl, model: model3d });
+        const result = await generate3D({ prompt, imageUrl, model: model3d, provider: gen3dProv });
         if (result.success && result.modelUrl) {
             const buf = await downloadResult(result.modelUrl);
             await uploadBinaryAsset(ctx, targetPath, buf, 'model/gltf-binary');
