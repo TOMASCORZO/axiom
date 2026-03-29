@@ -2,7 +2,6 @@
 
 import { useState, useRef, useCallback } from 'react';
 import { useEditorStore } from '@/lib/store';
-import { createClient as createSupabaseClient } from '@/lib/supabase/client';
 import type { AssetType, AssetStyle } from '@/types/asset';
 import type { FreeAssetResult } from '@/lib/assets/search';
 import {
@@ -117,38 +116,62 @@ function LoraInput({
         setUploadProgress(0);
         setError(null);
         try {
-            // Step 1: Get a signed upload token from our API (tiny JSON request)
-            setUploadProgress(5);
-            const res = await fetch('/api/assets/lora', {
+            // Step 1: Initialize chunked upload (tiny JSON)
+            const initRes = await fetch('/api/assets/lora', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ filename: file.name, size: file.size }),
+                body: JSON.stringify({ action: 'init', filename: file.name, size: file.size }),
             });
-            const data = await res.json();
-            if (!res.ok || !data.success) {
-                setError(data.error || 'Failed to prepare upload');
+            const initData = await initRes.json();
+            if (!initRes.ok || !initData.success) {
+                setError(initData.error || 'Failed to initialize upload');
                 return;
             }
 
-            // Step 2: Upload directly to Supabase Storage using the signed URL token
-            // This bypasses Next.js entirely — the file goes browser → Supabase
-            setUploadProgress(10);
-            const supabase = createSupabaseClient();
-            const { error: uploadError } = await supabase.storage
-                .from('assets')
-                .uploadToSignedUrl(data.path, data.token, file, {
-                    contentType: 'application/octet-stream',
-                    upsert: true,
+            const { uploadId, chunkSize, totalChunks } = initData;
+
+            // Step 2: Send chunks (5MB each) via PUT
+            for (let i = 0; i < totalChunks; i++) {
+                const start = i * chunkSize;
+                const end = Math.min(start + chunkSize, file.size);
+                const chunk = file.slice(start, end);
+
+                const chunkRes = await fetch('/api/assets/lora', {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Type': 'application/octet-stream',
+                        'X-Upload-Id': uploadId,
+                        'X-Chunk-Index': String(i),
+                    },
+                    body: chunk,
                 });
 
-            if (uploadError) {
-                setError(`Upload failed: ${uploadError.message}`);
+                if (!chunkRes.ok) {
+                    const err = await chunkRes.json().catch(() => ({ error: 'Chunk failed' }));
+                    setError(err.error || `Chunk ${i + 1} failed`);
+                    return;
+                }
+
+                setUploadProgress(Math.round(((i + 1) / totalChunks) * 85));
+            }
+
+            // Step 3: Complete — server assembles chunks and uploads to Supabase via TUS
+            setUploadProgress(90);
+            const completeRes = await fetch('/api/assets/lora', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: 'complete', uploadId, filename: file.name }),
+            });
+            const completeData = await completeRes.json();
+
+            if (!completeRes.ok || !completeData.success) {
+                setError(completeData.error || 'Failed to finalize upload');
                 return;
             }
 
             setUploadProgress(100);
-            setLoraUrl(data.url);
-            setUploadedName(data.name);
+            setLoraUrl(completeData.url);
+            setUploadedName(completeData.name);
         } catch (err) {
             setError(err instanceof Error ? err.message : 'Upload failed');
         } finally {
