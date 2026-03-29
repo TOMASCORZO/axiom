@@ -31,13 +31,13 @@ export async function POST(request: NextRequest) {
             const admin = getAdminClient();
             const { data: project } = await admin
                 .from('projects')
-                .select('user_id')
+                .select('owner_id')
                 .eq('id', project_id)
                 .single();
-            if (!project?.user_id) {
+            if (!project?.owner_id) {
                 return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
             }
-            userId = project.user_id;
+            userId = project.owner_id;
         }
 
         // Credits check disabled — will be configured later
