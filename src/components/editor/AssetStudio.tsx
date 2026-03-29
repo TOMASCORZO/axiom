@@ -116,42 +116,43 @@ function LoraInput({
         setUploadProgress(0);
         setError(null);
         try {
-            // Step 1: Get signed upload URL from our API (small JSON request)
-            const res = await fetch('/api/assets/lora', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ filename: file.name, size: file.size }),
-            });
-            const data = await res.json();
-            if (!res.ok || !data.success) {
-                setError(data.error || 'Failed to prepare upload');
-                return;
-            }
-
-            // Step 2: Upload file directly to Supabase Storage via signed URL
-            setUploadProgress(10);
-            const uploadRes = await new Promise<boolean>((resolve) => {
+            // Upload raw binary via PUT with XHR for progress tracking
+            // File metadata is sent in headers to avoid formData parsing limits
+            const result = await new Promise<{ ok: boolean; data?: Record<string, unknown>; error?: string }>((resolve) => {
                 const xhr = new XMLHttpRequest();
-                xhr.open('PUT', data.signed_url);
+                xhr.open('PUT', '/api/assets/lora');
                 xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+                xhr.setRequestHeader('X-Filename', file.name);
+                xhr.setRequestHeader('X-Filesize', String(file.size));
                 xhr.upload.onprogress = (e) => {
                     if (e.lengthComputable) {
-                        setUploadProgress(10 + Math.round((e.loaded / e.total) * 85));
+                        setUploadProgress(Math.round((e.loaded / e.total) * 90));
                     }
                 };
-                xhr.onload = () => resolve(xhr.status >= 200 && xhr.status < 300);
-                xhr.onerror = () => resolve(false);
+                xhr.onload = () => {
+                    try {
+                        const json = JSON.parse(xhr.responseText);
+                        if (xhr.status >= 200 && xhr.status < 300 && json.success) {
+                            resolve({ ok: true, data: json });
+                        } else {
+                            resolve({ ok: false, error: json.error || `Upload failed (${xhr.status})` });
+                        }
+                    } catch {
+                        resolve({ ok: false, error: `Server error (${xhr.status})` });
+                    }
+                };
+                xhr.onerror = () => resolve({ ok: false, error: 'Network error — check your connection' });
                 xhr.send(file);
             });
 
-            if (!uploadRes) {
-                setError('Upload to storage failed');
+            if (!result.ok) {
+                setError(result.error || 'Upload failed');
                 return;
             }
 
             setUploadProgress(100);
-            setLoraUrl(data.url);
-            setUploadedName(data.name);
+            setLoraUrl(result.data?.url as string);
+            setUploadedName(result.data?.name as string);
         } catch {
             setError('Network error');
         } finally {
