@@ -33,6 +33,12 @@ export async function POST(request: NextRequest) {
 
         const admin = getAdminClient();
 
+        // Ensure the bucket allows files up to 500MB (default is 50MB → causes 413)
+        await admin.storage.updateBucket('assets', {
+            public: false,
+            fileSizeLimit: 500 * 1024 * 1024, // 500MB
+        });
+
         // Create a signed upload URL — client will use supabase.storage.uploadToSignedUrl()
         const { data: signedData, error: signedError } = await admin.storage
             .from('assets')
