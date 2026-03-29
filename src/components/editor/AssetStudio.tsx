@@ -286,7 +286,7 @@ function GenerateTab() {
     const [sizeIdx, setSizeIdx] = useState(1); // 128x128 default
     const [transparentBg, setTransparentBg] = useState(true);
     const [frameCount, setFrameCount] = useState(4);
-    const [provider, setProvider] = useState<ProviderChoice>('fal');
+    const [provider, setProvider] = useState<ProviderChoice>('replicate');
     const [model2d, setModel2d] = useState<Model2DChoice>('flux-schnell');
     const [model3d, setModel3d] = useState<Model3DChoice>('trellis');
     const [loraUrl, setLoraUrl] = useState('');
@@ -352,7 +352,7 @@ function GenerateTab() {
                     project_id: project.id,
                     name: `${prompt.trim().slice(0, 40)}`,
                     asset_type: assetType,
-                    storage_key: targetPath,
+                    storage_key: data.storage_key || targetPath,
                     thumbnail_key: null,
                     file_format: ext,
                     width: is3D ? null : size.w,

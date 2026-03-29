@@ -317,7 +317,7 @@ registerTool({
         const prov = input.provider as string | undefined;
         const loras = input.loras as Array<{ url: string; scale?: number }> | undefined;
         const buf = await generateImage({ prompt: `Game sprite: ${prompt}`, width, height, style, model_2d: model2d, provider: prov, loras });
-        if (buf) { await uploadBinaryAsset(ctx, targetPath, buf, 'image/png'); return { callId: '', success: true, output: { message: `Sprite generated at ${targetPath}`, path: targetPath }, filesModified: [targetPath], duration_ms: Date.now() - start }; }
+        if (buf) { const sk = await uploadBinaryAsset(ctx, targetPath, buf, 'image/png'); return { callId: '', success: true, output: { message: `Sprite generated at ${targetPath}`, path: targetPath, storage_key: sk }, filesModified: [targetPath], duration_ms: Date.now() - start }; }
         const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><rect width="100%" height="100%" fill="#8b5cf6" opacity="0.3"/><text x="50%" y="50%" text-anchor="middle" dy=".3em" fill="#fff" font-size="12">${prompt.slice(0, 20)}</text></svg>`;
         await upsertProjectFile(ctx, targetPath, svg, 'text');
         return { callId: '', success: true, output: { message: `Placeholder at ${targetPath}`, path: targetPath, placeholder: true }, filesModified: [targetPath], duration_ms: Date.now() - start };
@@ -344,7 +344,7 @@ registerTool({
         const tProv = input.provider as string | undefined;
         const tLoras = input.loras as Array<{ url: string; scale?: number }> | undefined;
         const buf = await generateImage({ prompt: `Seamless game texture: ${prompt}`, width, height, style: tStyle, model_2d: tModel, provider: tProv, loras: tLoras });
-        if (buf) { await uploadBinaryAsset(ctx, targetPath, buf, 'image/png'); return { callId: '', success: true, output: { message: `Texture at ${targetPath}`, path: targetPath }, filesModified: [targetPath], duration_ms: Date.now() - start }; }
+        if (buf) { const sk = await uploadBinaryAsset(ctx, targetPath, buf, 'image/png'); return { callId: '', success: true, output: { message: `Texture at ${targetPath}`, path: targetPath, storage_key: sk }, filesModified: [targetPath], duration_ms: Date.now() - start }; }
         await upsertProjectFile(ctx, targetPath, `# Placeholder: ${prompt}`, 'text');
         return { callId: '', success: true, output: { message: `Placeholder at ${targetPath}`, placeholder: true }, filesModified: [targetPath], duration_ms: Date.now() - start };
     },
@@ -375,8 +375,8 @@ registerTool({
         const result = await generate3D({ prompt, imageUrl, model: model3d, provider: gen3dProv });
         if (result.success && result.modelUrl) {
             const buf = await downloadResult(result.modelUrl);
-            await uploadBinaryAsset(ctx, targetPath, buf, 'model/gltf-binary');
-            return { callId: '', success: true, output: { message: `3D model at ${targetPath} (${result.model}, ~$${result.cost.toFixed(3)})`, path: targetPath, model_used: result.model, cost: result.cost }, filesModified: [targetPath], duration_ms: Date.now() - start };
+            const sk = await uploadBinaryAsset(ctx, targetPath, buf, 'model/gltf-binary');
+            return { callId: '', success: true, output: { message: `3D model at ${targetPath} (${result.model}, ~$${result.cost.toFixed(3)})`, path: targetPath, storage_key: sk, model_used: result.model, cost: result.cost }, filesModified: [targetPath], duration_ms: Date.now() - start };
         }
 
         // Fallback placeholder

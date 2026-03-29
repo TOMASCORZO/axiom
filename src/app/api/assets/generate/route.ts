@@ -72,9 +72,14 @@ export async function POST(request: NextRequest) {
             await supabase.rpc('decrement_credits', { uid: user.id, amount: cost });
         }
 
+        // Extract storage_key from tool output (set by uploadBinaryAsset)
+        const output = result.output as Record<string, unknown> | undefined;
+        const storageKey = output?.storage_key as string | undefined;
+
         return NextResponse.json({
             success: result.success,
             asset_path: target_path,
+            storage_key: storageKey ?? null,
             credits_used: result.success ? cost : 0,
             files_modified: result.filesModified,
             output: result.output,
