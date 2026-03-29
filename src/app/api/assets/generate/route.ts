@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServerSupabaseClient } from '@/lib/supabase/server';
+import { getAdminClient } from '@/lib/supabase/admin';
 import { executeTool } from '@/lib/agent/tools';
 
 // Vercel Serverless Function config — 3D model generation can take up to 60s
@@ -8,13 +9,6 @@ export const maxDuration = 60;
 // POST /api/assets/generate — Generate an asset via AI (standalone, outside agent loop)
 export async function POST(request: NextRequest) {
     try {
-        const supabase = await createServerSupabaseClient();
-        const { data: { user }, error: authError } = await supabase.auth.getUser();
-
-        if (authError || !user) {
-            return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-        }
-
         const body = await request.json();
         const { project_id, prompt, asset_type, style, target_path, options = {} } = body;
 
@@ -25,10 +19,31 @@ export async function POST(request: NextRequest) {
             );
         }
 
+        // Try cookie-based auth first, fall back to project ownership check
+        let userId: string;
+        const supabase = await createServerSupabaseClient();
+        const { data: { user } } = await supabase.auth.getUser();
+
+        if (user) {
+            userId = user.id;
+        } else {
+            // Fallback: look up project owner via admin client
+            const admin = getAdminClient();
+            const { data: project } = await admin
+                .from('projects')
+                .select('user_id')
+                .eq('id', project_id)
+                .single();
+            if (!project?.user_id) {
+                return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+            }
+            userId = project.user_id;
+        }
+
         // Credits check disabled — will be configured later
         const cost = 0;
 
-        const ctx = { supabase, projectId: project_id, userId: user.id, createdFiles: [] as import('@/types/agent').ToolFileData[] };
+        const ctx = { supabase, projectId: project_id, userId, createdFiles: [] as import('@/types/agent').ToolFileData[] };
 
         // Map asset_type to tool name and build input
         const toolMap: Record<string, string> = {
