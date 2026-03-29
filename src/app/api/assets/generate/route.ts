@@ -25,28 +25,8 @@ export async function POST(request: NextRequest) {
             );
         }
 
-        // Check credits
-        const creditCost: Record<string, number> = {
-            sprite: 5,
-            texture: 5,
-            sprite_sheet: 8,
-            model_3d: 10,
-            animation: 8,
-        };
-        const cost = creditCost[asset_type] ?? 5;
-
-        const { data: profile } = await supabase
-            .from('profiles')
-            .select('ai_credits_remaining')
-            .eq('id', user.id)
-            .single();
-
-        if (!profile || profile.ai_credits_remaining < cost) {
-            return NextResponse.json(
-                { error: `Insufficient credits. Need ${cost}, have ${profile?.ai_credits_remaining ?? 0}` },
-                { status: 429 },
-            );
-        }
+        // Credits check disabled — will be configured later
+        const cost = 0;
 
         const ctx = { supabase, projectId: project_id, userId: user.id, createdFiles: [] as import('@/types/agent').ToolFileData[] };
 
@@ -67,10 +47,7 @@ export async function POST(request: NextRequest) {
 
         const result = await executeTool(toolName, toolInput, ctx);
 
-        // Deduct credits if generation was successful
-        if (result.success) {
-            await supabase.rpc('decrement_credits', { uid: user.id, amount: cost });
-        }
+        // TODO: credit deduction — will be configured later
 
         // Extract storage_key from tool output (set by uploadBinaryAsset)
         const output = result.output as Record<string, unknown> | undefined;
