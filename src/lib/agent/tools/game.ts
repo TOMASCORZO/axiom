@@ -65,7 +65,7 @@ async function uploadBinaryAsset(ctx: ToolContext, path: string, buffer: ArrayBu
 
 // ── Image / 3D Generation (via fal.ai) ─────────────────────────────
 
-import { generate2D, generate3D, downloadResult, type Model2D, type Provider } from '@/lib/assets/generate';
+import { generate2D, generate3D, generateAnimation, downloadResult, type Model2D, type Provider } from '@/lib/assets/generate';
 
 async function generateImage(params: { prompt: string; width: number; height: number; style?: string; model_2d?: string; provider?: string; loras?: Array<{ url: string; scale?: number }> }): Promise<{ buffer: ArrayBuffer } | { error: string }> {
     const model: Model2D = (params.model_2d as Model2D) || (process.env.REPLICATE_API_TOKEN ? 'flux-schnell' : 'sdxl');
@@ -394,21 +394,129 @@ registerTool({
 
 registerTool({
     name: 'generate_animation',
-    description: 'Generate animation frames or keyframes.',
+    description: 'Generate animation frames from a source image. Calls AI img2img per frame to create a sprite sheet.',
     parameters: {
         type: 'object',
-        properties: { prompt: { type: 'string' }, type: { type: 'string', enum: ['sprite_frames', 'skeletal', 'keyframe'], default: 'sprite_frames' }, frame_count: { type: 'integer', default: 4 }, fps: { type: 'integer', default: 12 }, loop: { type: 'boolean', default: true }, target_path: { type: 'string' } },
-        required: ['prompt', 'target_path'],
+        properties: {
+            prompt: { type: 'string', description: 'Description of the character/object and animation (e.g. "knight walking")' },
+            source_image_url: { type: 'string', description: 'Public URL of the source static image to animate' },
+            frame_count: { type: 'integer', default: 4 },
+            fps: { type: 'integer', default: 12 },
+            width: { type: 'integer', default: 512 },
+            height: { type: 'integer', default: 512 },
+            style: { type: 'string' },
+            model_2d: { type: 'string' },
+            provider: { type: 'string' },
+            target_path: { type: 'string' },
+        },
+        required: ['prompt', 'source_image_url', 'target_path'],
     },
     access: ['build'],
     execute: async (ctx, input) => {
         const start = Date.now();
-        const fps = (input.fps as number) || 12;
-        const loop = input.loop !== false;
+        const prompt = input.prompt as string;
+        const sourceImageUrl = input.source_image_url as string;
+        const frameCount = (input.frame_count as number) || 4;
         const targetPath = input.target_path as string;
-        const animContent = `[axiom_resource format=3]\n\n[resource type="SpriteFrames"]\nanimations = [{"frames": [], "loop": ${loop}, "name": &"default", "speed": ${fps}.0}]\n`;
-        await upsertProjectFile(ctx, targetPath, animContent, 'text');
-        return { callId: '', success: true, output: { message: `Animation at ${targetPath}`, path: targetPath }, filesModified: [targetPath], duration_ms: Date.now() - start };
+        const width = (input.width as number) || 512;
+        const height = (input.height as number) || 512;
+
+        const result = await generateAnimation({
+            sourceImageUrl,
+            prompt,
+            frameCount,
+            model: input.model_2d as Model2D | undefined,
+            provider: input.provider as Provider | undefined,
+            width,
+            height,
+            style: input.style as string | undefined,
+            format: 'png',
+        });
+
+        if (!result.success || result.frameUrls.length === 0) {
+            return { callId: '', success: false, error: result.error || 'Animation generation failed', output: { message: result.error }, filesModified: [], duration_ms: Date.now() - start };
+        }
+
+        // Download all frames and assemble into a horizontal sprite sheet
+        const frameBuffers: ArrayBuffer[] = [];
+        for (const url of result.frameUrls) {
+            const buf = await downloadResult(url);
+            frameBuffers.push(buf);
+        }
+
+        // Assemble horizontal strip: use sharp if available, otherwise upload first frame
+        // For serverless, we concatenate raw PNG frames into a simple horizontal strip
+        // by creating a new PNG with all frames side by side
+        try {
+            const sharp = (await import('sharp')).default;
+
+            // Get dimensions from first frame
+            const firstMeta = await sharp(Buffer.from(frameBuffers[0])).metadata();
+            const fw = firstMeta.width ?? width;
+            const fh = firstMeta.height ?? height;
+
+            // Resize all frames to consistent size and get raw buffers
+            const resizedFrames = await Promise.all(
+                frameBuffers.map(buf =>
+                    sharp(Buffer.from(buf))
+                        .resize(fw, fh, { fit: 'fill' })
+                        .ensureAlpha()
+                        .raw()
+                        .toBuffer()
+                )
+            );
+
+            // Composite into horizontal strip
+            const stripWidth = fw * frameCount;
+            const composites = resizedFrames.map((buf, i) => ({
+                input: buf,
+                raw: { width: fw, height: fh, channels: 4 as const },
+                left: i * fw,
+                top: 0,
+            }));
+
+            const stripBuffer = await sharp({
+                create: { width: stripWidth, height: fh, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } },
+            })
+                .composite(composites)
+                .png()
+                .toBuffer();
+
+            const ab = stripBuffer.buffer.slice(stripBuffer.byteOffset, stripBuffer.byteOffset + stripBuffer.byteLength) as ArrayBuffer;
+            const sk = await uploadBinaryAsset(ctx, targetPath, ab, 'image/png');
+
+            return {
+                callId: '', success: true,
+                output: {
+                    message: `Animation sprite sheet at ${targetPath} (${frameCount} frames, ${result.model}, ~$${result.cost.toFixed(3)})`,
+                    path: targetPath,
+                    storage_key: sk,
+                    frame_count: frameCount,
+                    frame_width: fw,
+                    frame_height: fh,
+                    model_used: result.model,
+                    cost: result.cost,
+                },
+                filesModified: [targetPath],
+                duration_ms: Date.now() - start,
+            };
+        } catch {
+            // sharp not available — upload just the first frame as fallback
+            const sk = await uploadBinaryAsset(ctx, targetPath, frameBuffers[0], 'image/png');
+            return {
+                callId: '', success: true,
+                output: {
+                    message: `Uploaded first animation frame at ${targetPath} (sharp not available for sprite sheet assembly)`,
+                    path: targetPath,
+                    storage_key: sk,
+                    frame_count: 1,
+                    model_used: result.model,
+                    cost: result.cost,
+                },
+                filesModified: [targetPath],
+                duration_ms: Date.now() - start,
+            };
+        }
     },
 });
 

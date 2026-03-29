@@ -493,3 +493,295 @@ export async function downloadResult(url: string): Promise<ArrayBuffer> {
     if (!res.ok) throw new Error(`Download failed: ${res.status}`);
     return res.arrayBuffer();
 }
+
+// =====================================================================
+// IMAGE-TO-IMAGE (img2img)
+// =====================================================================
+
+export interface Img2ImgOptions {
+    imageUrl: string;          // Source image URL (public or data URI)
+    prompt: string;
+    model?: Model2D;
+    provider?: Provider;
+    strength?: number;         // 0.0–1.0 — how much to deviate from source (default 0.6)
+    width?: number;
+    height?: number;
+    negativePrompt?: string;
+    steps?: number;
+    format?: 'png' | 'jpeg';
+    style?: string;
+}
+
+export async function img2img(opts: Img2ImgOptions): Promise<GenerationResult> {
+    const provider = pickProvider(opts.provider);
+    const model = opts.model ?? 'flux-schnell';
+    if (provider === 'replicate') return img2imgReplicate(opts, model);
+    return img2imgFal(opts, model);
+}
+
+// ── fal.ai img2img ──────────────────────────────────────────────────
+
+const FAL_IMG2IMG_MAP: Record<Model2D, string> = {
+    'sdxl':         'fal-ai/fast-sdxl/image-to-image',
+    'flux-schnell': 'fal-ai/flux/dev/image-to-image',   // schnell has no img2img, use dev
+    'flux-dev':     'fal-ai/flux/dev/image-to-image',
+};
+
+async function img2imgFal(opts: Img2ImgOptions, model: Model2D): Promise<GenerationResult> {
+    const falModel = FAL_IMG2IMG_MAP[model];
+    const prompt = buildPrompt(opts.prompt, opts.style);
+    const strength = opts.strength ?? 0.6;
+
+    try {
+        const input: Record<string, unknown> = {
+            prompt,
+            image_url: opts.imageUrl,
+            strength,
+            num_images: 1,
+            output_format: opts.format ?? 'png',
+            enable_safety_checker: true,
+        };
+
+        if (opts.negativePrompt) input.negative_prompt = opts.negativePrompt;
+
+        if (model === 'sdxl') {
+            input.num_inference_steps = opts.steps ?? 25;
+            input.guidance_scale = 7.5;
+        } else {
+            input.num_inference_steps = opts.steps ?? 28;
+            input.guidance_scale = 3.5;
+        }
+
+        const result = await fal.subscribe(falModel, { input });
+        const data = result.data as { images?: Array<{ url: string; width: number; height: number }> };
+        const img = data.images?.[0];
+
+        if (!img?.url) {
+            return { success: false, model: falModel, provider: 'fal', cost: 0, error: 'No image returned from img2img' };
+        }
+
+        return { success: true, imageUrl: img.url, width: img.width, height: img.height, model: falModel, provider: 'fal', cost: 0.025 };
+    } catch (err) {
+        return { success: false, model: falModel, provider: 'fal', cost: 0, error: err instanceof Error ? err.message : 'fal.ai img2img failed' };
+    }
+}
+
+// ── Replicate img2img ───────────────────────────────────────────────
+
+const REPLICATE_IMG2IMG_MAP: Record<Model2D, string> = {
+    'sdxl':         'stability-ai/sdxl:7762fd07cf82c948538e41f63f77d685e02b063e37e496e96eefd46c929f9bdc',
+    'flux-schnell': 'black-forest-labs/flux-dev',         // schnell has no img2img, use dev
+    'flux-dev':     'black-forest-labs/flux-dev',
+};
+
+async function img2imgReplicate(opts: Img2ImgOptions, model: Model2D): Promise<GenerationResult> {
+    if (!replicate) {
+        return { success: false, model, provider: 'replicate', cost: 0, error: 'REPLICATE_API_TOKEN not set' };
+    }
+
+    const repModel = REPLICATE_IMG2IMG_MAP[model];
+    const prompt = buildPrompt(opts.prompt, opts.style);
+    const strength = opts.strength ?? 0.6;
+
+    try {
+        let input: Record<string, unknown>;
+
+        if (model === 'sdxl') {
+            input = {
+                prompt,
+                image: opts.imageUrl,
+                prompt_strength: strength,
+                negative_prompt: opts.negativePrompt ?? 'blurry, low quality, text, watermark',
+                num_outputs: 1,
+                num_inference_steps: opts.steps ?? 25,
+                guidance_scale: 7.5,
+                output_format: opts.format ?? 'png',
+            };
+        } else {
+            // Flux dev img2img
+            input = {
+                prompt,
+                image: opts.imageUrl,
+                prompt_strength: strength,
+                num_outputs: 1,
+                output_format: opts.format ?? 'png',
+                num_inference_steps: opts.steps ?? 28,
+                guidance: 3.5,
+            };
+        }
+
+        const output = await replicate.run(repModel as `${string}/${string}`, { input });
+
+        let imageUrl: string | null = null;
+        const extractUrl = (val: unknown): string | null => {
+            if (typeof val === 'string') return val;
+            if (val && typeof val === 'object') {
+                if (typeof (val as { url: unknown }).url === 'function') {
+                    const u = (val as { url: () => URL }).url();
+                    return u?.href ?? String(u);
+                }
+                if ('href' in val) return (val as { href: string }).href;
+                const str = String(val);
+                if (str.startsWith('http')) return str;
+            }
+            return null;
+        };
+
+        if (Array.isArray(output) && output.length > 0) {
+            imageUrl = extractUrl(output[0]);
+        } else {
+            imageUrl = extractUrl(output);
+        }
+
+        if (!imageUrl) {
+            return { success: false, model: repModel, provider: 'replicate', cost: 0, error: 'No image URL in img2img response' };
+        }
+
+        return { success: true, imageUrl, model: repModel, provider: 'replicate', cost: 0.025 };
+    } catch (err) {
+        return { success: false, model: repModel, provider: 'replicate', cost: 0, error: err instanceof Error ? err.message : 'Replicate img2img failed' };
+    }
+}
+
+// =====================================================================
+// ANIMATION (image → sprite sheet via per-frame img2img)
+// =====================================================================
+
+export interface AnimateOptions {
+    sourceImageUrl: string;    // URL of the source static image
+    prompt: string;            // Base description of the character/object
+    frameCount?: number;       // Number of frames (default 4)
+    style?: string;
+    model?: Model2D;
+    provider?: Provider;
+    width?: number;
+    height?: number;
+    format?: 'png' | 'jpeg';
+}
+
+export interface AnimationResult {
+    success: boolean;
+    frameUrls: string[];       // URLs for each individual frame
+    model: string;
+    provider: Provider;
+    cost: number;
+    error?: string;
+}
+
+/** Animation frame prompt templates — each describes a phase in a cycle */
+const WALK_CYCLE = [
+    'standing neutral pose, feet together, arms at sides',
+    'left foot stepping forward, right arm forward, weight shifting',
+    'full stride, left foot far forward, right foot back, mid-walk',
+    'right foot stepping forward, left arm forward, weight shifting',
+    'full stride, right foot far forward, left foot back, mid-walk',
+    'returning to neutral, feet coming together',
+];
+
+const IDLE_CYCLE = [
+    'neutral standing pose, relaxed',
+    'slight breathing motion, subtle chest rise',
+    'gentle sway, very slight lean',
+    'subtle breathing motion, chest lowering',
+];
+
+const ATTACK_CYCLE = [
+    'preparing to attack, winding up, weight shifting back',
+    'mid-swing, full extension, dynamic motion blur',
+    'follow-through, weapon or fist extended, impact frame',
+    'recovering to neutral, returning to stance',
+];
+
+const RUN_CYCLE = [
+    'right foot pushing off ground, left knee high, arms pumping',
+    'airborne phase, both feet off ground, leaning forward',
+    'left foot landing, right knee driving forward',
+    'right foot planting, full stride, left leg extending back',
+    'left foot pushing off, right knee rising',
+    'airborne phase, opposite leg configuration',
+];
+
+const FRAME_TEMPLATES: Record<string, string[]> = {
+    walk: WALK_CYCLE,
+    idle: IDLE_CYCLE,
+    attack: ATTACK_CYCLE,
+    run: RUN_CYCLE,
+};
+
+function getFramePrompts(basePrompt: string, frameCount: number, animType?: string): string[] {
+    const cycle = FRAME_TEMPLATES[animType ?? 'walk'] ?? WALK_CYCLE;
+    const prompts: string[] = [];
+
+    for (let i = 0; i < frameCount; i++) {
+        const phaseIdx = Math.floor((i / frameCount) * cycle.length) % cycle.length;
+        prompts.push(`${basePrompt}, ${cycle[phaseIdx]}, animation frame ${i + 1} of ${frameCount}, consistent character design, same style and proportions across all frames`);
+    }
+
+    return prompts;
+}
+
+/**
+ * Generate animation frames from a source image.
+ * Calls img2img once per frame with varying prompts describing each animation phase.
+ * Returns an array of image URLs (one per frame).
+ */
+export async function generateAnimation(opts: AnimateOptions): Promise<AnimationResult> {
+    const frameCount = opts.frameCount ?? 4;
+    const provider = pickProvider(opts.provider);
+    const model = opts.model ?? 'flux-schnell';
+
+    // Detect animation type from prompt
+    const lowerPrompt = opts.prompt.toLowerCase();
+    let animType = 'walk';
+    if (lowerPrompt.includes('idle') || lowerPrompt.includes('breathing')) animType = 'idle';
+    else if (lowerPrompt.includes('attack') || lowerPrompt.includes('slash') || lowerPrompt.includes('swing')) animType = 'attack';
+    else if (lowerPrompt.includes('run') || lowerPrompt.includes('sprint') || lowerPrompt.includes('dash')) animType = 'run';
+
+    const framePrompts = getFramePrompts(opts.prompt, frameCount, animType);
+
+    const frameUrls: string[] = [];
+    let totalCost = 0;
+    let lastModel = model as string;
+
+    // Generate frames sequentially (each uses the source image as reference)
+    // Use decreasing strength: first frame close to original, later frames allow more deviation
+    for (let i = 0; i < frameCount; i++) {
+        // Lower strength keeps frames consistent with source
+        const strength = 0.45 + (i / frameCount) * 0.15; // 0.45–0.60
+
+        const result = await img2img({
+            imageUrl: opts.sourceImageUrl,
+            prompt: framePrompts[i],
+            model,
+            provider,
+            strength,
+            width: opts.width,
+            height: opts.height,
+            format: opts.format ?? 'png',
+            style: opts.style,
+        });
+
+        if (!result.success || !result.imageUrl) {
+            return {
+                success: false,
+                frameUrls,
+                model: result.model,
+                provider,
+                cost: totalCost,
+                error: `Frame ${i + 1}/${frameCount} failed: ${result.error}`,
+            };
+        }
+
+        frameUrls.push(result.imageUrl);
+        totalCost += result.cost;
+        lastModel = result.model;
+    }
+
+    return {
+        success: true,
+        frameUrls,
+        model: lastModel,
+        provider,
+        cost: totalCost,
+    };
+}

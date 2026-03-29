@@ -19,6 +19,7 @@ import {
     X,
     Upload,
     Link,
+    Film,
 } from 'lucide-react';
 
 // ── Tab Navigation ───────────────────────────────────────────────────
@@ -865,8 +866,112 @@ function FreeAssetSearch() {
 
 // ── Gallery Tab ──────────────────────────────────────────────────────
 
+const ANIM_TYPES = [
+    { value: 'walk', label: 'Walk' },
+    { value: 'run', label: 'Run' },
+    { value: 'idle', label: 'Idle' },
+    { value: 'attack', label: 'Attack' },
+];
+
 function GalleryTab() {
-    const { assets, previewAssetId, setPreviewAssetId } = useEditorStore();
+    const { assets, project, previewAssetId, setPreviewAssetId, addAsset, addConsoleEntry, refreshProjectFiles, setAssetGenerating, assetGenerating } = useEditorStore();
+    const [animating, setAnimating] = useState(false);
+    const [animFrames, setAnimFrames] = useState(4);
+    const [animType, setAnimType] = useState('walk');
+    const [animError, setAnimError] = useState('');
+    const [showAnimPanel, setShowAnimPanel] = useState(false);
+
+    const selectedAsset = assets.find(a => a.id === previewAssetId);
+
+    const handleAnimate = async () => {
+        if (!selectedAsset?.storage_key || !project?.id) return;
+        setAnimating(true);
+        setAnimError('');
+        setAssetGenerating(true);
+
+        const sourceUrl = `${window.location.origin}/api/assets/serve?key=${encodeURIComponent(selectedAsset.storage_key)}`;
+        const baseName = selectedAsset.name.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 30);
+        const targetPath = `assets/${baseName}_${animType}_${animFrames}f.png`;
+
+        addConsoleEntry({
+            id: crypto.randomUUID(), level: 'log',
+            message: `[Asset Studio] Animating "${selectedAsset.name}" → ${animType} (${animFrames} frames)...`,
+            timestamp: new Date().toISOString(),
+        });
+
+        try {
+            const res = await fetch('/api/assets/generate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    project_id: project.id,
+                    prompt: `${selectedAsset.generation_prompt || selectedAsset.name}, ${animType} animation cycle`,
+                    asset_type: 'animation',
+                    target_path: targetPath,
+                    options: {
+                        source_image_url: sourceUrl,
+                        frame_count: animFrames,
+                        width: selectedAsset.width || 512,
+                        height: selectedAsset.height || 512,
+                    },
+                }),
+            });
+
+            const data = await res.json();
+
+            if (res.ok && data.success) {
+                const output = data.output as Record<string, unknown> | undefined;
+                const assetId = crypto.randomUUID();
+                addAsset({
+                    id: assetId,
+                    project_id: project.id,
+                    name: `${selectedAsset.name} (${animType})`,
+                    asset_type: 'sprite_sheet',
+                    storage_key: data.storage_key || targetPath,
+                    thumbnail_key: null,
+                    file_format: 'png',
+                    width: ((output?.frame_width as number) || 512) * animFrames,
+                    height: (output?.frame_height as number) || 512,
+                    metadata: {
+                        tags: [animType, 'animation'],
+                        frames: Array.from({ length: animFrames }, (_, i) => ({
+                            x: i * ((output?.frame_width as number) || 512),
+                            y: 0,
+                            width: (output?.frame_width as number) || 512,
+                            height: (output?.frame_height as number) || 512,
+                            duration: 1,
+                        })),
+                        frameRate: 12,
+                        loop: true,
+                    },
+                    generation_prompt: `${selectedAsset.name} ${animType} animation`,
+                    generation_model: (output?.model_used as string) || null,
+                    size_bytes: 0,
+                    created_at: new Date().toISOString(),
+                });
+                setPreviewAssetId(assetId);
+                refreshProjectFiles(project.id);
+                setShowAnimPanel(false);
+                addConsoleEntry({
+                    id: crypto.randomUUID(), level: 'log',
+                    message: `[Asset Studio] Animation complete → ${targetPath} (${animFrames} frames)`,
+                    timestamp: new Date().toISOString(),
+                });
+            } else {
+                setAnimError(data.error || 'Animation failed');
+                addConsoleEntry({
+                    id: crypto.randomUUID(), level: 'error',
+                    message: `[Asset Studio] Animation failed: ${data.error}`,
+                    timestamp: new Date().toISOString(),
+                });
+            }
+        } catch {
+            setAnimError('Network error');
+        } finally {
+            setAnimating(false);
+            setAssetGenerating(false);
+        }
+    };
 
     if (assets.length === 0) {
         return (
@@ -889,14 +994,13 @@ function GalleryTab() {
                     {assets.map((asset) => (
                         <button
                             key={asset.id}
-                            onClick={() => setPreviewAssetId(asset.id === previewAssetId ? null : asset.id)}
+                            onClick={() => { setPreviewAssetId(asset.id === previewAssetId ? null : asset.id); setShowAnimPanel(false); }}
                             className={`relative aspect-square rounded-lg overflow-hidden border transition-all ${
                                 previewAssetId === asset.id
                                     ? 'border-violet-500 ring-1 ring-violet-500/30'
                                     : 'border-white/5 hover:border-white/10'
                             }`}
                         >
-                            {/* Checkerboard background for transparency */}
                             <div className="absolute inset-0 bg-[length:8px_8px] bg-[position:0_0,4px_4px] bg-[image:linear-gradient(45deg,#1a1a2e_25%,transparent_25%,transparent_75%,#1a1a2e_75%),linear-gradient(45deg,#1a1a2e_25%,transparent_25%,transparent_75%,#1a1a2e_75%)]" />
                             {asset.storage_key ? (
                                 /* eslint-disable-next-line @next/next/no-img-element */
@@ -918,12 +1022,61 @@ function GalleryTab() {
                 </div>
             </div>
 
+            {/* Animate panel */}
+            {showAnimPanel && selectedAsset && (
+                <div className="flex-shrink-0 border-t border-white/5 p-2 flex flex-col gap-2">
+                    <div className="flex items-center justify-between">
+                        <span className="text-[10px] uppercase tracking-wider text-zinc-500">Animate &quot;{selectedAsset.name.slice(0, 20)}&quot;</span>
+                        <button onClick={() => setShowAnimPanel(false)} className="text-zinc-500 hover:text-zinc-300"><X size={12} /></button>
+                    </div>
+                    <div className="flex gap-1.5">
+                        {ANIM_TYPES.map(t => (
+                            <button
+                                key={t.value}
+                                onClick={() => setAnimType(t.value)}
+                                className={`flex-1 py-1 rounded text-xs transition-colors ${
+                                    animType === t.value
+                                        ? 'bg-violet-500/20 text-violet-300 border border-violet-500/30'
+                                        : 'bg-zinc-800 text-zinc-500 border border-transparent hover:text-zinc-300'
+                                }`}
+                            >
+                                {t.label}
+                            </button>
+                        ))}
+                    </div>
+                    <div className="flex items-center gap-2">
+                        <label className="text-[10px] text-zinc-500 whitespace-nowrap">Frames</label>
+                        <input
+                            type="range" min={2} max={8} value={animFrames}
+                            onChange={e => setAnimFrames(Number(e.target.value))}
+                            className="flex-1 accent-violet-500 h-1"
+                        />
+                        <span className="text-xs text-zinc-400 w-4 text-center">{animFrames}</span>
+                    </div>
+                    {animError && <p className="text-[10px] text-red-400">{animError}</p>}
+                    <button
+                        onClick={handleAnimate}
+                        disabled={animating || assetGenerating}
+                        className="w-full py-1.5 rounded bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white text-xs font-medium disabled:opacity-40 hover:brightness-110 transition-all flex items-center justify-center gap-1.5"
+                    >
+                        {animating ? (
+                            <><Loader2 size={12} className="animate-spin" />Generating {animFrames} frames...</>
+                        ) : (
+                            <><Film size={12} />Generate Animation</>
+                        )}
+                    </button>
+                </div>
+            )}
+
             {/* Selected asset actions */}
-            {previewAssetId && (
+            {previewAssetId && !showAnimPanel && (
                 <div className="flex-shrink-0 border-t border-white/5 p-2 flex gap-1.5">
-                    <button className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded bg-violet-500/20 text-violet-300 text-xs hover:bg-violet-500/30 transition-colors">
-                        <FolderPlus size={12} />
-                        Import to Project
+                    <button
+                        onClick={() => { setShowAnimPanel(true); setAnimError(''); }}
+                        className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded bg-violet-500/20 text-violet-300 text-xs hover:bg-violet-500/30 transition-colors"
+                    >
+                        <Film size={12} />
+                        Animate
                     </button>
                     <button className="flex items-center justify-center gap-1 px-3 py-1.5 rounded bg-zinc-800 text-zinc-400 text-xs hover:bg-zinc-700 transition-colors">
                         <Download size={12} />

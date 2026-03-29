@@ -3,8 +3,8 @@ import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { getAdminClient } from '@/lib/supabase/admin';
 import { executeTool } from '@/lib/agent/tools';
 
-// Vercel Serverless Function config — 3D model generation can take up to 60s
-export const maxDuration = 60;
+// Vercel Serverless Function config — animation generates multiple frames sequentially
+export const maxDuration = 300;
 
 // POST /api/assets/generate — Generate an asset via AI (standalone, outside agent loop)
 export async function POST(request: NextRequest) {
@@ -22,21 +22,18 @@ export async function POST(request: NextRequest) {
         // Try cookie-based auth first, fall back to project ownership check
         let userId: string;
         const supabase = await createServerSupabaseClient();
-        const { data: { user }, error: authError } = await supabase.auth.getUser();
-
-        console.log('[generate] cookie auth:', user ? `user=${user.id}` : `no user, error=${authError?.message}`);
+        const { data: { user } } = await supabase.auth.getUser();
 
         if (user) {
             userId = user.id;
         } else {
             // Fallback: look up project owner via admin client
             const admin = getAdminClient();
-            const { data: project, error: projectError } = await admin
+            const { data: project } = await admin
                 .from('projects')
                 .select('owner_id')
                 .eq('id', project_id)
                 .single();
-            console.log('[generate] fallback lookup:', { project_id, project, projectError: projectError?.message });
             if (!project?.owner_id) {
                 return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
             }
@@ -63,9 +60,7 @@ export async function POST(request: NextRequest) {
         const toolInput: Record<string, unknown> = { prompt, target_path, ...options };
         if (style) toolInput.style = style;
 
-        console.log('[generate] calling tool:', toolName, 'input:', JSON.stringify(toolInput));
         const result = await executeTool(toolName, toolInput, ctx);
-        console.log('[generate] tool result:', JSON.stringify({ success: result.success, error: result.error, output: result.output }));
 
         // TODO: credit deduction — will be configured later
 
