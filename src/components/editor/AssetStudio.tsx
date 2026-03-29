@@ -98,6 +98,7 @@ function LoraInput({
 }) {
     const [mode, setMode] = useState<'url' | 'upload'>('upload');
     const [uploading, setUploading] = useState(false);
+    const [uploadProgress, setUploadProgress] = useState(0);
     const [uploadedName, setUploadedName] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
     const fileRef = useRef<HTMLInputElement>(null);
@@ -112,18 +113,45 @@ function LoraInput({
             return;
         }
         setUploading(true);
+        setUploadProgress(0);
         setError(null);
         try {
-            const fd = new FormData();
-            fd.append('file', file);
-            const res = await fetch('/api/assets/lora', { method: 'POST', body: fd });
+            // Step 1: Get signed upload URL from our API (small JSON request)
+            const res = await fetch('/api/assets/lora', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ filename: file.name, size: file.size }),
+            });
             const data = await res.json();
-            if (res.ok && data.success) {
-                setLoraUrl(data.url);
-                setUploadedName(data.name);
-            } else {
-                setError(data.error || 'Upload failed');
+            if (!res.ok || !data.success) {
+                setError(data.error || 'Failed to prepare upload');
+                return;
             }
+
+            // Step 2: Upload file directly to Supabase Storage via signed URL
+            setUploadProgress(10);
+            const uploadRes = await new Promise<boolean>((resolve) => {
+                const xhr = new XMLHttpRequest();
+                xhr.open('PUT', data.signed_url);
+                xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+                xhr.upload.onprogress = (e) => {
+                    if (e.lengthComputable) {
+                        setUploadProgress(10 + Math.round((e.loaded / e.total) * 85));
+                    }
+                };
+                xhr.onload = () => resolve(xhr.status >= 200 && xhr.status < 300);
+                xhr.onerror = () => resolve(false);
+                xhr.send(file);
+            });
+
+            if (!uploadRes) {
+                setError('Upload to storage failed');
+                return;
+            }
+
+            setUploadProgress(100);
+            setLoraUrl(data.url);
+            setUploadedName(data.name);
         } catch {
             setError('Network error');
         } finally {
@@ -182,10 +210,10 @@ function LoraInput({
                 </div>
             ) : (
                 <div
-                    onClick={() => fileRef.current?.click()}
+                    onClick={() => !uploading && fileRef.current?.click()}
                     onDragOver={(e) => e.preventDefault()}
                     onDrop={handleDrop}
-                    className="flex flex-col items-center gap-1 py-3 rounded-lg border border-dashed border-white/10 bg-zinc-900/50 cursor-pointer hover:border-violet-500/30 transition-colors"
+                    className={`flex flex-col items-center gap-1 py-3 rounded-lg border border-dashed bg-zinc-900/50 transition-colors ${uploading ? 'border-violet-500/30' : 'border-white/10 cursor-pointer hover:border-violet-500/30'}`}
                 >
                     {uploading ? (
                         <Loader2 size={16} className="text-violet-400 animate-spin" />
@@ -193,8 +221,13 @@ function LoraInput({
                         <Upload size={16} className="text-zinc-600" />
                     )}
                     <span className="text-[10px] text-zinc-500">
-                        {uploading ? 'Uploading...' : 'Drop .safetensors or click to browse'}
+                        {uploading ? `Uploading... ${uploadProgress}%` : 'Drop .safetensors or click to browse'}
                     </span>
+                    {uploading && (
+                        <div className="w-3/4 h-1 bg-zinc-800 rounded-full overflow-hidden mt-0.5">
+                            <div className="h-full bg-violet-500 rounded-full transition-all duration-300" style={{ width: `${uploadProgress}%` }} />
+                        </div>
+                    )}
                     <input
                         ref={fileRef}
                         type="file"
