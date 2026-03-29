@@ -67,8 +67,8 @@ async function uploadBinaryAsset(ctx: ToolContext, path: string, buffer: ArrayBu
 
 import { generate2D, generate3D, downloadResult, type Model2D, type Provider } from '@/lib/assets/generate';
 
-async function generateImage(params: { prompt: string; width: number; height: number; style?: string; model_2d?: string; provider?: string; loras?: Array<{ url: string; scale?: number }> }): Promise<ArrayBuffer | null> {
-    const model: Model2D = (params.model_2d as Model2D) || (process.env.FAL_KEY ? 'flux-schnell' : 'sdxl');
+async function generateImage(params: { prompt: string; width: number; height: number; style?: string; model_2d?: string; provider?: string; loras?: Array<{ url: string; scale?: number }> }): Promise<{ buffer: ArrayBuffer } | { error: string }> {
+    const model: Model2D = (params.model_2d as Model2D) || (process.env.REPLICATE_API_TOKEN ? 'flux-schnell' : 'sdxl');
     const provider = params.provider as Provider | undefined;
     const result = await generate2D({
         prompt: params.prompt,
@@ -81,10 +81,14 @@ async function generateImage(params: { prompt: string; width: number; height: nu
         loras: params.loras,
     });
     if (result.success && result.imageUrl) {
-        return downloadResult(result.imageUrl);
+        try {
+            const buffer = await downloadResult(result.imageUrl);
+            return { buffer };
+        } catch (err) {
+            return { error: `Download failed: ${err instanceof Error ? err.message : 'unknown'}` };
+        }
     }
-    console.error('Image generation failed:', result.error);
-    return null;
+    return { error: result.error || `Generation failed (provider: ${result.provider}, model: ${result.model})` };
 }
 
 // ── Free Asset Search (shared module) ─────────────────────────────
@@ -316,11 +320,12 @@ registerTool({
         const model2d = input.model_2d as string | undefined;
         const prov = input.provider as string | undefined;
         const loras = input.loras as Array<{ url: string; scale?: number }> | undefined;
-        const buf = await generateImage({ prompt: `Game sprite: ${prompt}`, width, height, style, model_2d: model2d, provider: prov, loras });
-        if (buf) { const sk = await uploadBinaryAsset(ctx, targetPath, buf, 'image/png'); return { callId: '', success: true, output: { message: `Sprite generated at ${targetPath}`, path: targetPath, storage_key: sk }, filesModified: [targetPath], duration_ms: Date.now() - start }; }
-        const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><rect width="100%" height="100%" fill="#8b5cf6" opacity="0.3"/><text x="50%" y="50%" text-anchor="middle" dy=".3em" fill="#fff" font-size="12">${prompt.slice(0, 20)}</text></svg>`;
-        await upsertProjectFile(ctx, targetPath, svg, 'text');
-        return { callId: '', success: true, output: { message: `Placeholder at ${targetPath}`, path: targetPath, placeholder: true }, filesModified: [targetPath], duration_ms: Date.now() - start };
+        const result = await generateImage({ prompt: `Game sprite: ${prompt}`, width, height, style, model_2d: model2d, provider: prov, loras });
+        if ('buffer' in result) {
+            const sk = await uploadBinaryAsset(ctx, targetPath, result.buffer, 'image/png');
+            return { callId: '', success: true, output: { message: `Sprite generated at ${targetPath}`, path: targetPath, storage_key: sk }, filesModified: [targetPath], duration_ms: Date.now() - start };
+        }
+        return { callId: '', success: false, output: { message: result.error }, error: result.error, filesModified: [], duration_ms: Date.now() - start };
     },
 });
 
@@ -343,10 +348,12 @@ registerTool({
         const tModel = input.model_2d as string | undefined;
         const tProv = input.provider as string | undefined;
         const tLoras = input.loras as Array<{ url: string; scale?: number }> | undefined;
-        const buf = await generateImage({ prompt: `Seamless game texture: ${prompt}`, width, height, style: tStyle, model_2d: tModel, provider: tProv, loras: tLoras });
-        if (buf) { const sk = await uploadBinaryAsset(ctx, targetPath, buf, 'image/png'); return { callId: '', success: true, output: { message: `Texture at ${targetPath}`, path: targetPath, storage_key: sk }, filesModified: [targetPath], duration_ms: Date.now() - start }; }
-        await upsertProjectFile(ctx, targetPath, `# Placeholder: ${prompt}`, 'text');
-        return { callId: '', success: true, output: { message: `Placeholder at ${targetPath}`, placeholder: true }, filesModified: [targetPath], duration_ms: Date.now() - start };
+        const result = await generateImage({ prompt: `Seamless game texture: ${prompt}`, width, height, style: tStyle, model_2d: tModel, provider: tProv, loras: tLoras });
+        if ('buffer' in result) {
+            const sk = await uploadBinaryAsset(ctx, targetPath, result.buffer, 'image/png');
+            return { callId: '', success: true, output: { message: `Texture at ${targetPath}`, path: targetPath, storage_key: sk }, filesModified: [targetPath], duration_ms: Date.now() - start };
+        }
+        return { callId: '', success: false, output: { message: result.error }, error: result.error, filesModified: [], duration_ms: Date.now() - start };
     },
 });
 
