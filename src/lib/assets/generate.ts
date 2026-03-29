@@ -279,17 +279,33 @@ async function generate2DReplicate(opts: Generate2DOptions, model: Model2D): Pro
 
         const output = await replicate.run(repModel as `${string}/${string}`, { input });
 
-        // Replicate returns array of URLs or a ReadableStream for Flux
+        // Replicate returns various formats:
+        // - Array of URL strings (older models)
+        // - Array of FileOutput objects with .url() method (newer SDK)
+        // - Single FileOutput object
+        // - ReadableStream
         let imageUrl: string | null = null;
-        if (Array.isArray(output) && output.length > 0) {
-            const first = output[0];
-            if (typeof first === 'string') {
-                imageUrl = first;
-            } else if (first && typeof first === 'object' && 'url' in first) {
-                imageUrl = (first as { url: string }).url;
+
+        const extractUrl = (val: unknown): string | null => {
+            if (typeof val === 'string') return val;
+            if (val && typeof val === 'object') {
+                // FileOutput objects have a .url() method or toString() that returns the URL
+                if (typeof (val as { url: unknown }).url === 'function') {
+                    const u = (val as { url: () => URL }).url();
+                    return u?.href ?? String(u);
+                }
+                if ('href' in val) return (val as { href: string }).href;
+                // Try toString — FileOutput.toString() returns the URL string
+                const str = String(val);
+                if (str.startsWith('http')) return str;
             }
-        } else if (output && typeof output === 'object' && !Array.isArray(output) && 'url' in (output as Record<string, unknown>)) {
-            imageUrl = (output as { url: string }).url;
+            return null;
+        };
+
+        if (Array.isArray(output) && output.length > 0) {
+            imageUrl = extractUrl(output[0]);
+        } else {
+            imageUrl = extractUrl(output);
         }
 
         if (!imageUrl) {
