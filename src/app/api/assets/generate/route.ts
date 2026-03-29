@@ -63,7 +63,9 @@ export async function POST(request: NextRequest) {
         const toolInput: Record<string, unknown> = { prompt, target_path, ...options };
         if (style) toolInput.style = style;
 
+        console.log('[generate] calling tool:', toolName, 'input:', JSON.stringify(toolInput));
         const result = await executeTool(toolName, toolInput, ctx);
+        console.log('[generate] tool result:', JSON.stringify({ success: result.success, error: result.error, output: result.output }));
 
         // TODO: credit deduction — will be configured later
 
