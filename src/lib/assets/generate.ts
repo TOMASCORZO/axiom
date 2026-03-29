@@ -158,8 +158,11 @@ const FAL_2D_MAP: Record<Model2D, string> = {
 
 async function generate2DFal(opts: Generate2DOptions, model: Model2D): Promise<GenerationResult> {
     const falModel = FAL_2D_MAP[model];
-    const w = opts.width ?? 512;
-    const h = opts.height ?? 512;
+    // AI models need minimum resolution to produce quality output — generate at
+    // model-native size, the caller (game tool) will downscale to game-asset size
+    const minRes = model === 'sdxl' ? 512 : 1024;
+    const w = Math.max(opts.width ?? 512, minRes);
+    const h = Math.max(opts.height ?? 512, minRes);
     const prompt = buildPrompt(opts.prompt, opts.style);
 
     try {
@@ -221,8 +224,11 @@ async function generate2DReplicate(opts: Generate2DOptions, model: Model2D): Pro
     }
 
     let repModel = REPLICATE_2D_MAP[model];
-    const w = opts.width ?? 512;
-    const h = opts.height ?? 512;
+    // AI models need minimum resolution — generate at model-native size,
+    // the caller (game tool) will downscale to game-asset size
+    const minRes = model === 'sdxl' ? 512 : 1024;
+    const w = Math.max(opts.width ?? 512, minRes);
+    const h = Math.max(opts.height ?? 512, minRes);
     const prompt = buildPrompt(opts.prompt, opts.style);
     const hasLoras = opts.loras && opts.loras.length > 0;
 
@@ -254,7 +260,7 @@ async function generate2DReplicate(opts: Generate2DOptions, model: Model2D): Pro
                 aspect_ratio: w === h ? '1:1' : w > h ? '16:9' : '9:16',
             };
             if (model === 'flux-schnell') {
-                input.num_inference_steps = opts.steps ?? 4;
+                input.num_inference_steps = opts.steps ?? 8;
                 input.go_fast = true;
             } else {
                 input.num_inference_steps = opts.steps ?? 28;
