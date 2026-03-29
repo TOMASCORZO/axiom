@@ -2,6 +2,7 @@
 
 import { useState, useRef, useCallback } from 'react';
 import { useEditorStore } from '@/lib/store';
+import { createClient as createSupabaseClient } from '@/lib/supabase/client';
 import type { AssetType, AssetStyle } from '@/types/asset';
 import type { FreeAssetResult } from '@/lib/assets/search';
 import {
@@ -116,45 +117,40 @@ function LoraInput({
         setUploadProgress(0);
         setError(null);
         try {
-            // Upload raw binary via PUT with XHR for progress tracking
-            // File metadata is sent in headers to avoid formData parsing limits
-            const result = await new Promise<{ ok: boolean; data?: Record<string, unknown>; error?: string }>((resolve) => {
-                const xhr = new XMLHttpRequest();
-                xhr.open('PUT', '/api/assets/lora');
-                xhr.setRequestHeader('Content-Type', 'application/octet-stream');
-                xhr.setRequestHeader('X-Filename', file.name);
-                xhr.setRequestHeader('X-Filesize', String(file.size));
-                xhr.upload.onprogress = (e) => {
-                    if (e.lengthComputable) {
-                        setUploadProgress(Math.round((e.loaded / e.total) * 90));
-                    }
-                };
-                xhr.onload = () => {
-                    try {
-                        const json = JSON.parse(xhr.responseText);
-                        if (xhr.status >= 200 && xhr.status < 300 && json.success) {
-                            resolve({ ok: true, data: json });
-                        } else {
-                            resolve({ ok: false, error: json.error || `Upload failed (${xhr.status})` });
-                        }
-                    } catch {
-                        resolve({ ok: false, error: `Server error (${xhr.status})` });
-                    }
-                };
-                xhr.onerror = () => resolve({ ok: false, error: 'Network error — check your connection' });
-                xhr.send(file);
+            // Step 1: Get a signed upload token from our API (tiny JSON request)
+            setUploadProgress(5);
+            const res = await fetch('/api/assets/lora', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ filename: file.name, size: file.size }),
             });
+            const data = await res.json();
+            if (!res.ok || !data.success) {
+                setError(data.error || 'Failed to prepare upload');
+                return;
+            }
 
-            if (!result.ok) {
-                setError(result.error || 'Upload failed');
+            // Step 2: Upload directly to Supabase Storage using the signed URL token
+            // This bypasses Next.js entirely — the file goes browser → Supabase
+            setUploadProgress(10);
+            const supabase = createSupabaseClient();
+            const { error: uploadError } = await supabase.storage
+                .from('assets')
+                .uploadToSignedUrl(data.path, data.token, file, {
+                    contentType: 'application/octet-stream',
+                    upsert: true,
+                });
+
+            if (uploadError) {
+                setError(`Upload failed: ${uploadError.message}`);
                 return;
             }
 
             setUploadProgress(100);
-            setLoraUrl(result.data?.url as string);
-            setUploadedName(result.data?.name as string);
-        } catch {
-            setError('Network error');
+            setLoraUrl(data.url);
+            setUploadedName(data.name);
+        } catch (err) {
+            setError(err instanceof Error ? err.message : 'Upload failed');
         } finally {
             setUploading(false);
         }

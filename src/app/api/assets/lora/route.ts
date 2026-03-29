@@ -2,13 +2,12 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { getAdminClient } from '@/lib/supabase/admin';
 
-export const maxDuration = 120;
+export const maxDuration = 60;
 
-// PUT /api/assets/lora — Stream-upload a LoRA .safetensors file
-// Client sends raw binary body with X-Filename and X-Filesize headers.
-// This avoids formData() parsing (which buffers the entire file and hits
-// Next.js body size limits) and CORS issues with signed URLs.
-export async function PUT(request: NextRequest) {
+// POST /api/assets/lora — Create a signed upload token for a LoRA file
+// Returns { token, path } so the client can upload directly to Supabase
+// via the Supabase JS client (bypasses Next.js body size limits entirely)
+export async function POST(request: NextRequest) {
     try {
         const supabase = await createServerSupabaseClient();
         const { data: { user }, error: authError } = await supabase.auth.getUser();
@@ -16,72 +15,46 @@ export async function PUT(request: NextRequest) {
             return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
         }
 
-        const filename = request.headers.get('x-filename');
-        const filesize = Number(request.headers.get('x-filesize') || '0');
+        const body = await request.json();
+        const { filename, size } = body as { filename?: string; size?: number };
 
-        if (!filename) {
-            return NextResponse.json({ error: 'Missing X-Filename header' }, { status: 400 });
+        if (!filename || typeof filename !== 'string') {
+            return NextResponse.json({ error: 'Missing filename' }, { status: 400 });
         }
         if (!filename.endsWith('.safetensors')) {
             return NextResponse.json({ error: 'Only .safetensors files are supported' }, { status: 400 });
         }
-        if (filesize > 500 * 1024 * 1024) {
+        if (size && size > 500 * 1024 * 1024) {
             return NextResponse.json({ error: 'File too large (max 500MB)' }, { status: 400 });
-        }
-
-        const body = request.body;
-        if (!body) {
-            return NextResponse.json({ error: 'No file body' }, { status: 400 });
         }
 
         const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
         const storageKey = `loras/${user.id}/${safeName}`;
 
-        // Read the stream into a buffer and upload to Supabase Storage
-        // Supabase JS SDK doesn't support ReadableStream, so we collect chunks
-        const reader = body.getReader();
-        const chunks: Uint8Array[] = [];
-        let totalSize = 0;
-
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            chunks.push(value);
-            totalSize += value.byteLength;
-            // Safety check during streaming
-            if (totalSize > 500 * 1024 * 1024) {
-                return NextResponse.json({ error: 'File too large (max 500MB)' }, { status: 400 });
-            }
-        }
-
-        // Combine chunks into a single buffer
-        const buffer = new Uint8Array(totalSize);
-        let offset = 0;
-        for (const chunk of chunks) {
-            buffer.set(chunk, offset);
-            offset += chunk.byteLength;
-        }
-
         const admin = getAdminClient();
-        const { error: uploadError } = await admin.storage
-            .from('assets')
-            .upload(storageKey, buffer, {
-                contentType: 'application/octet-stream',
-                upsert: true,
-            });
 
-        if (uploadError) {
-            return NextResponse.json({ error: `Upload failed: ${uploadError.message}` }, { status: 500 });
+        // Create a signed upload URL — client will use supabase.storage.uploadToSignedUrl()
+        const { data: signedData, error: signedError } = await admin.storage
+            .from('assets')
+            .createSignedUploadUrl(storageKey, { upsert: true });
+
+        if (signedError || !signedData) {
+            return NextResponse.json(
+                { error: `Failed to create upload URL: ${signedError?.message ?? 'unknown'}` },
+                { status: 500 },
+            );
         }
 
         const { data: urlData } = admin.storage.from('assets').getPublicUrl(storageKey);
+        const serveUrl = urlData?.publicUrl || `/api/assets/serve?key=${encodeURIComponent(storageKey)}`;
 
         return NextResponse.json({
             success: true,
-            name: filename,
-            size_bytes: totalSize,
+            token: signedData.token,
+            path: signedData.path,
             storage_key: storageKey,
-            url: urlData?.publicUrl || `/api/assets/serve?key=${encodeURIComponent(storageKey)}`,
+            name: filename,
+            url: serveUrl,
         });
     } catch (err) {
         console.error('LoRA upload error:', err);
