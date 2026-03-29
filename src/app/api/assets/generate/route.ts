@@ -22,18 +22,21 @@ export async function POST(request: NextRequest) {
         // Try cookie-based auth first, fall back to project ownership check
         let userId: string;
         const supabase = await createServerSupabaseClient();
-        const { data: { user } } = await supabase.auth.getUser();
+        const { data: { user }, error: authError } = await supabase.auth.getUser();
+
+        console.log('[generate] cookie auth:', user ? `user=${user.id}` : `no user, error=${authError?.message}`);
 
         if (user) {
             userId = user.id;
         } else {
             // Fallback: look up project owner via admin client
             const admin = getAdminClient();
-            const { data: project } = await admin
+            const { data: project, error: projectError } = await admin
                 .from('projects')
                 .select('owner_id')
                 .eq('id', project_id)
                 .single();
+            console.log('[generate] fallback lookup:', { project_id, project, projectError: projectError?.message });
             if (!project?.owner_id) {
                 return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
             }
