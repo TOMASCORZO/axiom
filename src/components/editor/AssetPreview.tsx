@@ -18,7 +18,7 @@ import {
 
 const ZOOM_LEVELS = [0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4, 6, 8];
 
-const ANIM_TYPES = [
+const ANIM_PRESETS = [
     { value: 'walk', label: 'Walk' },
     { value: 'run', label: 'Run' },
     { value: 'idle', label: 'Idle' },
@@ -39,7 +39,7 @@ export default function AssetPreview() {
     const [actionError, setActionError] = useState('');
 
     // Animate options
-    const [animType, setAnimType] = useState('walk');
+    const [animPrompt, setAnimPrompt] = useState('walk cycle');
     const [animFrames, setAnimFrames] = useState(4);
 
     // Img2Img options
@@ -69,9 +69,10 @@ export default function AssetPreview() {
 
         const sourceUrl = `${window.location.origin}/api/assets/serve?key=${encodeURIComponent(asset.storage_key)}`;
         const baseName = asset.name.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 30);
-        const targetPath = `assets/${baseName}_${animType}_${animFrames}f.png`;
+        const promptSlug = animPrompt.trim().replace(/[^a-zA-Z0-9]/g, '_').slice(0, 20);
+        const targetPath = `assets/${baseName}_${promptSlug}_${animFrames}f.png`;
 
-        addConsoleEntry({ id: crypto.randomUUID(), level: 'log', message: `[Asset Studio] Animating "${asset.name}" → ${animType} (${animFrames} frames)...`, timestamp: new Date().toISOString() });
+        addConsoleEntry({ id: crypto.randomUUID(), level: 'log', message: `[Asset Studio] Animating "${asset.name}" → "${animPrompt}" (${animFrames} frames)...`, timestamp: new Date().toISOString() });
 
         try {
             const res = await fetch('/api/assets/generate', {
@@ -79,7 +80,7 @@ export default function AssetPreview() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     project_id: project.id,
-                    prompt: `${asset.generation_prompt || asset.name}, ${animType} animation cycle`,
+                    prompt: `${asset.generation_prompt || asset.name}, ${animPrompt.trim()}`,
                     asset_type: 'animation',
                     target_path: targetPath,
                     options: { source_image_url: sourceUrl, frame_count: animFrames, width: asset.width || 512, height: asset.height || 512 },
@@ -91,16 +92,16 @@ export default function AssetPreview() {
                 const assetId = crypto.randomUUID();
                 addAsset({
                     id: assetId, project_id: project.id,
-                    name: `${asset.name} (${animType})`, asset_type: 'sprite_sheet',
+                    name: `${asset.name} (${animPrompt.trim().slice(0, 20)})`, asset_type: 'sprite_sheet',
                     storage_key: data.storage_key || targetPath, thumbnail_key: null, file_format: 'png',
                     width: ((output?.frame_width as number) || 512) * animFrames,
                     height: (output?.frame_height as number) || 512,
                     metadata: {
-                        tags: [animType, 'animation'],
+                        tags: [animPrompt.trim(), 'animation'],
                         frames: Array.from({ length: animFrames }, (_, i) => ({ x: i * ((output?.frame_width as number) || 512), y: 0, width: (output?.frame_width as number) || 512, height: (output?.frame_height as number) || 512, duration: 1 })),
                         frameRate: 12, loop: true,
                     },
-                    generation_prompt: `${asset.name} ${animType} animation`,
+                    generation_prompt: `${asset.name} ${animPrompt.trim()}`,
                     generation_model: (output?.model_used as string) || null,
                     size_bytes: 0, created_at: new Date().toISOString(),
                 });
@@ -233,7 +234,7 @@ export default function AssetPreview() {
                     busy={actionBusy}
                     error={actionError}
                     asset={asset}
-                    animType={animType} setAnimType={setAnimType}
+                    animPrompt={animPrompt} setAnimPrompt={setAnimPrompt}
                     animFrames={animFrames} setAnimFrames={setAnimFrames}
                     img2imgPrompt={img2imgPrompt} setImg2imgPrompt={setImg2imgPrompt}
                     img2imgStrength={img2imgStrength} setImg2imgStrength={setImg2imgStrength}
@@ -275,12 +276,12 @@ export default function AssetPreview() {
 
 // ── Action Panel ────────────────────────────────────────────────────────
 
-function ActionPanel({ action, busy, error, asset, animType, setAnimType, animFrames, setAnimFrames, img2imgPrompt, setImg2imgPrompt, img2imgStrength, setImg2imgStrength, onAnimate, onImg2Img, generating }: {
+function ActionPanel({ action, busy, error, asset, animPrompt, setAnimPrompt, animFrames, setAnimFrames, img2imgPrompt, setImg2imgPrompt, img2imgStrength, setImg2imgStrength, onAnimate, onImg2Img, generating }: {
     action: 'animate' | 'img2img';
     busy: boolean;
     error: string;
     asset: Asset;
-    animType: string; setAnimType: (v: string) => void;
+    animPrompt: string; setAnimPrompt: (v: string) => void;
     animFrames: number; setAnimFrames: (v: number) => void;
     img2imgPrompt: string; setImg2imgPrompt: (v: string) => void;
     img2imgStrength: number; setImg2imgStrength: (v: number) => void;
@@ -295,12 +296,20 @@ function ActionPanel({ action, busy, error, asset, animType, setAnimType, animFr
                     <Film size={12} className="text-violet-400 flex-shrink-0" />
                     <span className="text-[10px] uppercase tracking-wider text-zinc-400">Animate &quot;{asset.name.slice(0, 25)}&quot;</span>
                 </div>
-                {/* Animation type */}
+                {/* Animation prompt */}
+                <textarea
+                    value={animPrompt}
+                    onChange={e => setAnimPrompt(e.target.value)}
+                    placeholder="Describe the animation (e.g. 'walk cycle', 'sword slash', 'jumping'...)"
+                    className="w-full bg-zinc-900 border border-white/10 rounded px-2 py-1.5 text-[11px] text-zinc-200 placeholder:text-zinc-600 resize-none focus:outline-none focus:border-violet-500/50 transition-colors"
+                    rows={2}
+                />
+                {/* Quick presets */}
                 <div className="flex gap-1">
-                    {ANIM_TYPES.map(t => (
-                        <button key={t.value} onClick={() => setAnimType(t.value)}
+                    {ANIM_PRESETS.map(t => (
+                        <button key={t.value} onClick={() => setAnimPrompt(t.value + ' cycle')}
                             className={`flex-1 py-1 rounded text-[10px] transition-colors ${
-                                animType === t.value ? 'bg-violet-500/20 text-violet-300 border border-violet-500/30' : 'bg-zinc-900 text-zinc-500 border border-transparent hover:text-zinc-300'
+                                animPrompt.toLowerCase().startsWith(t.value) ? 'bg-violet-500/20 text-violet-300 border border-violet-500/30' : 'bg-zinc-900 text-zinc-500 border border-transparent hover:text-zinc-300'
                             }`}
                         >{t.label}</button>
                     ))}
@@ -308,11 +317,11 @@ function ActionPanel({ action, busy, error, asset, animType, setAnimType, animFr
                 {/* Frames */}
                 <div className="flex items-center gap-2">
                     <label className="text-[10px] text-zinc-500 whitespace-nowrap">Frames</label>
-                    <input type="range" min={2} max={8} value={animFrames} onChange={e => setAnimFrames(Number(e.target.value))} className="flex-1 accent-violet-500 h-1" />
+                    <input type="range" min={2} max={12} value={animFrames} onChange={e => setAnimFrames(Number(e.target.value))} className="flex-1 accent-violet-500 h-1" />
                     <span className="text-[10px] text-zinc-400 w-4 text-center font-mono">{animFrames}</span>
                 </div>
                 {error && <p className="text-[10px] text-red-400">{error}</p>}
-                <button onClick={onAnimate} disabled={busy || generating}
+                <button onClick={onAnimate} disabled={busy || generating || !animPrompt.trim()}
                     className="w-full py-1.5 rounded bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white text-[11px] font-medium disabled:opacity-40 hover:brightness-110 transition-all flex items-center justify-center gap-1.5"
                 >
                     {busy ? <><Loader2 size={11} className="animate-spin" />Generating {animFrames} frames...</> : <><Film size={11} />Generate Animation</>}

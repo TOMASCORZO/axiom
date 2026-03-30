@@ -709,12 +709,25 @@ const FRAME_TEMPLATES: Record<string, string[]> = {
 };
 
 function getFramePrompts(basePrompt: string, frameCount: number, animType?: string): string[] {
-    const cycle = FRAME_TEMPLATES[animType ?? 'walk'] ?? WALK_CYCLE;
+    const cycle = animType ? FRAME_TEMPLATES[animType] : undefined;
     const prompts: string[] = [];
 
-    for (let i = 0; i < frameCount; i++) {
-        const phaseIdx = Math.floor((i / frameCount) * cycle.length) % cycle.length;
-        prompts.push(`${basePrompt}, ${cycle[phaseIdx]}, animation frame ${i + 1} of ${frameCount}, consistent character design, same style and proportions across all frames`);
+    if (cycle) {
+        // Use predefined cycle phases
+        for (let i = 0; i < frameCount; i++) {
+            const phaseIdx = Math.floor((i / frameCount) * cycle.length) % cycle.length;
+            prompts.push(`${basePrompt}, ${cycle[phaseIdx]}, animation frame ${i + 1} of ${frameCount}, consistent character design, same style and proportions across all frames`);
+        }
+    } else {
+        // Custom animation — distribute progress across frames
+        for (let i = 0; i < frameCount; i++) {
+            const progress = i / (frameCount - 1 || 1);
+            const phase = progress < 0.25 ? 'beginning of motion'
+                : progress < 0.5 ? 'early phase of motion'
+                : progress < 0.75 ? 'peak of motion'
+                : 'returning to start';
+            prompts.push(`${basePrompt}, ${phase}, frame ${i + 1} of ${frameCount}, smooth animation sequence, consistent character design, same style and proportions across all frames`);
+        }
     }
 
     return prompts;
@@ -730,12 +743,14 @@ export async function generateAnimation(opts: AnimateOptions): Promise<Animation
     const provider = pickProvider(opts.provider);
     const model = opts.model ?? 'flux-schnell';
 
-    // Detect animation type from prompt
+    // Detect animation type from prompt — use preset cycle if it matches, otherwise custom
     const lowerPrompt = opts.prompt.toLowerCase();
-    let animType = 'walk';
-    if (lowerPrompt.includes('idle') || lowerPrompt.includes('breathing')) animType = 'idle';
-    else if (lowerPrompt.includes('attack') || lowerPrompt.includes('slash') || lowerPrompt.includes('swing')) animType = 'attack';
-    else if (lowerPrompt.includes('run') || lowerPrompt.includes('sprint') || lowerPrompt.includes('dash')) animType = 'run';
+    let animType: string | undefined;
+    if (/\bwalk\b/.test(lowerPrompt)) animType = 'walk';
+    else if (/\b(run|sprint|dash)\b/.test(lowerPrompt)) animType = 'run';
+    else if (/\b(idle|breath|stand)\b/.test(lowerPrompt)) animType = 'idle';
+    else if (/\b(attack|slash|swing|hit|strike|punch|kick)\b/.test(lowerPrompt)) animType = 'attack';
+    // else: custom prompt — no preset
 
     const framePrompts = getFramePrompts(opts.prompt, frameCount, animType);
 
