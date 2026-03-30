@@ -37,23 +37,24 @@ export default function EditorLayout({ projectId }: EditorLayoutProps) {
 
                 {/* Center + Bottom */}
                 <div className="flex-1 flex flex-col overflow-hidden">
-                    {/* Center — split between Code Editor and Engine Viewport / Asset Preview */}
+                    {/* Center — Asset Preview (full) or Code Editor + Viewport */}
                     <div className="flex-1 flex flex-col overflow-hidden">
-                        {hasOpenFiles ? (
+                        {activeRightPanel === 'assets' ? (
+                            <div className="flex-1 overflow-hidden">
+                                <AssetPreview />
+                            </div>
+                        ) : hasOpenFiles ? (
                             <>
-                                {/* Code Editor — top half */}
                                 <div className="flex-1 overflow-hidden min-h-0" style={{ flex: '1 1 50%' }}>
                                     <CodeEditor />
                                 </div>
-                                {/* Engine Viewport or Asset Preview — bottom half */}
                                 <div className="flex-1 overflow-hidden min-h-0 border-t border-white/5" style={{ flex: '1 1 50%' }}>
-                                    {activeRightPanel === 'assets' ? <AssetPreview /> : <AxiomViewport />}
+                                    <AxiomViewport />
                                 </div>
                             </>
                         ) : (
-                            /* No files open — full center */
                             <div className="flex-1 overflow-hidden">
-                                {activeRightPanel === 'assets' ? <AssetPreview /> : <AxiomViewport />}
+                                <AxiomViewport />
                             </div>
                         )}
                     </div>
