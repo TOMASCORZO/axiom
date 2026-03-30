@@ -65,7 +65,7 @@ async function uploadBinaryAsset(ctx: ToolContext, path: string, buffer: ArrayBu
 
 // ── Image / 3D Generation (via fal.ai) ─────────────────────────────
 
-import { generate2D, generate3D, generateAnimation, downloadResult, type Model2D, type Provider } from '@/lib/assets/generate';
+import { generate2D, generate3D, generateAnimation, img2img, downloadResult, type Model2D, type Provider } from '@/lib/assets/generate';
 
 async function generateImage(params: { prompt: string; width: number; height: number; style?: string; model_2d?: string; provider?: string; loras?: Array<{ url: string; scale?: number }> }): Promise<{ buffer: ArrayBuffer } | { error: string }> {
     const model: Model2D = (params.model_2d as Model2D) || (process.env.REPLICATE_API_TOKEN ? 'flux-schnell' : 'sdxl');
@@ -303,10 +303,19 @@ registerTool({
 
 registerTool({
     name: 'generate_sprite',
-    description: 'AI-generate a CUSTOM 2D sprite image. Costs 5 credits. Only use when search_free_asset fails.',
+    description: 'AI-generate a CUSTOM 2D sprite image, or create a variation via img2img when source_image_url is provided.',
     parameters: {
         type: 'object',
-        properties: { prompt: { type: 'string' }, style: { type: 'string', enum: ['pixel_art', 'hand_drawn', 'vector', 'realistic', 'stylized'], default: 'stylized' }, width: { type: 'integer', default: 128 }, height: { type: 'integer', default: 128 }, transparent_bg: { type: 'boolean', default: true }, target_path: { type: 'string' } },
+        properties: {
+            prompt: { type: 'string' },
+            style: { type: 'string', enum: ['pixel_art', 'hand_drawn', 'vector', 'realistic', 'stylized'], default: 'stylized' },
+            width: { type: 'integer', default: 128 },
+            height: { type: 'integer', default: 128 },
+            transparent_bg: { type: 'boolean', default: true },
+            target_path: { type: 'string' },
+            source_image_url: { type: 'string', description: 'Source image URL for img2img variation' },
+            strength: { type: 'number', description: 'Img2img strength 0.0-1.0 (lower = closer to original)', default: 0.5 },
+        },
         required: ['prompt', 'target_path'],
     },
     access: ['build'],
@@ -320,7 +329,36 @@ registerTool({
         const model2d = input.model_2d as string | undefined;
         const prov = input.provider as string | undefined;
         const loras = input.loras as Array<{ url: string; scale?: number }> | undefined;
-        const result = await generateImage({ prompt: `Game sprite: ${prompt}`, width, height, style, model_2d: model2d, provider: prov, loras });
+        const sourceImageUrl = input.source_image_url as string | undefined;
+        const strength = input.strength as number | undefined;
+
+        let result: { buffer: ArrayBuffer } | { error: string };
+
+        if (sourceImageUrl) {
+            // Img2Img mode — generate variation from source image
+            const i2iResult = await img2img({
+                imageUrl: sourceImageUrl,
+                prompt,
+                model: (model2d as Model2D) || undefined,
+                provider: (prov as Provider) || undefined,
+                strength: strength ?? 0.5,
+                width, height, style, format: 'png',
+            });
+            if (i2iResult.success && i2iResult.imageUrl) {
+                try {
+                    const buffer = await downloadResult(i2iResult.imageUrl);
+                    result = { buffer };
+                } catch (err) {
+                    result = { error: `Download failed: ${err instanceof Error ? err.message : 'unknown'}` };
+                }
+            } else {
+                result = { error: i2iResult.error || 'Img2Img failed' };
+            }
+        } else {
+            // Text-to-image mode
+            result = await generateImage({ prompt: `Game sprite: ${prompt}`, width, height, style, model_2d: model2d, provider: prov, loras });
+        }
+
         if ('buffer' in result) {
             const sk = await uploadBinaryAsset(ctx, targetPath, result.buffer, 'image/png');
             return { callId: '', success: true, output: { message: `Sprite generated at ${targetPath}`, path: targetPath, storage_key: sk }, filesModified: [targetPath], duration_ms: Date.now() - start };

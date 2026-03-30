@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useEditorStore } from '@/lib/store';
+import type { Asset } from '@/types/asset';
 import {
     Image as ImageIcon,
     ZoomIn,
@@ -10,13 +11,46 @@ import {
     X,
     ChevronLeft,
     ChevronRight,
+    Film,
+    Wand2,
+    Loader2,
 } from 'lucide-react';
 
 const ZOOM_LEVELS = [0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4, 6, 8];
 
+const ANIM_TYPES = [
+    { value: 'walk', label: 'Walk' },
+    { value: 'run', label: 'Run' },
+    { value: 'idle', label: 'Idle' },
+    { value: 'attack', label: 'Attack' },
+];
+
 export default function AssetPreview() {
-    const { assets, previewAssetId, setPreviewAssetId } = useEditorStore();
+    const {
+        assets, project, previewAssetId, setPreviewAssetId,
+        addAsset, addConsoleEntry, refreshProjectFiles,
+        setAssetGenerating, assetGenerating,
+    } = useEditorStore();
     const asset = assets.find((a) => a.id === previewAssetId) ?? null;
+
+    // Action panel state
+    const [activeAction, setActiveAction] = useState<'animate' | 'img2img' | null>(null);
+    const [actionBusy, setActionBusy] = useState(false);
+    const [actionError, setActionError] = useState('');
+
+    // Animate options
+    const [animType, setAnimType] = useState('walk');
+    const [animFrames, setAnimFrames] = useState(4);
+
+    // Img2Img options
+    const [img2imgPrompt, setImg2imgPrompt] = useState('');
+    const [img2imgStrength, setImg2imgStrength] = useState(0.5);
+
+    // Reset panel on asset change
+    useEffect(() => {
+        setActiveAction(null);
+        setActionError('');
+    }, [previewAssetId]);
 
     // Navigation between assets
     const currentIdx = asset ? assets.indexOf(asset) : -1;
@@ -25,6 +59,108 @@ export default function AssetPreview() {
 
     const goPrev = () => { if (hasPrev) setPreviewAssetId(assets[currentIdx - 1].id); };
     const goNext = () => { if (hasNext) setPreviewAssetId(assets[currentIdx + 1].id); };
+
+    // ── Animate handler ──
+    const handleAnimate = async () => {
+        if (!asset?.storage_key || !project?.id) return;
+        setActionBusy(true);
+        setActionError('');
+        setAssetGenerating(true);
+
+        const sourceUrl = `${window.location.origin}/api/assets/serve?key=${encodeURIComponent(asset.storage_key)}`;
+        const baseName = asset.name.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 30);
+        const targetPath = `assets/${baseName}_${animType}_${animFrames}f.png`;
+
+        addConsoleEntry({ id: crypto.randomUUID(), level: 'log', message: `[Asset Studio] Animating "${asset.name}" → ${animType} (${animFrames} frames)...`, timestamp: new Date().toISOString() });
+
+        try {
+            const res = await fetch('/api/assets/generate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    project_id: project.id,
+                    prompt: `${asset.generation_prompt || asset.name}, ${animType} animation cycle`,
+                    asset_type: 'animation',
+                    target_path: targetPath,
+                    options: { source_image_url: sourceUrl, frame_count: animFrames, width: asset.width || 512, height: asset.height || 512 },
+                }),
+            });
+            const data = await res.json();
+            if (res.ok && data.success) {
+                const output = data.output as Record<string, unknown> | undefined;
+                const assetId = crypto.randomUUID();
+                addAsset({
+                    id: assetId, project_id: project.id,
+                    name: `${asset.name} (${animType})`, asset_type: 'sprite_sheet',
+                    storage_key: data.storage_key || targetPath, thumbnail_key: null, file_format: 'png',
+                    width: ((output?.frame_width as number) || 512) * animFrames,
+                    height: (output?.frame_height as number) || 512,
+                    metadata: {
+                        tags: [animType, 'animation'],
+                        frames: Array.from({ length: animFrames }, (_, i) => ({ x: i * ((output?.frame_width as number) || 512), y: 0, width: (output?.frame_width as number) || 512, height: (output?.frame_height as number) || 512, duration: 1 })),
+                        frameRate: 12, loop: true,
+                    },
+                    generation_prompt: `${asset.name} ${animType} animation`,
+                    generation_model: (output?.model_used as string) || null,
+                    size_bytes: 0, created_at: new Date().toISOString(),
+                });
+                setPreviewAssetId(assetId);
+                refreshProjectFiles(project.id);
+                setActiveAction(null);
+                addConsoleEntry({ id: crypto.randomUUID(), level: 'log', message: `[Asset Studio] Animation complete → ${targetPath}`, timestamp: new Date().toISOString() });
+            } else {
+                setActionError(data.error || 'Animation failed');
+            }
+        } catch { setActionError('Network error'); }
+        finally { setActionBusy(false); setAssetGenerating(false); }
+    };
+
+    // ── Img2Img handler ──
+    const handleImg2Img = async () => {
+        if (!asset?.storage_key || !project?.id || !img2imgPrompt.trim()) return;
+        setActionBusy(true);
+        setActionError('');
+        setAssetGenerating(true);
+
+        const sourceUrl = `${window.location.origin}/api/assets/serve?key=${encodeURIComponent(asset.storage_key)}`;
+        const baseName = img2imgPrompt.trim().replace(/[^a-zA-Z0-9]/g, '_').slice(0, 30);
+        const targetPath = `assets/${baseName}_v${Date.now() % 10000}.png`;
+
+        addConsoleEntry({ id: crypto.randomUUID(), level: 'log', message: `[Asset Studio] Img2Img: "${img2imgPrompt}" (strength ${img2imgStrength})...`, timestamp: new Date().toISOString() });
+
+        try {
+            const res = await fetch('/api/assets/generate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    project_id: project.id,
+                    prompt: img2imgPrompt.trim(),
+                    asset_type: 'sprite',
+                    target_path: targetPath,
+                    options: { source_image_url: sourceUrl, strength: img2imgStrength, width: asset.width || 512, height: asset.height || 512 },
+                }),
+            });
+            const data = await res.json();
+            if (res.ok && data.success) {
+                const assetId = crypto.randomUUID();
+                addAsset({
+                    id: assetId, project_id: project.id,
+                    name: img2imgPrompt.trim().slice(0, 40), asset_type: 'sprite',
+                    storage_key: data.storage_key || targetPath, thumbnail_key: null, file_format: 'png',
+                    width: asset.width, height: asset.height, metadata: { tags: ['img2img'] },
+                    generation_prompt: img2imgPrompt.trim(), generation_model: null,
+                    size_bytes: 0, created_at: new Date().toISOString(),
+                });
+                setPreviewAssetId(assetId);
+                refreshProjectFiles(project.id);
+                setActiveAction(null);
+                addConsoleEntry({ id: crypto.randomUUID(), level: 'log', message: `[Asset Studio] Img2Img complete → ${targetPath}`, timestamp: new Date().toISOString() });
+            } else {
+                setActionError(data.error || 'Img2Img failed');
+            }
+        } catch { setActionError('Network error'); }
+        finally { setActionBusy(false); setAssetGenerating(false); }
+    };
 
     // If no asset selected, show empty state
     if (!asset) {
@@ -41,41 +177,71 @@ export default function AssetPreview() {
 
     const isImage = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg'].includes(asset.file_format);
     const isSpriteSheet = asset.asset_type === 'sprite_sheet';
+    const canAnimate = isImage && !isSpriteSheet;
+    const canImg2Img = isImage;
 
     return (
         <div className="relative w-full h-full bg-[#0a0a0f] flex flex-col overflow-hidden">
             {/* Top bar */}
             <div className="flex-shrink-0 flex items-center justify-between px-3 py-1.5 bg-black/40 border-b border-white/5 z-10">
                 <div className="flex items-center gap-2 min-w-0">
-                    <button
-                        onClick={goPrev}
-                        disabled={!hasPrev}
-                        className="p-0.5 rounded text-zinc-500 hover:text-zinc-300 disabled:opacity-20 transition-colors"
-                    >
+                    <button onClick={goPrev} disabled={!hasPrev} className="p-0.5 rounded text-zinc-500 hover:text-zinc-300 disabled:opacity-20 transition-colors">
                         <ChevronLeft size={14} />
                     </button>
                     <span className="text-xs text-zinc-300 truncate max-w-[200px]">{asset.name}</span>
-                    <button
-                        onClick={goNext}
-                        disabled={!hasNext}
-                        className="p-0.5 rounded text-zinc-500 hover:text-zinc-300 disabled:opacity-20 transition-colors"
-                    >
+                    <button onClick={goNext} disabled={!hasNext} className="p-0.5 rounded text-zinc-500 hover:text-zinc-300 disabled:opacity-20 transition-colors">
                         <ChevronRight size={14} />
                     </button>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1.5">
+                    {/* Action buttons */}
+                    {canAnimate && (
+                        <button
+                            onClick={() => setActiveAction(activeAction === 'animate' ? null : 'animate')}
+                            className={`flex items-center gap-1 px-2 py-0.5 rounded text-[10px] transition-colors ${
+                                activeAction === 'animate' ? 'bg-violet-500/20 text-violet-300' : 'text-zinc-500 hover:text-zinc-300 hover:bg-white/5'
+                            }`}
+                        >
+                            <Film size={11} /> Animate
+                        </button>
+                    )}
+                    {canImg2Img && (
+                        <button
+                            onClick={() => setActiveAction(activeAction === 'img2img' ? null : 'img2img')}
+                            className={`flex items-center gap-1 px-2 py-0.5 rounded text-[10px] transition-colors ${
+                                activeAction === 'img2img' ? 'bg-fuchsia-500/20 text-fuchsia-300' : 'text-zinc-500 hover:text-zinc-300 hover:bg-white/5'
+                            }`}
+                        >
+                            <Wand2 size={11} /> Img2Img
+                        </button>
+                    )}
+                    <div className="w-px h-3 bg-white/10" />
                     <span className="text-[10px] text-zinc-600 font-mono">
                         {asset.file_format.toUpperCase()}
-                        {asset.width && asset.height ? ` \u00b7 ${asset.width}\u00d7${asset.height}` : ''}
+                        {asset.width && asset.height ? ` · ${asset.width}×${asset.height}` : ''}
                     </span>
-                    <button
-                        onClick={() => setPreviewAssetId(null)}
-                        className="p-0.5 rounded text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors"
-                    >
+                    <button onClick={() => setPreviewAssetId(null)} className="p-0.5 rounded text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors">
                         <X size={14} />
                     </button>
                 </div>
             </div>
+
+            {/* Action panel (slides down) */}
+            {activeAction && (
+                <ActionPanel
+                    action={activeAction}
+                    busy={actionBusy}
+                    error={actionError}
+                    asset={asset}
+                    animType={animType} setAnimType={setAnimType}
+                    animFrames={animFrames} setAnimFrames={setAnimFrames}
+                    img2imgPrompt={img2imgPrompt} setImg2imgPrompt={setImg2imgPrompt}
+                    img2imgStrength={img2imgStrength} setImg2imgStrength={setImg2imgStrength}
+                    onAnimate={handleAnimate}
+                    onImg2Img={handleImg2Img}
+                    generating={assetGenerating}
+                />
+            )}
 
             {/* Main preview area */}
             {isImage ? (
@@ -100,9 +266,88 @@ export default function AssetPreview() {
                 </span>
                 <span className="text-[10px] text-zinc-600 font-mono">
                     {asset.size_bytes > 0 ? `${(asset.size_bytes / 1024).toFixed(1)}KB` : ''}
-                    {asset.generation_model ? ` \u00b7 ${asset.generation_model}` : ''}
+                    {asset.generation_model ? ` · ${asset.generation_model}` : ''}
                 </span>
             </div>
+        </div>
+    );
+}
+
+// ── Action Panel ────────────────────────────────────────────────────────
+
+function ActionPanel({ action, busy, error, asset, animType, setAnimType, animFrames, setAnimFrames, img2imgPrompt, setImg2imgPrompt, img2imgStrength, setImg2imgStrength, onAnimate, onImg2Img, generating }: {
+    action: 'animate' | 'img2img';
+    busy: boolean;
+    error: string;
+    asset: Asset;
+    animType: string; setAnimType: (v: string) => void;
+    animFrames: number; setAnimFrames: (v: number) => void;
+    img2imgPrompt: string; setImg2imgPrompt: (v: string) => void;
+    img2imgStrength: number; setImg2imgStrength: (v: number) => void;
+    onAnimate: () => void;
+    onImg2Img: () => void;
+    generating: boolean;
+}) {
+    if (action === 'animate') {
+        return (
+            <div className="flex-shrink-0 bg-black/60 border-b border-white/5 px-3 py-2 flex flex-col gap-2">
+                <div className="flex items-center gap-2">
+                    <Film size={12} className="text-violet-400 flex-shrink-0" />
+                    <span className="text-[10px] uppercase tracking-wider text-zinc-400">Animate &quot;{asset.name.slice(0, 25)}&quot;</span>
+                </div>
+                {/* Animation type */}
+                <div className="flex gap-1">
+                    {ANIM_TYPES.map(t => (
+                        <button key={t.value} onClick={() => setAnimType(t.value)}
+                            className={`flex-1 py-1 rounded text-[10px] transition-colors ${
+                                animType === t.value ? 'bg-violet-500/20 text-violet-300 border border-violet-500/30' : 'bg-zinc-900 text-zinc-500 border border-transparent hover:text-zinc-300'
+                            }`}
+                        >{t.label}</button>
+                    ))}
+                </div>
+                {/* Frames */}
+                <div className="flex items-center gap-2">
+                    <label className="text-[10px] text-zinc-500 whitespace-nowrap">Frames</label>
+                    <input type="range" min={2} max={8} value={animFrames} onChange={e => setAnimFrames(Number(e.target.value))} className="flex-1 accent-violet-500 h-1" />
+                    <span className="text-[10px] text-zinc-400 w-4 text-center font-mono">{animFrames}</span>
+                </div>
+                {error && <p className="text-[10px] text-red-400">{error}</p>}
+                <button onClick={onAnimate} disabled={busy || generating}
+                    className="w-full py-1.5 rounded bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white text-[11px] font-medium disabled:opacity-40 hover:brightness-110 transition-all flex items-center justify-center gap-1.5"
+                >
+                    {busy ? <><Loader2 size={11} className="animate-spin" />Generating {animFrames} frames...</> : <><Film size={11} />Generate Animation</>}
+                </button>
+            </div>
+        );
+    }
+
+    return (
+        <div className="flex-shrink-0 bg-black/60 border-b border-white/5 px-3 py-2 flex flex-col gap-2">
+            <div className="flex items-center gap-2">
+                <Wand2 size={12} className="text-fuchsia-400 flex-shrink-0" />
+                <span className="text-[10px] uppercase tracking-wider text-zinc-400">Img2Img variation</span>
+            </div>
+            {/* Prompt */}
+            <textarea
+                value={img2imgPrompt}
+                onChange={e => setImg2imgPrompt(e.target.value)}
+                placeholder="Describe the variation you want..."
+                className="w-full bg-zinc-900 border border-white/10 rounded px-2 py-1.5 text-[11px] text-zinc-200 placeholder:text-zinc-600 resize-none focus:outline-none focus:border-fuchsia-500/50 transition-colors"
+                rows={2}
+            />
+            {/* Strength */}
+            <div className="flex items-center gap-2">
+                <label className="text-[10px] text-zinc-500 whitespace-nowrap">Strength</label>
+                <input type="range" min={0.1} max={0.95} step={0.05} value={img2imgStrength} onChange={e => setImg2imgStrength(Number(e.target.value))} className="flex-1 accent-fuchsia-500 h-1" />
+                <span className="text-[10px] text-zinc-400 w-8 text-center font-mono">{img2imgStrength.toFixed(2)}</span>
+            </div>
+            <p className="text-[9px] text-zinc-600">Low = close to original · High = more creative freedom</p>
+            {error && <p className="text-[10px] text-red-400">{error}</p>}
+            <button onClick={onImg2Img} disabled={busy || generating || !img2imgPrompt.trim()}
+                className="w-full py-1.5 rounded bg-gradient-to-r from-fuchsia-600 to-pink-600 text-white text-[11px] font-medium disabled:opacity-40 hover:brightness-110 transition-all flex items-center justify-center gap-1.5"
+            >
+                {busy ? <><Loader2 size={11} className="animate-spin" />Generating variation...</> : <><Wand2 size={11} />Generate Variation</>}
+            </button>
         </div>
     );
 }
