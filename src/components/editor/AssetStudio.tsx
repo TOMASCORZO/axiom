@@ -874,7 +874,7 @@ const ANIM_TYPES = [
 ];
 
 function GalleryTab() {
-    const { assets, project, previewAssetId, setPreviewAssetId, addAsset, addConsoleEntry, refreshProjectFiles, setAssetGenerating, assetGenerating } = useEditorStore();
+    const { assets, project, previewAssetId, setPreviewAssetId, addAsset, removeAsset, addConsoleEntry, refreshProjectFiles, setAssetGenerating, assetGenerating } = useEditorStore();
     const [animating, setAnimating] = useState(false);
     const [animFrames, setAnimFrames] = useState(4);
     const [animType, setAnimType] = useState('walk');
@@ -1081,7 +1081,10 @@ function GalleryTab() {
                     <button className="flex items-center justify-center gap-1 px-3 py-1.5 rounded bg-zinc-800 text-zinc-400 text-xs hover:bg-zinc-700 transition-colors">
                         <Download size={12} />
                     </button>
-                    <button className="flex items-center justify-center gap-1 px-3 py-1.5 rounded bg-zinc-800 text-red-400 text-xs hover:bg-red-500/20 transition-colors">
+                    <button
+                        onClick={() => { if (selectedAsset) { removeAsset(selectedAsset.id); } }}
+                        className="flex items-center justify-center gap-1 px-3 py-1.5 rounded bg-zinc-800 text-red-400 text-xs hover:bg-red-500/20 transition-colors"
+                    >
                         <Trash2 size={12} />
                     </button>
                 </div>

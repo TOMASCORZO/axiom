@@ -44,6 +44,11 @@ interface EditorState {
     assetStudioTab: 'generate' | 'gallery';
     previewAssetId: string | null;
 
+    // Animation playback (shared between AssetPreview and AnimationTimeline)
+    animCurrentFrame: number;
+    animIsPlaying: boolean;
+    animFps: number;
+
     // Actions
     setProject: (project: Project) => void;
     setFiles: (files: ProjectFile[]) => void;
@@ -69,9 +74,13 @@ interface EditorState {
     setActiveRightPanel: (panel: 'chat' | 'assets') => void;
     setAssets: (assets: Asset[]) => void;
     addAsset: (asset: Asset) => void;
+    removeAsset: (id: string) => void;
     setAssetGenerating: (generating: boolean) => void;
     setAssetStudioTab: (tab: 'generate' | 'gallery') => void;
     setPreviewAssetId: (id: string | null) => void;
+    setAnimCurrentFrame: (frame: number) => void;
+    setAnimIsPlaying: (playing: boolean) => void;
+    setAnimFps: (fps: number) => void;
     refreshProjectFiles: (projectId: string) => Promise<void>;
     addProjectFiles: (newFiles: Array<{ path: string; content: string; size_bytes: number; content_type: string }>) => void;
     setChatView: (view: 'chat' | 'history') => void;
@@ -110,6 +119,9 @@ export const useEditorStore = create<EditorState>((set) => ({
     assetGenerating: false,
     assetStudioTab: 'generate',
     previewAssetId: null,
+    animCurrentFrame: 0,
+    animIsPlaying: false,
+    animFps: 12,
 
     // Actions
     setProject: (project) => set({ project }),
@@ -194,9 +206,16 @@ export const useEditorStore = create<EditorState>((set) => ({
     setActiveRightPanel: (panel) => set({ activeRightPanel: panel }),
     setAssets: (assets) => set({ assets }),
     addAsset: (asset) => set((state) => ({ assets: [...state.assets, asset] })),
+    removeAsset: (id) => set((state) => ({
+        assets: state.assets.filter(a => a.id !== id),
+        previewAssetId: state.previewAssetId === id ? null : state.previewAssetId,
+    })),
     setAssetGenerating: (generating) => set({ assetGenerating: generating }),
     setAssetStudioTab: (tab) => set({ assetStudioTab: tab }),
-    setPreviewAssetId: (id) => set({ previewAssetId: id }),
+    setPreviewAssetId: (id) => set({ previewAssetId: id, animCurrentFrame: 0, animIsPlaying: false }),
+    setAnimCurrentFrame: (frame) => set({ animCurrentFrame: frame }),
+    setAnimIsPlaying: (playing) => set({ animIsPlaying: playing }),
+    setAnimFps: (fps) => set({ animFps: fps }),
 
     setChatView: (view) => set({ chatView: view }),
     setConversations: (conversations) => set({ conversations }),

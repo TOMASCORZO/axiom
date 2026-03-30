@@ -9,6 +9,7 @@ import ChatPanel from '@/components/chat/ChatPanel';
 import AssetStudio from './AssetStudio';
 import ConsolePanel from './ConsolePanel';
 import SubsystemsPanel from './SubsystemsPanel';
+import AnimationTimeline from './AnimationTimeline';
 import { useEditorStore } from '@/lib/store';
 
 interface EditorLayoutProps {
@@ -57,17 +58,25 @@ export default function EditorLayout({ projectId }: EditorLayoutProps) {
                         )}
                     </div>
 
-                    {/* Bottom — Console + Subsystems */}
+                    {/* Bottom — Console + Subsystems OR Animation Timeline */}
                     <div
                         className="flex-shrink-0 overflow-hidden flex flex-col"
                         style={{ height: `${bottomPanelHeight}px` }}
                     >
-                        <div className="flex-1 overflow-hidden">
-                            <ConsolePanel />
-                        </div>
-                        <div className="flex-shrink-0 max-h-[200px] overflow-hidden">
-                            <SubsystemsPanel />
-                        </div>
+                        {activeRightPanel === 'assets' ? (
+                            <div className="flex-1 overflow-hidden">
+                                <AnimationTimeline />
+                            </div>
+                        ) : (
+                            <>
+                                <div className="flex-1 overflow-hidden">
+                                    <ConsolePanel />
+                                </div>
+                                <div className="flex-shrink-0 max-h-[200px] overflow-hidden">
+                                    <SubsystemsPanel />
+                                </div>
+                            </>
+                        )}
                     </div>
                 </div>
 

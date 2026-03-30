@@ -8,10 +8,6 @@ import {
     ZoomOut,
     Maximize2,
     X,
-    Play,
-    Pause,
-    SkipBack,
-    SkipForward,
     ChevronLeft,
     ChevronRight,
 } from 'lucide-react';
@@ -224,25 +220,19 @@ function ImagePreviewCanvas({ asset }: PreviewProps) {
     );
 }
 
-// ── Sprite Sheet Preview with Animation Timeline ─────────────────────
+// ── Sprite Sheet Preview (frame rendering only — controls are in AnimationTimeline) ──
 
 function SpriteSheetPreview({ asset }: PreviewProps) {
+    const { animCurrentFrame } = useEditorStore();
     const imgRef = useRef<HTMLImageElement>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
-    const containerRef = useRef<HTMLDivElement>(null);
-    const animRef = useRef<number>(0);
-    const lastFrameTime = useRef(0);
 
-    const frameCount = (asset as any).metadata?.frames?.length || 4;
-    const [currentFrame, setCurrentFrame] = useState(0);
-    const [isPlaying, setIsPlaying] = useState(false);
-    const [fps, setFps] = useState((asset as any).metadata?.frameRate || 12);
+    const frameCount = (asset as { metadata?: { frames?: unknown[] } }).metadata?.frames?.length || 4;
     const [loaded, setLoaded] = useState(false);
     const [imgSize, setImgSize] = useState({ w: 0, h: 0 });
 
     const imgSrc = `/api/assets/serve?key=${encodeURIComponent(asset.storage_key)}`;
 
-    // Calculate frame dimensions (assume horizontal strip)
     const frameW = imgSize.w > 0 ? Math.floor(imgSize.w / frameCount) : 0;
     const frameH = imgSize.h;
 
@@ -258,27 +248,9 @@ function SpriteSheetPreview({ asset }: PreviewProps) {
         canvas.width = frameW;
         canvas.height = frameH;
         ctx.clearRect(0, 0, frameW, frameH);
-        ctx.drawImage(img, currentFrame * frameW, 0, frameW, frameH, 0, 0, frameW, frameH);
-    }, [currentFrame, loaded, frameW, frameH]);
-
-    // Animation loop
-    useEffect(() => {
-        if (!isPlaying) {
-            cancelAnimationFrame(animRef.current);
-            return;
-        }
-
-        const interval = 1000 / fps;
-        const animate = (time: number) => {
-            if (time - lastFrameTime.current >= interval) {
-                lastFrameTime.current = time;
-                setCurrentFrame((f) => (f + 1) % frameCount);
-            }
-            animRef.current = requestAnimationFrame(animate);
-        };
-        animRef.current = requestAnimationFrame(animate);
-        return () => cancelAnimationFrame(animRef.current);
-    }, [isPlaying, fps, frameCount]);
+        const frame = animCurrentFrame % frameCount;
+        ctx.drawImage(img, frame * frameW, 0, frameW, frameH, 0, 0, frameW, frameH);
+    }, [animCurrentFrame, loaded, frameW, frameH, frameCount]);
 
     const handleImgLoad = () => {
         const img = imgRef.current;
@@ -290,79 +262,16 @@ function SpriteSheetPreview({ asset }: PreviewProps) {
 
     return (
         <div className="flex-1 flex flex-col overflow-hidden">
-            {/* Hidden source image */}
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img ref={imgRef} src={imgSrc} alt="" onLoad={handleImgLoad} className="hidden" />
 
-            {/* Frame display */}
-            <div ref={containerRef} className="flex-1 overflow-hidden relative flex items-center justify-center">
-                {/* Checkerboard */}
+            <div className="flex-1 overflow-hidden relative flex items-center justify-center">
                 <div className="absolute inset-0 bg-[length:16px_16px] bg-[position:0_0,8px_8px] bg-[image:linear-gradient(45deg,#111118_25%,transparent_25%,transparent_75%,#111118_75%),linear-gradient(45deg,#111118_25%,transparent_25%,transparent_75%,#111118_75%)]" />
                 <canvas
                     ref={canvasRef}
                     className="relative z-10 max-w-full max-h-full object-contain"
                     style={{ imageRendering: 'pixelated' }}
                 />
-            </div>
-
-            {/* Timeline controls */}
-            <div className="flex-shrink-0 border-t border-white/5 bg-black/60">
-                {/* Transport bar */}
-                <div className="flex items-center justify-between px-3 py-1.5">
-                    <div className="flex items-center gap-1">
-                        <button
-                            onClick={() => { setCurrentFrame(0); setIsPlaying(false); }}
-                            className="p-1 rounded text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors"
-                        >
-                            <SkipBack size={12} />
-                        </button>
-                        <button
-                            onClick={() => setIsPlaying(!isPlaying)}
-                            className={`p-1 rounded transition-colors ${
-                                isPlaying ? 'text-emerald-400 bg-emerald-500/10' : 'text-zinc-500 hover:text-zinc-300 hover:bg-white/5'
-                            }`}
-                        >
-                            {isPlaying ? <Pause size={12} /> : <Play size={12} />}
-                        </button>
-                        <button
-                            onClick={() => { setCurrentFrame(frameCount - 1); setIsPlaying(false); }}
-                            className="p-1 rounded text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors"
-                        >
-                            <SkipForward size={12} />
-                        </button>
-                    </div>
-                    <span className="text-[10px] text-zinc-500 font-mono">
-                        {currentFrame + 1}/{frameCount} @ {fps}fps
-                    </span>
-                    <div className="flex items-center gap-1">
-                        <span className="text-[10px] text-zinc-600">FPS</span>
-                        <input
-                            type="number"
-                            min={1}
-                            max={60}
-                            value={fps}
-                            onChange={(e) => setFps(Number(e.target.value))}
-                            className="w-10 bg-zinc-900 border border-white/10 rounded px-1 py-0.5 text-[10px] text-zinc-300 text-center focus:outline-none focus:border-violet-500/50"
-                        />
-                    </div>
-                </div>
-
-                {/* Frame strip */}
-                <div className="flex gap-0.5 px-2 pb-2 overflow-x-auto">
-                    {Array.from({ length: frameCount }, (_, i) => (
-                        <button
-                            key={i}
-                            onClick={() => { setCurrentFrame(i); setIsPlaying(false); }}
-                            className={`flex-shrink-0 w-8 h-8 rounded border transition-all flex items-center justify-center text-[9px] font-mono ${
-                                currentFrame === i
-                                    ? 'border-violet-500 bg-violet-500/20 text-violet-300'
-                                    : 'border-white/5 bg-zinc-900 text-zinc-600 hover:border-white/10'
-                            }`}
-                        >
-                            {i + 1}
-                        </button>
-                    ))}
-                </div>
             </div>
         </div>
     );
