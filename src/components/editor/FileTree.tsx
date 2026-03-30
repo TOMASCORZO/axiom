@@ -29,9 +29,11 @@ function getFileIcon(name: string) {
     }
 }
 
+const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg']);
+
 function FileTreeNode({ node, depth = 0 }: { node: FileNode; depth?: number }) {
     const [expanded, setExpanded] = useState(depth < 2);
-    const { activeFile, openFile } = useEditorStore();
+    const { activeFile, openFile, activeRightPanel, assets, project, files, previewAssetId, setPreviewAssetId, addAsset } = useEditorStore();
     const isActive = activeFile === node.path;
 
     if (node.type === 'directory') {
@@ -65,13 +67,59 @@ function FileTreeNode({ node, depth = 0 }: { node: FileNode; depth?: number }) {
         );
     }
 
+    const ext = node.name.split('.').pop()?.toLowerCase() ?? '';
+    const isImage = IMAGE_EXTS.has(ext);
+    const isAssetMode = activeRightPanel === 'assets';
+
+    const handleClick = () => {
+        if (isAssetMode && isImage) {
+            // In Asset Studio mode, clicking an image should preview it
+            const existing = assets.find(a =>
+                a.storage_key === node.path ||
+                a.storage_key.endsWith('/' + node.path) ||
+                a.name === node.name
+            );
+            if (existing) {
+                setPreviewAssetId(existing.id);
+            } else {
+                // Look up the full storage_key from project_files
+                const pf = files.find(f => f.path === node.path);
+                const storageKey = pf?.storage_key || node.path;
+                const assetId = crypto.randomUUID();
+                addAsset({
+                    id: assetId,
+                    project_id: project?.id ?? '',
+                    name: node.name,
+                    asset_type: 'sprite',
+                    storage_key: storageKey,
+                    thumbnail_key: null,
+                    file_format: ext,
+                    width: null,
+                    height: null,
+                    metadata: { tags: ['file-tree'] },
+                    generation_prompt: null,
+                    generation_model: null,
+                    size_bytes: pf?.size_bytes ?? node.size ?? 0,
+                    created_at: new Date().toISOString(),
+                });
+                setPreviewAssetId(assetId);
+            }
+        } else {
+            openFile(node.path);
+        }
+    };
+
+    const isPreviewed = isAssetMode && isImage && assets.some(a => a.id === previewAssetId && a.storage_key.endsWith(node.path));
+
     return (
         <button
-            onClick={() => openFile(node.path)}
+            onClick={handleClick}
             className={`
         flex items-center w-full px-2 py-1 text-sm gap-1.5
         transition-colors rounded-md truncate
-        ${isActive
+        ${isPreviewed
+                    ? 'bg-violet-500/20 text-violet-200 border-l-2 border-violet-500'
+                    : isActive && !isAssetMode
                     ? 'bg-violet-500/20 text-violet-200 border-l-2 border-violet-500'
                     : 'hover:bg-white/5 text-zinc-400 hover:text-zinc-200'
                 }

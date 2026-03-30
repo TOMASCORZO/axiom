@@ -63,7 +63,7 @@ export default function EditorPage() {
     const params = useParams();
     const router = useRouter();
     const projectId = params.projectId as string;
-    const { setProject, setFiles, setFileTree, addConsoleEntry } = useEditorStore();
+    const { setProject, setFiles, setFileTree, addConsoleEntry, loadAssets } = useEditorStore();
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
 
@@ -100,6 +100,9 @@ export default function EditorPage() {
                     setFileTree(tree);
                 }
 
+                // Load assets from DB
+                loadAssets(projectId);
+
                 // Add welcome console entry
                 addConsoleEntry({
                     id: crypto.randomUUID(),
@@ -122,7 +125,7 @@ export default function EditorPage() {
 
         loadProject();
         return () => { cancelled = true; };
-    }, [projectId, router, setProject, setFiles, setFileTree, addConsoleEntry]);
+    }, [projectId, router, setProject, setFiles, setFileTree, addConsoleEntry, loadAssets]);
 
     if (loading) {
         return (

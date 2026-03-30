@@ -75,6 +75,7 @@ interface EditorState {
     setAssets: (assets: Asset[]) => void;
     addAsset: (asset: Asset) => void;
     removeAsset: (id: string) => void;
+    loadAssets: (projectId: string) => Promise<void>;
     setAssetGenerating: (generating: boolean) => void;
     setAssetStudioTab: (tab: 'generate' | 'gallery') => void;
     setPreviewAssetId: (id: string | null) => void;
@@ -205,11 +206,32 @@ export const useEditorStore = create<EditorState>((set) => ({
     setActiveBottomTab: (tab) => set({ activeBottomTab: tab }),
     setActiveRightPanel: (panel) => set({ activeRightPanel: panel }),
     setAssets: (assets) => set({ assets }),
-    addAsset: (asset) => set((state) => ({ assets: [...state.assets, asset] })),
-    removeAsset: (id) => set((state) => ({
-        assets: state.assets.filter(a => a.id !== id),
-        previewAssetId: state.previewAssetId === id ? null : state.previewAssetId,
-    })),
+    addAsset: (asset) => {
+        set((state) => ({ assets: [...state.assets, asset] }));
+        // Persist to Supabase in background
+        fetch('/api/assets/db', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(asset),
+        }).catch(() => {});
+    },
+    removeAsset: (id) => {
+        set((state) => ({
+            assets: state.assets.filter(a => a.id !== id),
+            previewAssetId: state.previewAssetId === id ? null : state.previewAssetId,
+        }));
+        // Delete from Supabase in background
+        fetch(`/api/assets/db?id=${id}`, { method: 'DELETE' }).catch(() => {});
+    },
+    loadAssets: async (projectId: string) => {
+        try {
+            const res = await fetch(`/api/assets/db?project_id=${projectId}`);
+            if (res.ok) {
+                const data = await res.json();
+                set({ assets: data.assets ?? [] });
+            }
+        } catch { /* silent */ }
+    },
     setAssetGenerating: (generating) => set({ assetGenerating: generating }),
     setAssetStudioTab: (tab) => set({ assetStudioTab: tab }),
     setPreviewAssetId: (id) => set({ previewAssetId: id, animCurrentFrame: 0, animIsPlaying: false }),
