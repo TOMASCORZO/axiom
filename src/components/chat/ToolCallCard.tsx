@@ -6,9 +6,11 @@ import type { ToolCallDisplay } from '@/types/agent';
 
 interface ToolCallCardProps {
     toolCall: ToolCallDisplay;
+    pendingPermission?: { patterns: string[] };
+    onRespondPermission?: (toolName: string, granted: boolean) => void;
 }
 
-export default function ToolCallCard({ toolCall }: ToolCallCardProps) {
+export default function ToolCallCard({ toolCall, pendingPermission, onRespondPermission }: ToolCallCardProps) {
     const [expanded, setExpanded] = useState(false);
     const { name, status, filesModified, error, input } = toolCall;
 
@@ -64,6 +66,33 @@ export default function ToolCallCard({ toolCall }: ToolCallCardProps) {
                             <p className="mt-0.5 text-[10px] text-red-400">{error}</p>
                         </div>
                     )}
+                </div>
+            )}
+
+            {pendingPermission && status === 'running' && (
+                <div className="px-2.5 py-2 border-t border-amber-500/20 bg-amber-500/10 flex flex-col gap-2">
+                    <div className="text-xs text-amber-200">
+                        This tool requires permission to execute.
+                        {pendingPermission.patterns && pendingPermission.patterns.length > 0 && (
+                            <div className="text-[10px] text-amber-300/70 mt-0.5 font-mono">
+                                Constraints: {pendingPermission.patterns.join(', ')}
+                            </div>
+                        )}
+                    </div>
+                    <div className="flex gap-2">
+                        <button 
+                            onClick={(e) => { e.stopPropagation(); onRespondPermission?.(name, true); }}
+                            className="px-3 py-1 bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 rounded text-xs transition-colors border border-emerald-500/30"
+                        >
+                            Approve
+                        </button>
+                        <button 
+                            onClick={(e) => { e.stopPropagation(); onRespondPermission?.(name, false); }}
+                            className="px-3 py-1 bg-red-500/20 text-red-400 hover:bg-red-500/30 rounded text-xs transition-colors border border-red-500/30"
+                        >
+                            Reject
+                        </button>
+                    </div>
                 </div>
             )}
         </div>

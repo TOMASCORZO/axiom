@@ -58,10 +58,18 @@ export interface AgentLog {
 
 // ── Chat Message Types ─────────────────────────────────────────────
 
+/** CC-style ordered content blocks for inline rendering */
+export type ContentBlock =
+    | { type: 'text'; text: string }
+    | { type: 'thinking'; text: string; isStreaming?: boolean }
+    | { type: 'tool_use'; toolCall: ToolCallDisplay };
+
 export interface ChatMessage {
     id: string;
-    role: 'user' | 'assistant';
+    role: 'user' | 'assistant' | 'system';
     content: string;
+    /** Ordered content blocks for CC-style inline rendering */
+    blocks?: ContentBlock[];
     toolCalls?: ToolCallDisplay[];
     reasoning?: string;
     timestamp: string;
@@ -73,10 +81,64 @@ export interface ToolCallDisplay {
     name: string;
     status: 'pending' | 'running' | 'completed' | 'failed';
     input: Record<string, unknown>;
-    output?: Record<string, unknown>;
+    output?: any;
     error?: string;
     filesModified?: string[];
+    duration_ms?: number;
 }
+
+// ── Core Message Types (Query Engine) ─────────────────────────────
+
+export interface Block { type: string; }
+export interface TextBlock extends Block { type: 'text'; text: string; }
+export interface ToolUseBlock extends Block {
+    type: 'tool_use';
+    id: string;
+    name: string;
+    input: Record<string, unknown>;
+}
+export interface ToolResultBlock extends Block {
+    type: 'tool_result';
+    tool_use_id: string;
+    content: string;
+    is_error?: boolean;
+}
+
+export interface AssistantMessage {
+    type: 'assistant';
+    uuid: string; // internal identifier
+    apiError?: string;
+    message: {
+        content: Array<TextBlock | ToolUseBlock>;
+        stop_reason?: string;
+    };
+}
+
+export interface UserMessage {
+    type: 'user';
+    uuid: string;
+    message: {
+        content: string | Array<TextBlock | ToolResultBlock>;
+    };
+}
+
+export interface SystemMessage {
+    type: 'system';
+    uuid: string;
+    subtype?: 'compact_boundary' | 'local_command';
+    content: string;
+}
+
+export type Message = AssistantMessage | UserMessage | SystemMessage;
+
+export type StreamEvent = 
+    | { type: 'message_start', message: { usage: { inputTokens: number; outputTokens: number } } }
+    | { type: 'content_block_start', index: number, block: { type: 'text' } | { type: 'tool_use', id: string, name: string } }
+    | { type: 'content_block_delta', index: number, delta: { type: 'text_delta', text: string } | { type: 'reasoning_delta', text: string } | { type: 'input_json_delta', partial_json: string } }
+    | { type: 'content_block_stop', index: number }
+    | { type: 'message_delta', usage: { outputTokens: number }, stop_reason?: string }
+    | { type: 'message_stop' }
+    | { type: 'error', error: { type: string, message: string } };
 
 // ── Conversation Types ────────────────────────────────────────────
 

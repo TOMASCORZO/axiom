@@ -1,64 +1,40 @@
 /**
- * Agent Loop — simple manual agentic loop.
- *
- * 1. Send messages + tools to the provider
- * 2. If the model returns tool calls → execute them → send results → repeat
- * 3. If the model is done → return accumulated text + tool history
- *
- * No Vercel AI SDK. No hidden abstractions. Direct API calls.
+ * Legacy Agent Loop Wrapper -> QueryEngine Bridge
+ * Maintains the old AgentResult interface for backwards compatibility
+ * while delegating to the streaming QueryEngine.
  */
 
-import { type ChatProvider, type ToolSchema, type StepResult } from './providers';
-import { getToolsForAgent, executeTool, type ToolContext, type ToolInput } from './tools/registry';
-import type { ToolResult } from '@/types/agent';
-import { bus } from '../bus';
-import { AGENT_DEFS, type AgentType } from './agents/types';
+import { ChatProvider, ToolSchema } from './providers';
+import { getToolsForAgent, ToolContext } from './tools/registry';
+import { ToolResult, Message } from '../../types/agent';
+import { AGENT_DEFS, AgentType } from './agents/types';
+import { QueryEngine } from './engine/QueryEngine';
+import { recordTokenUsage } from './cost';
+import { randomUUID } from 'crypto';
 
-const DOOM_LOOP_THRESHOLD = 3;
-const MAX_TOOL_OUTPUT_LENGTH = 8000;
-
-/**
- * Normalize shorthand tool parameters into a proper JSON Schema object.
- * Tools define params as `{ name: { type, description, required } }` but
- * Anthropic requires `{ type: "object", properties: {...}, required: [...] }`.
- */
 function normalizeSchema(params: Record<string, unknown>): Record<string, unknown> {
-    // Already a proper JSON Schema
     if (params.type === 'object' && params.properties) return params;
-
-    // Empty parameters
-    if (!params || Object.keys(params).length === 0) {
-        return { type: 'object', properties: {} };
-    }
+    if (!params || Object.keys(params).length === 0) return { type: 'object', properties: {} };
 
     const properties: Record<string, unknown> = {};
     const required: string[] = [];
-
     for (const [key, val] of Object.entries(params)) {
-        if (val && typeof val === 'object' && 'type' in (val as Record<string, unknown>)) {
-            const { required: isReq, ...rest } = val as Record<string, unknown>;
+        if (val && typeof val === 'object' && 'type' in (val as any)) {
+            const { required: isReq, ...rest } = val as any;
             properties[key] = rest;
             if (isReq) required.push(key);
         } else {
             properties[key] = val;
         }
     }
-
     const schema: Record<string, unknown> = { type: 'object', properties };
     if (required.length > 0) schema.required = required;
     return schema;
 }
 
-// ── Public Types ─────────────────────────────────────────────────────
-
 export interface AgentResult {
     response: string;
-    toolCalls: Array<{
-        id: string;
-        name: string;
-        input: Record<string, unknown>;
-        result: ToolResult;
-    }>;
+    toolCalls: Array<{ id: string; name: string; input: Record<string, unknown>; result: ToolResult }>;
     totalTokens: number;
     iterations: number;
 }
@@ -81,18 +57,13 @@ export interface LoopParams {
     historyMessages?: Array<{ role: 'user' | 'assistant'; content: string }>;
     skipForceFirstTool?: boolean;
     maxIterations?: number;
+    sessionId?: string;
 }
-
-// ── Main Loop ────────────────────────────────────────────────────────
 
 export async function runAgentLoop(params: LoopParams): Promise<AgentResult> {
     const { provider, systemPrompt, userMessage, agentType, toolCtx, callbacks } = params;
     const agentDef = AGENT_DEFS[agentType];
-    const maxSteps = params.maxIterations ?? agentDef.maxIterations;
-    const shouldForceFirst = agentDef.forceFirstTool && !params.skipForceFirstTool;
 
-    // Build tool schemas for this agent type
-    // Normalize shorthand parameters into proper JSON Schema (required by Anthropic)
     const agentTools = getToolsForAgent(agentType);
     const filteredTools = agentTools.filter(t => !agentDef.deniedTools.includes(t.name));
     const toolSchemas: ToolSchema[] = filteredTools.map(t => ({
@@ -103,134 +74,104 @@ export async function runAgentLoop(params: LoopParams): Promise<AgentResult> {
 
     const fullSystemPrompt = systemPrompt + '\n' + agentDef.systemSuffix;
 
-    // Build initial messages
-    const history = params.historyMessages ?? [];
-    let messages = provider.buildMessages(history, userMessage);
+    const initialHistory: Message[] = (params.historyMessages ?? []).map(h => ({
+        type: h.role,
+        uuid: randomUUID(),
+        message: h.role === 'assistant'
+            ? { content: [{ type: 'text' as const, text: h.content }] }
+            : { content: h.content }
+    })) as Message[];
 
-    const allToolCalls: AgentResult['toolCalls'] = [];
-    const recentCalls: Array<{ name: string; input: string }> = [];
-    let totalInputTokens = 0;
-    let totalOutputTokens = 0;
-    let accumulatedText = '';
-    let stepCount = 0;
+    // Collect tool calls from callbacks for the legacy AgentResult
+    const toolCalls: AgentResult['toolCalls'] = [];
 
-    console.log(`[Loop] Starting: agent=${agentType} provider=${provider.id} maxSteps=${maxSteps} tools=${toolSchemas.length}`);
+    const wrappedOnToolStart = (toolName: string, input: Record<string, unknown>, callId: string) => {
+        callbacks.onToolStart?.(toolName, input, callId);
+    };
 
-    while (stepCount < maxSteps) {
-        stepCount++;
-        callbacks.onIteration?.(stepCount);
-        bus.emit('iteration.start', { iteration: stepCount });
+    const wrappedOnToolResult = (toolName: string, result: ToolResult) => {
+        toolCalls.push({
+            id: result.callId ?? randomUUID(),
+            name: toolName,
+            input: {},
+            result
+        });
+        callbacks.onToolResult?.(toolName, result);
+    };
 
-        const forceToolUse = shouldForceFirst && stepCount === 1 && provider.id !== 'kimi';
-
-        console.log(`[Loop] Step ${stepCount}/${maxSteps} forceTools=${forceToolUse}`);
-
-        let stepResult: StepResult;
-        try {
-            stepResult = await provider.chat({
-                system: fullSystemPrompt,
-                messages,
-                tools: toolSchemas,
-                maxTokens: 4096,
-                temperature: provider.id === 'kimi' ? 1 : 0.3,
-                forceToolUse,
-                callbacks: {
-                    onText: (text) => {
-                        accumulatedText += text;
-                        callbacks.onText?.(text);
-                    },
-                    onReasoning: callbacks.onReasoning,
-                },
-            });
-        } catch (error) {
-            const errMsg = error instanceof Error ? error.message : String(error);
-            console.error(`[Loop] Step ${stepCount} failed:`, errMsg);
-            throw new Error(`Agent step ${stepCount} failed: ${errMsg}`);
+    const engine = new QueryEngine({
+        provider,
+        systemPrompt: fullSystemPrompt,
+        tools: toolSchemas,
+        toolCtx,
+        maxTokens: 8192,
+        maxIterations: params.maxIterations ?? agentDef.maxIterations,
+        callbacks: {
+            onToolStart: wrappedOnToolStart,
+            onToolResult: wrappedOnToolResult,
+            onIteration: callbacks.onIteration
         }
+    }, initialHistory);
 
-        totalInputTokens += stepResult.usage.inputTokens;
-        totalOutputTokens += stepResult.usage.outputTokens;
+    let totalTokens = 0;
 
-        console.log(`[Loop] Step ${stepCount}: text=${stepResult.text.length}ch tools=${stepResult.toolCalls.length} done=${stepResult.done}`);
+    const stream = engine.submitMessage(userMessage);
+    let finalPayload: any;
 
-        // No tool calls → model is done
-        if (stepResult.toolCalls.length === 0 || stepResult.done) {
+    while (true) {
+        const { value, done } = await stream.next();
+        if (done) {
+            finalPayload = value;
             break;
         }
 
-        // Execute tool calls
-        const toolResults: Array<{ callId: string; output: string }> = [];
-
-        for (const tc of stepResult.toolCalls) {
-            // Doom loop detection
-            const inputStr = JSON.stringify(tc.input);
-            if (isDoomLoop(recentCalls, tc.name, inputStr)) {
-                console.warn(`[Loop] Doom loop detected: ${tc.name}`);
-                bus.emit('doom_loop.detected', { toolName: tc.name, count: DOOM_LOOP_THRESHOLD });
-                toolResults.push({
-                    callId: tc.id,
-                    output: JSON.stringify({ error: `Tool "${tc.name}" called repeatedly with same input. Try a different approach.` }),
+        const event = value;
+        if (event.type === 'message_start') {
+            const usage = event.message?.usage;
+            if (usage) {
+                const stepTokens = (usage.inputTokens || 0) + (usage.outputTokens || 0);
+                totalTokens += stepTokens;
+                if (params.sessionId) {
+                    recordTokenUsage(params.sessionId, 'claude-3-7-sonnet-20250219', {
+                        inputTokens: usage.inputTokens || 0,
+                        outputTokens: usage.outputTokens || 0,
+                        cacheReadTokens: 0,
+                        cacheCreationTokens: 0,
+                    });
+                }
+            }
+        } else if (event.type === 'message_delta') {
+            const outTokens = event.usage?.outputTokens || 0;
+            totalTokens += outTokens;
+            if (params.sessionId && outTokens > 0) {
+                recordTokenUsage(params.sessionId, 'claude-3-7-sonnet-20250219', {
+                    inputTokens: 0,
+                    outputTokens: outTokens,
+                    cacheReadTokens: 0,
+                    cacheCreationTokens: 0,
                 });
-                continue;
             }
-            recentCalls.push({ name: tc.name, input: inputStr });
-            if (recentCalls.length > DOOM_LOOP_THRESHOLD * 2) {
-                recentCalls.splice(0, recentCalls.length - DOOM_LOOP_THRESHOLD * 2);
+        } else if (event.type === 'content_block_delta') {
+            if ('text' in event.delta && event.delta.type === 'text_delta') {
+                callbacks.onText?.(event.delta.text);
+            } else if ('text' in event.delta && event.delta.type === 'reasoning_delta') {
+                callbacks.onReasoning?.(event.delta.text);
             }
-
-            // Emit tool start
-            callbacks.onToolStart?.(tc.name, tc.input, tc.id);
-
-            // Execute
-            toolCtx.createdFiles = [];
-            const result = await executeTool(tc.name, tc.input as ToolInput, toolCtx);
-            result.callId = tc.id;
-
-            // Emit tool result
-            callbacks.onToolResult?.(tc.name, result);
-
-            // Track
-            allToolCalls.push({ id: tc.id, name: tc.name, input: tc.input, result });
-
-            // Truncate output for context
-            let output = typeof result.output === 'string'
-                ? result.output
-                : JSON.stringify(result.output);
-            if (output.length > MAX_TOOL_OUTPUT_LENGTH) {
-                output = output.slice(0, MAX_TOOL_OUTPUT_LENGTH) + '\n...[truncated]';
-            }
-            if (result.error) {
-                output = JSON.stringify({ error: result.error });
-            }
-
-            toolResults.push({ callId: tc.id, output });
         }
-
-        // Append assistant response + tool results to messages
-        messages = provider.appendToolResults(messages, stepResult, toolResults);
     }
 
-    const response = accumulatedText || 'Done.';
-    const totalTokens = totalInputTokens + totalOutputTokens;
+    if (!finalPayload) {
+        throw new Error('Engine stream terminated without returning final state');
+    }
 
-    console.log(`[Loop] Complete: steps=${stepCount} tools=${allToolCalls.length} tokens=${totalTokens} text=${accumulatedText.length}ch`);
+    const textBlocks = finalPayload.assistantMsg.message.content
+        .filter((b: any) => b.type === 'text')
+        .map((b: any) => b.text);
 
     return {
-        response,
-        toolCalls: allToolCalls,
+        response: textBlocks.join('\n\n') || 'Task completed.',
+        toolCalls,
         totalTokens,
-        iterations: stepCount,
+        iterations: finalPayload.iterations
     };
-}
-
-// ── Helpers ──────────────────────────────────────────────────────────
-
-function isDoomLoop(
-    recentCalls: Array<{ name: string; input: string }>,
-    currentName: string,
-    currentInput: string,
-): boolean {
-    if (recentCalls.length < DOOM_LOOP_THRESHOLD - 1) return false;
-    const last = recentCalls.slice(-(DOOM_LOOP_THRESHOLD - 1));
-    return last.every(call => call.name === currentName && call.input === currentInput);
 }

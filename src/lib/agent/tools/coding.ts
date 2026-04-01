@@ -1,12 +1,5 @@
 /**
- * Coding Tools — OpenCode-faithful file operations.
- *
- * Key OpenCode patterns ported:
- * - read_file with line numbers, offset/limit, truncation
- * - edit_file with fuzzy matching chain (9 replacers from OpenCode)
- * - write_file creates or overwrites
- * - list_files / search_files / delete_file
- * - read_project_state for full context
+ * Coding Tools — File operations mapped to Claude Code's sophisticated tool models.
  */
 
 import { getAdminClient as getAdmin } from '@/lib/supabase/admin';
@@ -38,19 +31,15 @@ async function upsertFile(ctx: ToolContext, path: string, content: string): Prom
             size_bytes: sizeBytes,
             updated_at: new Date().toISOString(),
         }, { onConflict: 'project_id,path' }).select('id');
-        if (error) console.error(`[axiom] File write failed for ${path}:`, error.message);
+        if (error) console.error("[axiom] File write failed for " + path + ":", error.message);
     } catch { /* Supabase not configured */ }
 }
 
-// ── Edit Replacers (ported from OpenCode) ───────────────────────────
-// OpenCode uses a chain of 9 replacers, each progressively more fuzzy.
-// If one finds a unique match, it's used. Otherwise, the next is tried.
+// ── Edit Replacers ──────────────────────────────────────────────────
 
 type Replacer = (content: string, find: string) => Generator<string, void, unknown>;
 
-const SimpleReplacer: Replacer = function* (_content, find) {
-    yield find;
-};
+const SimpleReplacer: Replacer = function* (_content, find) { yield find; };
 
 const LineTrimmedReplacer: Replacer = function* (content, find) {
     const originalLines = content.split('\n');
@@ -184,7 +173,6 @@ const TrimmedBoundaryReplacer: Replacer = function* (content, find) {
     }
 };
 
-/** OpenCode's replace() — tries replacers in order until one works */
 function replaceWithChain(content: string, oldString: string, newString: string, replaceAll = false): string {
     if (oldString === newString) throw new Error('No changes: oldString and newString are identical.');
 
@@ -205,7 +193,7 @@ function replaceWithChain(content: string, oldString: string, newString: string,
             notFound = false;
             if (replaceAll) return content.replaceAll(search, newString);
             const lastIndex = content.lastIndexOf(search);
-            if (index !== lastIndex) continue; // multiple matches, try next replacer
+            if (index !== lastIndex) continue;
             return content.substring(0, index) + newString + content.substring(index + search.length);
         }
     }
@@ -216,30 +204,33 @@ function replaceWithChain(content: string, oldString: string, newString: string,
     throw new Error('Found multiple matches for oldString. Provide more surrounding context to make the match unique.');
 }
 
-// ── read_file ───────────────────────────────────────────────────────
+// ── FileReadTool ────────────────────────────────────────────────────
 
 registerTool({
-    name: 'read_file',
-    description: 'Read the contents of a project file. Returns content with line numbers. Use offset/limit for large files.',
+    name: 'FileReadTool',
+    description: "Read the contents of a file. Returns contents with line numbers. Use offset/limit for large files.\n\nUsage:\n- ALWAYS pass the absolute or valid relative path.\n- If the file is too large, it will be paginated using offset/limit.",
+    isReadOnly: true,
+    isConcurrencySafe: true,
+    isDestructive: false,
+    maxResultSizeChars: Infinity, // Never truncate reads — they self-paginate
     parameters: {
         type: 'object',
         properties: {
-            path: { type: 'string', description: 'Path to the file, e.g. scripts/player.axs' },
+            file_path: { type: 'string', description: 'Path to the file to read' },
             offset: { type: 'integer', description: 'Line number to start reading from (1-based). Optional.' },
             limit: { type: 'integer', description: 'Maximum lines to read. Defaults to 2000.' },
         },
-        required: ['path'],
+        required: ['file_path'],
     },
     access: ['build', 'plan', 'explore'],
     execute: async (ctx, input) => {
         const start = Date.now();
-        const filePath = input.path as string;
+        const filePath = input.file_path as string;
         const offset = (input.offset as number) || 1;
         const limit = (input.limit as number) || 2000;
 
         const content = await getFileContent(ctx.projectId, filePath);
         if (content === null) {
-            // OpenCode suggests similar files when not found
             const { data: allFiles } = await getAdmin()
                 .from('project_files')
                 .select('path')
@@ -248,11 +239,11 @@ registerTool({
                 .filter(f => f.path.toLowerCase().includes(filePath.toLowerCase().split('/').pop() ?? ''))
                 .slice(0, 3)
                 .map(f => f.path);
-            const hint = suggestions.length > 0 ? `\nDid you mean: ${suggestions.join(', ')}?` : '';
+            const hint = suggestions.length > 0 ? "\nDid you mean: " + suggestions.join(', ') + "?" : "";
             return {
                 callId: '', success: false, output: {},
                 filesModified: [],
-                error: `File not found: ${filePath}${hint}`,
+                error: "File not found: " + filePath + hint,
                 duration_ms: Date.now() - start,
             };
         }
@@ -263,13 +254,12 @@ registerTool({
         const sliced = allLines.slice(startIdx, startIdx + limit);
         const truncated = startIdx + sliced.length < totalLines;
 
-        // Line numbers like OpenCode: "lineNo: content"
-        const numbered = sliced.map((l, i) => `${startIdx + i + 1}: ${l}`).join('\n');
+        const numbered = sliced.map((l, i) => (startIdx + i + 1) + ": " + l).join('\n');
         let output = numbered;
         if (truncated) {
-            output += `\n\n(Showing lines ${offset}-${startIdx + sliced.length} of ${totalLines}. Use offset=${startIdx + sliced.length + 1} to continue.)`;
+            output += "\n\n(Showing lines " + offset + "-" + (startIdx + sliced.length) + " of " + totalLines + ". Use offset=" + (startIdx + sliced.length + 1) + " to continue.)";
         } else {
-            output += `\n\n(End of file - total ${totalLines} lines)`;
+            output += "\n\n(End of file - total " + totalLines + " lines)";
         }
 
         return {
@@ -281,52 +271,38 @@ registerTool({
     },
 });
 
-// ── edit_file (with OpenCode fuzzy matching chain) ──────────────────
+// ── FileEditTool ────────────────────────────────────────────────────
 
 registerTool({
-    name: 'edit_file',
-    description: `Edit a project file using exact string replacement. The old_string must uniquely identify the text to replace.
-
-IMPORTANT:
-- You must read the file first before editing
-- old_string must match exactly (the system will try fuzzy matching as fallback)
-- For creating new files, use write_file instead
-- For small changes, prefer this over write_file`,
+    name: 'FileEditTool',
+    isReadOnly: false,
+    isConcurrencySafe: false,
+    isDestructive: false,
+    description: "Performs exact string replacements in files.\n\nUsage:\n- You must use your FileReadTool tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file.\n- When editing text from Read tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: line number + colon + space (e.g., '12: '). Everything after that is the actual file content to match. Never include any part of the line number prefix in the old_string or new_string.\n- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.\n- Only use emojis if the user explicitly requests it. Avoid adding emojis to files unless asked.\n- The edit will FAIL if old_string is not unique in the file. Either provide a larger string with more surrounding context to make it unique or use replace_all to change every instance of old_string.\n- Use replace_all for replacing and renaming strings across the file. This parameter is useful if you want to rename a variable for instance.",
     parameters: {
         type: 'object',
         properties: {
-            path: { type: 'string', description: 'Path to the file to edit' },
+            file_path: { type: 'string', description: 'Path to the file to edit' },
             old_string: { type: 'string', description: 'The exact string to find and replace. Must be unique in the file.' },
             new_string: { type: 'string', description: 'The replacement string' },
             replace_all: { type: 'boolean', description: 'Replace all occurrences (default false)' },
         },
-        required: ['path', 'old_string', 'new_string'],
+        required: ['file_path', 'old_string', 'new_string'],
     },
     access: ['build'],
     execute: async (ctx, input) => {
         const start = Date.now();
-        const filePath = input.path as string;
+        const filePath = input.file_path as string;
         const oldStr = input.old_string as string;
         const newStr = input.new_string as string;
         const replaceAll = (input.replace_all as boolean) || false;
-
-        // Creating new file via empty old_string (OpenCode pattern)
-        if (oldStr === '') {
-            await upsertFile(ctx, filePath, newStr);
-            return {
-                callId: '', success: true,
-                output: { message: `Created ${filePath}`, path: filePath },
-                filesModified: [filePath],
-                duration_ms: Date.now() - start,
-            };
-        }
 
         const content = await getFileContent(ctx.projectId, filePath);
         if (content === null) {
             return {
                 callId: '', success: false, output: {},
                 filesModified: [],
-                error: `File not found: ${filePath}`,
+                error: "File not found: " + filePath,
                 duration_ms: Date.now() - start,
             };
         }
@@ -336,14 +312,14 @@ IMPORTANT:
             await upsertFile(ctx, filePath, newContent);
             return {
                 callId: '', success: true,
-                output: { message: `Edit applied to ${filePath}`, path: filePath },
+                output: { message: "Edit applied to " + filePath, path: filePath },
                 filesModified: [filePath],
                 duration_ms: Date.now() - start,
             };
         } catch (err) {
             return {
                 callId: '', success: false,
-                output: { hint: 'Use read_file to check the current content, then retry with the exact text.' },
+                output: { hint: 'Use FileReadTool to check the current content, then retry with the exact text.' },
                 filesModified: [],
                 error: err instanceof Error ? err.message : 'Edit failed',
                 duration_ms: Date.now() - start,
@@ -352,148 +328,33 @@ IMPORTANT:
     },
 });
 
-// ── write_file ──────────────────────────────────────────────────────
+// ── FileWriteTool ───────────────────────────────────────────────────
 
 registerTool({
-    name: 'write_file',
-    description: 'Create a new file or completely overwrite an existing file. For small edits on existing files, prefer edit_file instead.',
+    name: 'FileWriteTool',
+    isReadOnly: false,
+    isConcurrencySafe: false,
+    isDestructive: true,
+    description: "Writes a file to the local filesystem.\n\nUsage:\n- This tool will overwrite the existing file if there is one at the provided path.\n- If this is an existing file, you MUST use the FileReadTool tool first to read the file's contents.\n- Prefer the Edit tool for modifying existing files — it only sends the diff. Only use this tool to create new files or for complete rewrites.\n- NEVER create documentation files (*.md) or README files unless explicitly requested by the User.\n- Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked.",
     parameters: {
         type: 'object',
         properties: {
-            path: { type: 'string', description: 'Path for the file, e.g. scripts/enemy.axs' },
+            file_path: { type: 'string', description: 'Path for the file, e.g. scripts/enemy.ts' },
             content: { type: 'string', description: 'Full content of the file' },
         },
-        required: ['path', 'content'],
+        required: ['file_path', 'content'],
     },
     access: ['build'],
     execute: async (ctx, input) => {
         const start = Date.now();
-        const filePath = input.path as string;
+        const filePath = input.file_path as string;
         const content = input.content as string;
         await upsertFile(ctx, filePath, content);
         return {
             callId: '', success: true,
-            output: { message: `Wrote ${filePath}`, path: filePath, lines: content.split('\n').length, bytes: new TextEncoder().encode(content).length },
+            output: { message: "Wrote " + filePath, path: filePath, lines: content.split('\n').length, bytes: new TextEncoder().encode(content).length },
             filesModified: [filePath],
             duration_ms: Date.now() - start,
         };
-    },
-});
-
-// ── list_files ──────────────────────────────────────────────────────
-
-registerTool({
-    name: 'list_files',
-    description: 'List all project files, optionally filtered by a glob-like pattern.',
-    parameters: {
-        type: 'object',
-        properties: {
-            pattern: { type: 'string', description: 'Optional filter pattern. Prefix match e.g. "scripts/", suffix match e.g. "*.axs".' },
-        },
-        required: [],
-    },
-    access: ['build', 'plan', 'explore'],
-    execute: async (ctx, input) => {
-        const start = Date.now();
-        const pattern = (input.pattern as string) || '';
-        const { data: files, error } = await getAdmin()
-            .from('project_files')
-            .select('path, content_type, size_bytes, updated_at')
-            .eq('project_id', ctx.projectId)
-            .order('path');
-        if (error) return { callId: '', success: false, output: {}, filesModified: [], error: error.message, duration_ms: Date.now() - start };
-
-        let filtered = files ?? [];
-        if (pattern) {
-            if (pattern.startsWith('*')) {
-                const ext = pattern.slice(1);
-                filtered = filtered.filter(f => f.path.endsWith(ext));
-            } else if (pattern.endsWith('*')) {
-                const prefix = pattern.slice(0, -1);
-                filtered = filtered.filter(f => f.path.startsWith(prefix));
-            } else {
-                filtered = filtered.filter(f => f.path.startsWith(pattern) || f.path.includes(pattern));
-            }
-        }
-        const fileList = filtered.map(f => `${f.path} (${f.content_type}, ${f.size_bytes ?? 0}B)`);
-        return {
-            callId: '', success: true,
-            output: { files: fileList, count: fileList.length },
-            filesModified: [],
-            duration_ms: Date.now() - start,
-        };
-    },
-});
-
-// ── search_files ────────────────────────────────────────────────────
-
-registerTool({
-    name: 'search_files',
-    description: 'Search across all project files for a text pattern (regex supported). Returns matching lines with file paths and line numbers.',
-    parameters: {
-        type: 'object',
-        properties: {
-            query: { type: 'string', description: 'Search pattern (regex supported)' },
-            file_pattern: { type: 'string', description: 'Optional: only search files matching this pattern' },
-            max_results: { type: 'integer', description: 'Maximum matches to return', default: 20 },
-        },
-        required: ['query'],
-    },
-    access: ['build', 'plan', 'explore'],
-    execute: async (ctx, input) => {
-        const start = Date.now();
-        const query = input.query as string;
-        const filePattern = (input.file_pattern as string) || '';
-        const maxResults = (input.max_results as number) || 20;
-        const { data: files } = await getAdmin()
-            .from('project_files')
-            .select('path, text_content')
-            .eq('project_id', ctx.projectId)
-            .eq('content_type', 'text')
-            .order('path');
-        if (!files) return { callId: '', success: true, output: { matches: [], count: 0 }, filesModified: [], duration_ms: Date.now() - start };
-
-        let regex: RegExp;
-        try { regex = new RegExp(query, 'gi'); } catch { regex = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'); }
-
-        const matches: Array<{ file: string; line: number; text: string }> = [];
-        for (const file of files) {
-            if (filePattern) {
-                if (filePattern.startsWith('*') && !file.path.endsWith(filePattern.slice(1))) continue;
-                if (!filePattern.startsWith('*') && !file.path.includes(filePattern)) continue;
-            }
-            if (!file.text_content) continue;
-            const lines = file.text_content.split('\n');
-            for (let i = 0; i < lines.length && matches.length < maxResults; i++) {
-                if (regex.test(lines[i])) { matches.push({ file: file.path, line: i + 1, text: lines[i].trim() }); }
-                regex.lastIndex = 0;
-            }
-            if (matches.length >= maxResults) break;
-        }
-        return { callId: '', success: true, output: { matches, count: matches.length, query }, filesModified: [], duration_ms: Date.now() - start };
-    },
-});
-
-// ── delete_file ─────────────────────────────────────────────────────
-
-registerTool({
-    name: 'delete_file',
-    description: 'Delete a project file.',
-    parameters: {
-        type: 'object',
-        properties: { path: { type: 'string', description: 'Path to the file to delete' } },
-        required: ['path'],
-    },
-    access: ['build'],
-    execute: async (ctx, input) => {
-        const start = Date.now();
-        const filePath = input.path as string;
-        const { error } = await getAdmin()
-            .from('project_files')
-            .delete()
-            .eq('project_id', ctx.projectId)
-            .eq('path', filePath);
-        if (error) return { callId: '', success: false, output: {}, filesModified: [], error: error.message, duration_ms: Date.now() - start };
-        return { callId: '', success: true, output: { message: `Deleted ${filePath}`, path: filePath }, filesModified: [filePath], duration_ms: Date.now() - start };
     },
 });

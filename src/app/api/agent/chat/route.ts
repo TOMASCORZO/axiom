@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { getAdminClient } from '@/lib/supabase/admin';
-import { runAgentLoop, MODE_CREDIT_MULTIPLIER, type GameMode, type AgentProvider } from '@/lib/agent/orchestrator';
+import { prepareQueryEngine, MODE_CREDIT_MULTIPLIER, type GameMode, type AgentProvider } from '@/lib/agent/orchestrator';
 import { bus } from '@/lib/bus';
 import { v4 as uuid } from 'uuid';
 
@@ -70,6 +70,8 @@ export async function POST(request: NextRequest) {
                 const unsubBus = bus.onAll((event, payload) => {
                     if (
                         event === 'truncation.applied' ||
+                        event === 'context.compacted' ||
+                        event === 'permission.request' ||
                         event === 'doom_loop.detected' ||
                         event === 'tool.complete' ||
                         event === 'agent.start' ||
@@ -83,7 +85,7 @@ export async function POST(request: NextRequest) {
                     // Send conversation ID immediately
                     sendEvent('init', { conversation_id: convId, game_mode: gameMode });
 
-                    const agentResult = await runAgentLoop({
+                    const { engine, resolvedConfig } = await prepareQueryEngine({
                         message,
                         projectId: project_id,
                         userId: user.id,
@@ -91,58 +93,73 @@ export async function POST(request: NextRequest) {
                         conversationId: convId,
                         gameMode,
                         provider,
-                        onToolStart: (toolName, input, callId) => {
-                            sendEvent('tool_start', {
-                                id: callId,
-                                name: toolName,
-                                input,
-                            });
-                        },
-                        onToolResult: (toolName, result) => {
-                            sendEvent('tool_result', {
-                                id: result.callId,
-                                name: toolName,
-                                status: result.success ? 'completed' : 'failed',
-                                output: result.output,
-                                error: result.error,
-                                filesModified: result.filesModified,
-                                fileContents: result.fileContents ?? [],
-                            });
-                        },
-                        onIteration: (iteration) => {
-                            sendEvent('iteration', { iteration });
-                        },
-                        onReasoning: (reasoning) => {
-                            sendEvent('reasoning', { text: reasoning });
-                        },
-                        onText: (text) => {
-                            sendEvent('text', { text });
-                        },
+                        callbacks: {
+                            onToolStart: (toolName: string, input: any, callId: string) => {
+                                sendEvent('tool_start', { id: callId, name: toolName, input });
+                            },
+                            onToolResult: (toolName: string, result: any) => {
+                                sendEvent('tool_result', {
+                                    id: result.callId,
+                                    name: toolName,
+                                    status: result.success ? 'completed' : 'failed',
+                                    output: result.output,
+                                    error: result.error,
+                                    filesModified: result.filesModified,
+                                    fileContents: result.fileContents ?? [],
+                                });
+                            }
+                        }
                     });
+
+                    // Native Anthropic Stream
+                    const generator = engine.submitMessage(message);
+
+                    let finalResult: { totalTokens: number; iterations: number; toolCalls: number } = { totalTokens: 0, iterations: 1, toolCalls: 0 };
+                    let responseMsg = '';
+
+                    for await (const chunk of generator) {
+                        // Forward exactly as it came from QueryEngine (Claude Code format)
+                        sendEvent('stream_event', chunk);
+                        
+                        // Accumulate meta info manually if needed
+                        if (chunk.type === 'message_delta' && chunk.usage?.outputTokens) {
+                            finalResult.totalTokens += chunk.usage.outputTokens;
+                        }
+                        if (chunk.type === 'content_block_start' && chunk.block.type === 'tool_use') {
+                            finalResult.toolCalls++;
+                        }
+                    }
 
                     // Log assistant response and deduct credits (fire-and-forget)
                     const creditMultiplier = MODE_CREDIT_MULTIPLIER[gameMode];
-                    const creditsToDeduct = Math.max(1, agentResult.iterations) * creditMultiplier;
+                    const creditsToDeduct = Math.max(1, finalResult.iterations) * creditMultiplier;
+                    
+                    const m = engine.getMessages();
+                    const lastAssistant = m[m.length - 1];
+                    if (lastAssistant && lastAssistant.type === 'assistant') {
+                         responseMsg = lastAssistant.message.content.filter(b => b.type === 'text').map(b => typeof b === 'string' ? b : (b as any).text).join('\\n');
+                    }
+
                     Promise.all([
                         admin.from('agent_logs').insert({
                             project_id,
                             user_id: user.id,
                             conversation_id: convId,
                             role: 'assistant',
-                            content: agentResult.response,
-                            tokens_used: agentResult.totalTokens,
+                            content: responseMsg,
+                            tokens_used: finalResult.totalTokens,
                         }),
                         admin.rpc('decrement_credits', { uid: user.id, amount: creditsToDeduct }),
                     ]).catch(() => {});
 
                     // Send final response
                     sendEvent('done', {
-                        response: agentResult.response,
+                        response: responseMsg,
                         meta: {
-                            iterations: agentResult.iterations,
-                            totalTokens: agentResult.totalTokens,
+                            iterations: finalResult.iterations,
+                            totalTokens: finalResult.totalTokens,
                             creditsUsed: creditsToDeduct,
-                            toolsExecuted: agentResult.toolCalls.length,
+                            toolsExecuted: finalResult.toolCalls,
                         },
                     });
                 } catch (err) {

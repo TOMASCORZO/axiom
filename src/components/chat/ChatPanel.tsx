@@ -48,6 +48,7 @@ export default function ChatPanel({ projectId }: ChatPanelProps) {
     const [provider, setProvider] = useState<AgentProvider>('claude');
     const [error, setError] = useState<string | null>(null);
     const [loaded, setLoaded] = useState(false);
+    const [pendingPermissions, setPendingPermissions] = useState<Record<string, { patterns: string[] }>>({});
     const messagesEndRef = useRef<HTMLDivElement>(null);
 
     const {
@@ -57,6 +58,19 @@ export default function ChatPanel({ projectId }: ChatPanelProps) {
         addProjectFiles, refreshProjectFiles,
         setChatView, setActiveConversationId, newConversation, loadConversations,
     } = useEditorStore();
+
+    const handleRespondPermission = async (toolName: string, granted: boolean) => {
+        setPendingPermissions(prev => {
+            const next = { ...prev };
+            delete next[toolName];
+            return next;
+        });
+        fetch('/api/agent/permission', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ toolName, granted })
+        }).catch(err => console.error('Failed to submit permission', err));
+    };
 
     // Restore session from localStorage on mount
     useEffect(() => {
@@ -117,15 +131,14 @@ export default function ChatPanel({ projectId }: ChatPanelProps) {
         setError(null);
 
         const assistantId = crypto.randomUUID();
-        const toolCalls: ToolCallDisplay[] = [];
-        let reasoningText = '';
+        const blocks: import('@/types/agent').ContentBlock[] = [];
         let accumulatedContent = '';
 
         addMessage({
             id: assistantId,
             role: 'assistant',
             content: 'Thinking...',
-            toolCalls: [],
+            blocks: [],
             timestamp: new Date().toISOString(),
             isStreaming: true,
         });
@@ -187,50 +200,75 @@ export default function ChatPanel({ projectId }: ChatPanelProps) {
                                     }
                                     break;
 
-                                case 'reasoning':
-                                    reasoningText += (reasoningText ? '\n' : '') + data.text;
-                                    updateMessage(assistantId, {
-                                        content: 'Reasoning...',
-                                        reasoning: reasoningText,
-                                    });
+                                case 'subsystem':
+                                    if (data.event === 'context.compacted') {
+                                        addMessage({
+                                            id: crypto.randomUUID(),
+                                            role: 'system',
+                                            content: `[Context Compressed]\nSaved ${data.tokensSaved} tokens. Older messages were summarized.`,
+                                            timestamp: new Date().toISOString(),
+                                        });
+                                    } else if (data.event === 'permission.request') {
+                                        setPendingPermissions(prev => ({
+                                            ...prev,
+                                            [data.toolName]: { patterns: data.patterns }
+                                        }));
+                                    }
                                     break;
 
-                                case 'iteration':
-                                    updateMessage(assistantId, {
-                                        content: accumulatedContent || `Working... (step ${data.iteration})`,
-                                    });
+                                case 'stream_event': {
+                                    const chunk = data as import('@/types/agent').StreamEvent;
+                                    if (chunk.type === 'content_block_start') {
+                                        if (chunk.block.type === 'text') {
+                                            blocks.push({ type: 'text', text: '' });
+                                        } else if (chunk.block.type === 'tool_use') {
+                                            blocks.push({ 
+                                                type: 'tool_use', 
+                                                toolCall: { id: chunk.block.id, name: chunk.block.name, status: 'pending', input: {} } 
+                                            });
+                                        }
+                                    } else if (chunk.type === 'content_block_delta') {
+                                        if ('text' in chunk.delta && chunk.delta.type === 'text_delta') {
+                                            const last = blocks[blocks.length - 1];
+                                            if (last?.type === 'text') last.text += chunk.delta.text;
+                                        } else if ('text' in chunk.delta && chunk.delta.type === 'reasoning_delta') {
+                                            let tb = blocks.find(b => b.type === 'thinking');
+                                            if (!tb) {
+                                                tb = { type: 'thinking', text: chunk.delta.text, isStreaming: true };
+                                                blocks.unshift(tb);
+                                            } else if (tb.type === 'thinking') {
+                                                tb.text += chunk.delta.text;
+                                            }
+                                        }
+                                    } else if (chunk.type === 'content_block_stop') {
+                                        const tb = blocks.find(b => b.type === 'thinking');
+                                        if (tb && tb.type === 'thinking') tb.isStreaming = false;
+                                    }
+                                    updateMessage(assistantId, { blocks: [...blocks] });
                                     break;
+                                }
 
-                                case 'text':
-                                    accumulatedContent = accumulatedContent
-                                        ? accumulatedContent + data.text
-                                        : data.text;
-                                    updateMessage(assistantId, { content: accumulatedContent });
+                                case 'tool_start': {
+                                    const block = blocks.find(b => b.type === 'tool_use' && b.toolCall.id === data.id);
+                                    if (block && block.type === 'tool_use') {
+                                        block.toolCall.status = 'running';
+                                        block.toolCall.input = data.input;
+                                    } else {
+                                        blocks.push({ type: 'tool_use', toolCall: { id: data.id, name: data.name, status: 'running', input: data.input } });
+                                    }
+                                    updateMessage(assistantId, { blocks: [...blocks] });
                                     break;
-
-                                case 'tool_start':
-                                    toolCalls.push({
-                                        id: data.id,
-                                        name: data.name,
-                                        status: 'running',
-                                        input: data.input,
-                                    });
-                                    updateMessage(assistantId, {
-                                        content: accumulatedContent || `Running ${data.name}...`,
-                                        toolCalls: [...toolCalls],
-                                    });
-                                    break;
+                                }
 
                                 case 'tool_result': {
-                                    const matched = toolCalls.find(tc => tc.id === data.id)
-                                        ?? toolCalls[toolCalls.length - 1];
-                                    if (matched) {
-                                        matched.status = data.status;
-                                        matched.output = data.output;
-                                        matched.error = data.error;
-                                        matched.filesModified = data.filesModified;
+                                    const block = blocks.find(b => b.type === 'tool_use' && b.toolCall.id === data.id);
+                                    if (block && block.type === 'tool_use') {
+                                        block.toolCall.status = data.status;
+                                        block.toolCall.output = data.output;
+                                        block.toolCall.error = data.error;
+                                        block.toolCall.filesModified = data.filesModified;
                                     }
-                                    updateMessage(assistantId, { toolCalls: [...toolCalls] });
+                                    updateMessage(assistantId, { blocks: [...blocks] });
                                     if (data.fileContents?.length > 0) {
                                         addProjectFiles(data.fileContents);
                                     }
@@ -246,8 +284,7 @@ export default function ChatPanel({ projectId }: ChatPanelProps) {
                                     }
                                     updateMessage(assistantId, {
                                         content,
-                                        toolCalls: [...toolCalls],
-                                        reasoning: reasoningText || undefined,
+                                        blocks: [...blocks],
                                         isStreaming: false,
                                     });
                                     refreshProjectFiles(projectId);

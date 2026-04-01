@@ -43,6 +43,7 @@ export interface BusEvents {
     // Safety
     'doom_loop.detected': { toolName: string; count: number };
     'truncation.applied': { toolName: string; originalLength: number; truncatedLength: number };
+    'context.compacted': { tokensSaved: number; summary: string };
 
     // Permission (for future Phase 1.3)
     'permission.request': { toolName: string; permission: string; patterns: string[] };
