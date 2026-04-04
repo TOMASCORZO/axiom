@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useEditorStore } from '@/lib/store';
 import { Bot, Box, AlertCircle } from 'lucide-react';
-import type { ChatMessage as ChatMessageType, ToolCallDisplay } from '@/types/agent';
+import type { ChatMessage as ChatMessageType } from '@/types/agent';
 import ChatHeader from './ChatHeader';
 import ChatMessageComponent from './ChatMessage';
 import ChatInput from './ChatInput';
@@ -204,8 +204,8 @@ export default function ChatPanel({ projectId }: ChatPanelProps) {
                                     if (data.event === 'context.compacted') {
                                         addMessage({
                                             id: crypto.randomUUID(),
-                                            role: 'system',
-                                            content: `[Context Compressed]\nSaved ${data.tokensSaved} tokens. Older messages were summarized.`,
+                                            role: 'assistant',
+                                            content: `[Context Compressed] Saved ${data.tokensSaved} tokens. Older messages were summarized.`,
                                             timestamp: new Date().toISOString(),
                                         });
                                     } else if (data.event === 'permission.request') {
@@ -216,21 +216,62 @@ export default function ChatPanel({ projectId }: ChatPanelProps) {
                                     }
                                     break;
 
+                                case 'reasoning': {
+                                    // Fallback: server sends reasoning as separate event
+                                    let tb = blocks.find(b => b.type === 'thinking');
+                                    if (!tb) {
+                                        tb = { type: 'thinking', text: data.text, isStreaming: true };
+                                        blocks.unshift(tb);
+                                    } else if (tb.type === 'thinking') {
+                                        tb.text += (tb.text ? '\n' : '') + data.text;
+                                    }
+                                    updateMessage(assistantId, { blocks: [...blocks] });
+                                    break;
+                                }
+
+                                case 'text': {
+                                    // Fallback: server sends text as separate event
+                                    const lastText = blocks.findLast(b => b.type === 'text');
+                                    if (lastText && lastText.type === 'text') {
+                                        lastText.text += data.text;
+                                    } else {
+                                        blocks.push({ type: 'text', text: data.text });
+                                    }
+                                    accumulatedContent = blocks
+                                        .filter(b => b.type === 'text')
+                                        .map(b => b.type === 'text' ? b.text : '')
+                                        .join('');
+                                    updateMessage(assistantId, { content: accumulatedContent, blocks: [...blocks] });
+                                    break;
+                                }
+
+                                case 'iteration': {
+                                    // Progress update — no block needed, just update content
+                                    if (!accumulatedContent) {
+                                        updateMessage(assistantId, { content: `Working... (step ${data.iteration})` });
+                                    }
+                                    break;
+                                }
+
                                 case 'stream_event': {
                                     const chunk = data as import('@/types/agent').StreamEvent;
                                     if (chunk.type === 'content_block_start') {
                                         if (chunk.block.type === 'text') {
                                             blocks.push({ type: 'text', text: '' });
                                         } else if (chunk.block.type === 'tool_use') {
-                                            blocks.push({ 
-                                                type: 'tool_use', 
-                                                toolCall: { id: chunk.block.id, name: chunk.block.name, status: 'pending', input: {} } 
+                                            blocks.push({
+                                                type: 'tool_use',
+                                                toolCall: { id: chunk.block.id, name: chunk.block.name, status: 'pending', input: {} }
                                             });
                                         }
                                     } else if (chunk.type === 'content_block_delta') {
                                         if ('text' in chunk.delta && chunk.delta.type === 'text_delta') {
                                             const last = blocks[blocks.length - 1];
                                             if (last?.type === 'text') last.text += chunk.delta.text;
+                                            accumulatedContent = blocks
+                                                .filter(b => b.type === 'text')
+                                                .map(b => b.type === 'text' ? b.text : '')
+                                                .join('');
                                         } else if ('text' in chunk.delta && chunk.delta.type === 'reasoning_delta') {
                                             let tb = blocks.find(b => b.type === 'thinking');
                                             if (!tb) {
@@ -277,10 +318,16 @@ export default function ChatPanel({ projectId }: ChatPanelProps) {
 
                                 case 'done': {
                                     let content = accumulatedContent || data.response || 'Done.';
+                                    // Mark all thinking blocks as done
+                                    for (const b of blocks) {
+                                        if (b.type === 'thinking') b.isStreaming = false;
+                                    }
+                                    // Append meta as a final text block
                                     if (data.meta) {
                                         const m = data.meta;
                                         const badge = gameMode === '3d' ? '3D' : '2D';
-                                        content += `\n\n_${badge} · ${m.toolsExecuted} tools · ${m.creditsUsed} credits · ${m.iterations} steps_`;
+                                        const metaText = `\n_${badge} · ${m.toolsExecuted} tools · ${m.creditsUsed} credits · ${m.iterations} steps_`;
+                                        content += '\n' + metaText;
                                     }
                                     updateMessage(assistantId, {
                                         content,
@@ -360,7 +407,12 @@ export default function ChatPanel({ projectId }: ChatPanelProps) {
                 )}
 
                 {messages.map((msg) => (
-                    <ChatMessageComponent key={msg.id} message={msg} />
+                    <ChatMessageComponent
+                        key={msg.id}
+                        message={msg}
+                        pendingPermissions={pendingPermissions}
+                        onRespondPermission={handleRespondPermission}
+                    />
                 ))}
 
                 {error && (

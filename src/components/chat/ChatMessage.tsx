@@ -1,5 +1,6 @@
 'use client';
 
+import React from 'react';
 import { Bot, User } from 'lucide-react';
 import type { ChatMessage as ChatMessageType, ContentBlock } from '@/types/agent';
 import ThinkingBlock from './ThinkingBlock';
