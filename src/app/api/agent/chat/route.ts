@@ -33,19 +33,13 @@ export async function POST(request: NextRequest) {
 
         const admin = getAdminClient();
 
-        // Check AI credits
-        const { data: profile } = await admin
-            .from('profiles')
-            .select('ai_credits_remaining')
-            .eq('id', user.id)
-            .single();
-
-        if (!profile || profile.ai_credits_remaining <= 0) {
-            return NextResponse.json(
-                { error: 'No AI credits remaining. Please upgrade your plan.' },
-                { status: 429 },
-            );
-        }
+        // TODO: implement sophisticated credit system — disabled for development
+        // if (!profile || profile.ai_credits_remaining <= 0) {
+        //     return NextResponse.json(
+        //         { error: 'No AI credits remaining. Please upgrade your plan.' },
+        //         { status: 429 },
+        //     );
+        // }
 
         const convId = conversation_id || uuid();
 
@@ -149,7 +143,7 @@ export async function POST(request: NextRequest) {
                             content: responseMsg,
                             tokens_used: finalResult.totalTokens,
                         }),
-                        admin.rpc('decrement_credits', { uid: user.id, amount: creditsToDeduct }),
+                        // admin.rpc('decrement_credits', { uid: user.id, amount: creditsToDeduct }),
                     ]).catch(() => {});
 
                     // Send final response
