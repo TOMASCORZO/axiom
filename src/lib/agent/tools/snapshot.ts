@@ -13,7 +13,11 @@ registerTool({
     name: 'snapshot_create',
     description: 'Capture a snapshot of all project files. Use before making risky changes so you can revert later.',
     parameters: {
-        label: { type: 'string', description: 'Label for the snapshot (e.g. "before refactor")' },
+        type: 'object',
+        properties: {
+            label: { type: 'string', description: 'Label for the snapshot (e.g. "before refactor")' },
+        },
+        required: [],
     },
     access: ['build'],
     async execute(ctx: ToolContext, input: ToolInput) {
@@ -33,7 +37,11 @@ registerTool({
     name: 'snapshot_diff',
     description: 'Compare the current project state against a previous snapshot. Shows added, modified, and deleted files.',
     parameters: {
-        snapshotId: { type: 'string', description: 'Snapshot ID from snapshot_create', required: true },
+        type: 'object',
+        properties: {
+            snapshotId: { type: 'string', description: 'Snapshot ID from snapshot_create' },
+        },
+        required: ['snapshotId'],
     },
     access: ['build', 'plan'],
     async execute(ctx: ToolContext, input: ToolInput) {
@@ -61,7 +69,11 @@ registerTool({
     name: 'snapshot_revert',
     description: 'Revert all project files to a previous snapshot state. This will undo all changes made after the snapshot.',
     parameters: {
-        snapshotId: { type: 'string', description: 'Snapshot ID to revert to', required: true },
+        type: 'object',
+        properties: {
+            snapshotId: { type: 'string', description: 'Snapshot ID to revert to' },
+        },
+        required: ['snapshotId'],
     },
     access: ['build'],
     requiresApproval: true,

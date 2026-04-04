@@ -59,6 +59,7 @@ export async function* queryLoop(
     let stepCount = 0;
     const maxIterations = options.maxIterations ?? 25;
 
+    console.log(`[QueryLoop] Starting with ${tools.length} tools, max ${maxIterations} iterations`);
     let finalAssistantMsg: AssistantMessage | null = null;
 
     while (stepCount < maxIterations) {
@@ -85,6 +86,9 @@ export async function* queryLoop(
             currentMessages = compactResult.messages;
         }
 
+        // Force the model to use tools on the first iteration so it acts instead of just talking
+        const forceToolUse = stepCount === 1 && tools.length > 0;
+
         // 2. Initiate Model Stream (with retry logic)
         let assistantMsg: AssistantMessage | null = null;
 
@@ -107,7 +111,7 @@ export async function* queryLoop(
                     tools,
                     maxTokens: options.maxTokens,
                     temperature: 0.2,
-                    forceToolUse: false
+                    forceToolUse,
                 });
 
                 for await (const chunk of stream) {
@@ -184,6 +188,7 @@ export async function* queryLoop(
 
         // 3. Execute Tools — parallel for concurrent-safe, sequential for unsafe
         const toolUses = assistantMsg.message.content.filter(b => b.type === 'tool_use') as ToolUseBlock[];
+        console.log(`[QueryLoop] Step ${stepCount}: ${toolUses.length} tool calls, stop_reason=${assistantMsg.message.stop_reason}`);
         if (toolUses.length === 0) break;
 
         // Partition into concurrent-safe and unsafe

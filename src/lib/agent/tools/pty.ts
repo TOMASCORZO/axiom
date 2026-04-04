@@ -13,9 +13,13 @@ registerTool({
     name: 'pty_spawn',
     description: 'Start a persistent background process (dev server, watcher, test runner). Returns session ID for monitoring.',
     parameters: {
-        command: { type: 'string', description: 'Command to run', required: true },
-        cwd: { type: 'string', description: 'Working directory' },
-        timeout: { type: 'number', description: 'Auto-kill timeout in ms (0 = no timeout)' },
+        type: 'object',
+        properties: {
+            command: { type: 'string', description: 'Command to run' },
+            cwd: { type: 'string', description: 'Working directory' },
+            timeout: { type: 'number', description: 'Auto-kill timeout in ms (0 = no timeout)' },
+        },
+        required: ['command'],
     },
     access: ['build'],
     requiresApproval: true,
@@ -43,8 +47,12 @@ registerTool({
     name: 'pty_read',
     description: 'Read the output buffer from a persistent terminal session.',
     parameters: {
-        sessionId: { type: 'string', description: 'Session ID from pty_spawn', required: true },
-        lastN: { type: 'number', description: 'Only return the last N lines (default: all)' },
+        type: 'object',
+        properties: {
+            sessionId: { type: 'string', description: 'Session ID from pty_spawn' },
+            lastN: { type: 'number', description: 'Only return the last N lines (default: all)' },
+        },
+        required: ['sessionId'],
     },
     access: ['build', 'plan', 'explore'],
     async execute(ctx: ToolContext, input: ToolInput) {
@@ -68,8 +76,12 @@ registerTool({
     name: 'pty_write',
     description: 'Send input to a running terminal session stdin (e.g. answer prompts, send keyboard shortcuts).',
     parameters: {
-        sessionId: { type: 'string', description: 'Session ID', required: true },
-        input: { type: 'string', description: 'Input to send (include \\n for Enter)', required: true },
+        type: 'object',
+        properties: {
+            sessionId: { type: 'string', description: 'Session ID' },
+            input: { type: 'string', description: 'Input to send (include \\n for Enter)' },
+        },
+        required: ['sessionId', 'input'],
     },
     access: ['build'],
     async execute(ctx: ToolContext, input: ToolInput) {
@@ -93,7 +105,11 @@ registerTool({
     name: 'pty_kill',
     description: 'Kill a running terminal session.',
     parameters: {
-        sessionId: { type: 'string', description: 'Session ID to kill', required: true },
+        type: 'object',
+        properties: {
+            sessionId: { type: 'string', description: 'Session ID to kill' },
+        },
+        required: ['sessionId'],
     },
     access: ['build'],
     async execute(ctx: ToolContext, input: ToolInput) {
@@ -112,7 +128,7 @@ registerTool({
 registerTool({
     name: 'pty_list',
     description: 'List all terminal sessions (active and completed).',
-    parameters: {},
+    parameters: { type: 'object', properties: {}, required: [] },
     access: ['build', 'plan', 'explore'],
     async execute(ctx: ToolContext, input: ToolInput) {
         const sessions = ptyManager.list();

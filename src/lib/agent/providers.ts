@@ -326,9 +326,15 @@ class OpenAICompatProvider implements ChatProvider {
                 const delta = choice.delta;
                 if (!delta) continue;
 
-                // Stop Reason
+                // Stop Reason — map OpenAI finish_reason to Anthropic stop_reason
                 if (choice.finish_reason) {
-                    yield { type: 'message_delta', usage: { outputTokens: 0 }, stop_reason: choice.finish_reason === 'length' ? 'max_tokens' : 'end_turn' };
+                    const stopMap: Record<string, string> = {
+                        'stop': 'end_turn',
+                        'length': 'max_tokens',
+                        'tool_calls': 'tool_use',
+                        'function_call': 'tool_use',
+                    };
+                    yield { type: 'message_delta', usage: { outputTokens: 0 }, stop_reason: stopMap[choice.finish_reason] ?? 'end_turn' };
                 }
 
                 // Text

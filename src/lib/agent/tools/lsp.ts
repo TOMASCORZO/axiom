@@ -15,8 +15,12 @@ registerTool({
     name: 'lsp_diagnostics',
     description: 'Get type errors, lint warnings, and diagnostics for a file from the language server. Start the LSP server first with lsp_start.',
     parameters: {
-        language: { type: 'string', description: 'Language server to query (typescript, python)', required: true },
-        uri: { type: 'string', description: 'File URI (e.g. file:///path/to/file.ts)', required: true },
+        type: 'object',
+        properties: {
+            language: { type: 'string', description: 'Language server to query (typescript, python)' },
+            uri: { type: 'string', description: 'File URI (e.g. file:///path/to/file.ts)' },
+        },
+        required: ['language', 'uri'],
     },
     access: ['build', 'plan', 'explore'],
     async execute(ctx: ToolContext, input: ToolInput) {
@@ -47,10 +51,14 @@ registerTool({
     name: 'lsp_definition',
     description: 'Find the definition of a symbol at a specific position in a file.',
     parameters: {
-        language: { type: 'string', description: 'Language server (typescript, python)', required: true },
-        uri: { type: 'string', description: 'File URI', required: true },
-        line: { type: 'number', description: 'Line number (0-indexed)', required: true },
-        character: { type: 'number', description: 'Column number (0-indexed)', required: true },
+        type: 'object',
+        properties: {
+            language: { type: 'string', description: 'Language server (typescript, python)' },
+            uri: { type: 'string', description: 'File URI' },
+            line: { type: 'number', description: 'Line number (0-indexed)' },
+            character: { type: 'number', description: 'Column number (0-indexed)' },
+        },
+        required: ['language', 'uri', 'line', 'character'],
     },
     access: ['build', 'plan', 'explore'],
     async execute(ctx: ToolContext, input: ToolInput) {
@@ -83,10 +91,14 @@ registerTool({
     name: 'lsp_references',
     description: 'Find all references to a symbol at a specific position in a file.',
     parameters: {
-        language: { type: 'string', description: 'Language server (typescript, python)', required: true },
-        uri: { type: 'string', description: 'File URI', required: true },
-        line: { type: 'number', description: 'Line number (0-indexed)', required: true },
-        character: { type: 'number', description: 'Column number (0-indexed)', required: true },
+        type: 'object',
+        properties: {
+            language: { type: 'string', description: 'Language server (typescript, python)' },
+            uri: { type: 'string', description: 'File URI' },
+            line: { type: 'number', description: 'Line number (0-indexed)' },
+            character: { type: 'number', description: 'Column number (0-indexed)' },
+        },
+        required: ['language', 'uri', 'line', 'character'],
     },
     access: ['build', 'plan', 'explore'],
     async execute(ctx: ToolContext, input: ToolInput) {
@@ -119,10 +131,14 @@ registerTool({
     name: 'lsp_hover',
     description: 'Get type information and documentation for a symbol at a position.',
     parameters: {
-        language: { type: 'string', description: 'Language server (typescript, python)', required: true },
-        uri: { type: 'string', description: 'File URI', required: true },
-        line: { type: 'number', description: 'Line number (0-indexed)', required: true },
-        character: { type: 'number', description: 'Column number (0-indexed)', required: true },
+        type: 'object',
+        properties: {
+            language: { type: 'string', description: 'Language server (typescript, python)' },
+            uri: { type: 'string', description: 'File URI' },
+            line: { type: 'number', description: 'Line number (0-indexed)' },
+            character: { type: 'number', description: 'Column number (0-indexed)' },
+        },
+        required: ['language', 'uri', 'line', 'character'],
     },
     access: ['build', 'plan', 'explore'],
     async execute(ctx: ToolContext, input: ToolInput) {
@@ -155,8 +171,12 @@ registerTool({
     name: 'lsp_start',
     description: 'Start a language server for IDE-level code intelligence (typescript, python).',
     parameters: {
-        language: { type: 'string', description: 'Language to start (typescript, python)', required: true },
-        rootUri: { type: 'string', description: 'Project root path', required: true },
+        type: 'object',
+        properties: {
+            language: { type: 'string', description: 'Language to start (typescript, python)' },
+            rootUri: { type: 'string', description: 'Project root path' },
+        },
+        required: ['language', 'rootUri'],
     },
     access: ['build'],
     async execute(ctx: ToolContext, input: ToolInput) {

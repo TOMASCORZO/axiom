@@ -13,8 +13,12 @@ registerTool({
     name: 'webfetch',
     description: 'Fetch a URL and return its text content. Useful for reading documentation, API references, and error pages.',
     parameters: {
-        url: { type: 'string', description: 'URL to fetch', required: true },
-        maxLength: { type: 'number', description: 'Max characters to return (default: 10000)' },
+        type: 'object',
+        properties: {
+            url: { type: 'string', description: 'URL to fetch' },
+            maxLength: { type: 'number', description: 'Max characters to return (default: 10000)' },
+        },
+        required: ['url'],
     },
     access: ['build', 'plan', 'explore'],
     async execute(ctx: ToolContext, input: ToolInput) {
@@ -82,8 +86,12 @@ registerTool({
     name: 'websearch',
     description: 'Search the web for information. Returns search result snippets. Useful for finding documentation, troubleshooting errors, and researching APIs.',
     parameters: {
-        query: { type: 'string', description: 'Search query', required: true },
-        maxResults: { type: 'number', description: 'Maximum results (default: 5)' },
+        type: 'object',
+        properties: {
+            query: { type: 'string', description: 'Search query' },
+            maxResults: { type: 'number', description: 'Maximum results (default: 5)' },
+        },
+        required: ['query'],
     },
     access: ['build', 'plan', 'explore'],
     async execute(ctx: ToolContext, input: ToolInput) {

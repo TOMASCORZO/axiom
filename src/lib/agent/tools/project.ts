@@ -12,8 +12,12 @@ registerTool({
     name: 'read_project_state',
     description: 'Get a complete overview of the project: file tree, file sizes, content types, and total stats. Use this first to understand the project structure.',
     parameters: {
-        includeContent: { type: 'boolean', description: 'Include file contents (warning: can be very large). Default: false.' },
-        pathFilter: { type: 'string', description: 'Only show files matching this path prefix' },
+        type: 'object',
+        properties: {
+            includeContent: { type: 'boolean', description: 'Include file contents (warning: can be very large). Default: false.' },
+            pathFilter: { type: 'string', description: 'Only show files matching this path prefix' },
+        },
+        required: [],
     },
     access: ['build', 'plan', 'explore'],
     async execute(ctx: ToolContext, input: ToolInput) {

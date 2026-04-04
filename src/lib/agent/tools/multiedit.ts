@@ -15,8 +15,12 @@ registerTool({
     name: 'multiedit',
     description: 'Apply multiple find-and-replace edits to a single file in one operation. More efficient than multiple edit_file calls.',
     parameters: {
-        path: { type: 'string', description: 'File path to edit', required: true },
-        edits: { type: 'array', description: 'Array of { find: string, replace: string } objects', required: true },
+        type: 'object',
+        properties: {
+            path: { type: 'string', description: 'File path to edit' },
+            edits: { type: 'array', description: 'Array of { find: string, replace: string } objects', items: { type: 'object', properties: { find: { type: 'string' }, replace: { type: 'string' } }, required: ['find', 'replace'] } },
+        },
+        required: ['path', 'edits'],
     },
     access: ['build'],
     requiresApproval: false,
@@ -94,8 +98,12 @@ registerTool({
     name: 'apply_patch',
     description: 'Apply a unified diff patch to a file. Use standard unified diff format with --- and +++ headers.',
     parameters: {
-        path: { type: 'string', description: 'File path to patch', required: true },
-        patch: { type: 'string', description: 'Unified diff patch content', required: true },
+        type: 'object',
+        properties: {
+            path: { type: 'string', description: 'File path to patch' },
+            patch: { type: 'string', description: 'Unified diff patch content' },
+        },
+        required: ['path', 'patch'],
     },
     access: ['build'],
     requiresApproval: false,

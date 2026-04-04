@@ -13,11 +13,15 @@ registerTool({
     name: 'mcp_connect',
     description: 'Connect to an MCP (Model Context Protocol) server for additional tools and resources.',
     parameters: {
-        name: { type: 'string', description: 'Unique name for the connection', required: true },
-        transport: { type: 'string', description: 'Transport type: "stdio" or "sse"', required: true },
-        command: { type: 'string', description: 'Command to start server (stdio only)' },
-        args: { type: 'array', description: 'Command arguments (stdio only)' },
-        url: { type: 'string', description: 'Server URL (sse only)' },
+        type: 'object',
+        properties: {
+            name: { type: 'string', description: 'Unique name for the connection' },
+            transport: { type: 'string', description: 'Transport type: "stdio" or "sse"' },
+            command: { type: 'string', description: 'Command to start server (stdio only)' },
+            args: { type: 'array', items: { type: 'string' }, description: 'Command arguments (stdio only)' },
+            url: { type: 'string', description: 'Server URL (sse only)' },
+        },
+        required: ['name', 'transport'],
     },
     access: ['build'],
     requiresApproval: true,
@@ -50,9 +54,13 @@ registerTool({
     name: 'mcp_call',
     description: 'Call a tool provided by a connected MCP server.',
     parameters: {
-        server: { type: 'string', description: 'MCP server name', required: true },
-        tool: { type: 'string', description: 'Tool name (original, not prefixed)', required: true },
-        args: { type: 'object', description: 'Tool arguments', required: true },
+        type: 'object',
+        properties: {
+            server: { type: 'string', description: 'MCP server name' },
+            tool: { type: 'string', description: 'Tool name (original, not prefixed)' },
+            args: { type: 'object', description: 'Tool arguments' },
+        },
+        required: ['server', 'tool', 'args'],
     },
     access: ['build'],
     async execute(ctx: ToolContext, input: ToolInput) {
@@ -83,7 +91,7 @@ registerTool({
 registerTool({
     name: 'mcp_list',
     description: 'List all connected MCP servers and their available tools.',
-    parameters: {},
+    parameters: { type: 'object', properties: {}, required: [] },
     access: ['build', 'plan', 'explore'],
     async execute(ctx: ToolContext, input: ToolInput) {
         const servers = mcpManager.status();
@@ -106,7 +114,11 @@ registerTool({
     name: 'mcp_disconnect',
     description: 'Disconnect from an MCP server.',
     parameters: {
-        name: { type: 'string', description: 'Server name to disconnect', required: true },
+        type: 'object',
+        properties: {
+            name: { type: 'string', description: 'Server name to disconnect' },
+        },
+        required: ['name'],
     },
     access: ['build'],
     async execute(ctx: ToolContext, input: ToolInput) {
