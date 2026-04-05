@@ -877,35 +877,39 @@ function GalleryTab() {
 
     const selectedAsset = assets.find(a => a.id === previewAssetId);
 
-    /** Extract N evenly-spaced frames from a video URL using <video> + <canvas> */
-    const extractFrames = useCallback(async (videoUrl: string, frameCount: number, fw: number, fh: number): Promise<Blob> => {
-        // Download video as blob to avoid CORS issues with canvas
+    /** Extract N evenly-spaced frames from a video URL using <video> + <canvas>.
+     *  Uses the video's native resolution for maximum quality. */
+    const extractFrames = useCallback(async (videoUrl: string, frameCount: number): Promise<{ blob: Blob; frameW: number; frameH: number }> => {
         const videoRes = await fetch(videoUrl);
         const videoBlob = await videoRes.blob();
         const localUrl = URL.createObjectURL(videoBlob);
 
         try {
-            return await new Promise<Blob>((resolve, reject) => {
+            return await new Promise<{ blob: Blob; frameW: number; frameH: number }>((resolve, reject) => {
                 const video = document.createElement('video');
                 video.muted = true;
                 video.playsInline = true;
                 video.src = localUrl;
 
                 video.onloadedmetadata = async () => {
+                    const vw = video.videoWidth;
+                    const vh = video.videoHeight;
                     const canvas = document.createElement('canvas');
-                    canvas.width = fw * frameCount;
-                    canvas.height = fh;
+                    canvas.width = vw * frameCount;
+                    canvas.height = vh;
                     const ctx = canvas.getContext('2d')!;
+                    ctx.imageSmoothingEnabled = true;
+                    ctx.imageSmoothingQuality = 'high';
                     const duration = video.duration;
 
                     for (let i = 0; i < frameCount; i++) {
                         video.currentTime = i * duration / frameCount;
                         await new Promise<void>(r => { video.onseeked = () => r(); });
-                        ctx.drawImage(video, 0, 0, video.videoWidth, video.videoHeight, i * fw, 0, fw, fh);
+                        ctx.drawImage(video, i * vw, 0, vw, vh);
                     }
 
                     canvas.toBlob(blob => {
-                        if (blob) resolve(blob);
+                        if (blob) resolve({ blob, frameW: vw, frameH: vh });
                         else reject(new Error('Failed to create sprite sheet'));
                     }, 'image/png');
                 };
@@ -928,8 +932,6 @@ function GalleryTab() {
         const baseName = selectedAsset.name.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 30);
         const promptSlug = animPrompt.trim().replace(/[^a-zA-Z0-9]/g, '_').slice(0, 20);
         const targetPath = `assets/${baseName}_${promptSlug}_${animFrames}f.png`;
-        const fw = selectedAsset.width || 512;
-        const fh = selectedAsset.height || 512;
 
         addConsoleEntry({
             id: crypto.randomUUID(), level: 'log',
@@ -965,8 +967,8 @@ function GalleryTab() {
 
             addConsoleEntry({ id: crypto.randomUUID(), level: 'log', message: `[Asset Studio] Extracting ${animFrames} frames from video...`, timestamp: new Date().toISOString() });
 
-            // Step 2: Extract frames client-side and assemble sprite sheet
-            const spriteBlob = await extractFrames(videoUrl, animFrames, fw, fh);
+            // Step 2: Extract frames client-side (native video resolution)
+            const { blob: spriteBlob, frameW, frameH } = await extractFrames(videoUrl, animFrames);
 
             // Step 3: Upload sprite sheet to server
             const formData = new FormData();
@@ -992,12 +994,12 @@ function GalleryTab() {
                 storage_key: uploadData.storage_key || targetPath,
                 thumbnail_key: null,
                 file_format: 'png',
-                width: fw * animFrames,
-                height: fh,
+                width: frameW * animFrames,
+                height: frameH,
                 metadata: {
                     tags: ['animation'],
                     frames: Array.from({ length: animFrames }, (_, i) => ({
-                        x: i * fw, y: 0, width: fw, height: fh, duration: 1,
+                        x: i * frameW, y: 0, width: frameW, height: frameH, duration: 1,
                     })),
                     frameRate: 12,
                     loop: true,
