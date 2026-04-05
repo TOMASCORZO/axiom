@@ -7,6 +7,8 @@
  */
 
 import { getBasePrompt } from './base';
+import { getSceneFormatReference } from './scene-format';
+import { getGDScriptReference } from './gdscript-reference';
 
 export type GameMode = '2d' | '3d';
 
@@ -47,6 +49,8 @@ export function buildSystemPrompt(
         header,
         getBasePrompt(modeLabel, is3D),
         `## Environment\nMode: ${modeLabel} | Engine: Axiom (WASM) | Scripts: .axs (GDScript 4.x) | Scenes: .scene | Date: ${today}`,
+        getSceneFormatReference(is3D),
+        getGDScriptReference(),
         TOOLS + (is3D ? TOOLS_3D_EXTRA : ''),
         fileList ? `## Project Files\n${fileList}` : '## Project Files\n(empty — start fresh)',
         conversationHistory ? `## Recent Context\n${conversationHistory}` : '',
