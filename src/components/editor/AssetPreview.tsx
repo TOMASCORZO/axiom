@@ -18,13 +18,6 @@ import {
 
 const ZOOM_LEVELS = [0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4, 6, 8];
 
-const ANIM_PRESETS = [
-    { value: 'walk', label: 'Walk' },
-    { value: 'run', label: 'Run' },
-    { value: 'idle', label: 'Idle' },
-    { value: 'attack', label: 'Attack' },
-];
-
 export default function AssetPreview() {
     const {
         assets, project, previewAssetId, setPreviewAssetId,
@@ -39,8 +32,8 @@ export default function AssetPreview() {
     const [actionError, setActionError] = useState('');
 
     // Animate options
-    const [animPrompt, setAnimPrompt] = useState('walk cycle');
-    const [animFrames, setAnimFrames] = useState(4);
+    const [animPrompt, setAnimPrompt] = useState('');
+    const [animFrames, setAnimFrames] = useState(6);
 
     // Img2Img options
     const [img2imgPrompt, setImg2imgPrompt] = useState('');
@@ -60,9 +53,42 @@ export default function AssetPreview() {
     const goPrev = () => { if (hasPrev) setPreviewAssetId(assets[currentIdx - 1].id); };
     const goNext = () => { if (hasNext) setPreviewAssetId(assets[currentIdx + 1].id); };
 
+    // ── Extract frames from video using <video> + <canvas> ──
+    const extractFrames = useCallback(async (videoUrl: string, frameCount: number, fw: number, fh: number): Promise<Blob> => {
+        const videoRes = await fetch(videoUrl);
+        const videoBlob = await videoRes.blob();
+        const localUrl = URL.createObjectURL(videoBlob);
+        try {
+            return await new Promise<Blob>((resolve, reject) => {
+                const video = document.createElement('video');
+                video.muted = true;
+                video.playsInline = true;
+                video.src = localUrl;
+                video.onloadedmetadata = async () => {
+                    const canvas = document.createElement('canvas');
+                    canvas.width = fw * frameCount;
+                    canvas.height = fh;
+                    const ctx = canvas.getContext('2d')!;
+                    const duration = video.duration;
+                    for (let i = 0; i < frameCount; i++) {
+                        video.currentTime = i * duration / frameCount;
+                        await new Promise<void>(r => { video.onseeked = () => r(); });
+                        ctx.drawImage(video, 0, 0, video.videoWidth, video.videoHeight, i * fw, 0, fw, fh);
+                    }
+                    canvas.toBlob(blob => {
+                        if (blob) resolve(blob);
+                        else reject(new Error('Failed to create sprite sheet'));
+                    }, 'image/png');
+                };
+                video.onerror = () => reject(new Error('Failed to load video'));
+                video.load();
+            });
+        } finally { URL.revokeObjectURL(localUrl); }
+    }, []);
+
     // ── Animate handler ──
     const handleAnimate = async () => {
-        if (!asset?.storage_key || !project?.id) return;
+        if (!asset?.storage_key || !project?.id || !animPrompt.trim()) return;
         setActionBusy(true);
         setActionError('');
         setAssetGenerating(true);
@@ -71,48 +97,71 @@ export default function AssetPreview() {
         const baseName = asset.name.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 30);
         const promptSlug = animPrompt.trim().replace(/[^a-zA-Z0-9]/g, '_').slice(0, 20);
         const targetPath = `assets/${baseName}_${promptSlug}_${animFrames}f.png`;
+        const fw = asset.width || 512;
+        const fh = asset.height || 512;
 
-        addConsoleEntry({ id: crypto.randomUUID(), level: 'log', message: `[Asset Studio] Animating "${asset.name}" → "${animPrompt}" (${animFrames} frames)...`, timestamp: new Date().toISOString() });
+        addConsoleEntry({ id: crypto.randomUUID(), level: 'log', message: `[Asset Studio] Generating animation video for "${asset.name}"...`, timestamp: new Date().toISOString() });
 
         try {
+            // Step 1: Generate video on server
             const res = await fetch('/api/assets/generate', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     project_id: project.id,
-                    prompt: `${asset.generation_prompt || asset.name}, ${animPrompt.trim()}`,
+                    prompt: animPrompt.trim(),
                     asset_type: 'animation',
                     target_path: targetPath,
-                    options: { source_image_url: sourceUrl, frame_count: animFrames, width: asset.width || 512, height: asset.height || 512 },
+                    options: { source_image_url: sourceUrl, model_video: 'kling' },
                 }),
             });
             const data = await res.json();
-            if (res.ok && data.success) {
-                const output = data.output as Record<string, unknown> | undefined;
-                const assetId = crypto.randomUUID();
-                addAsset({
-                    id: assetId, project_id: project.id,
-                    name: `${asset.name} (${animPrompt.trim().slice(0, 20)})`, asset_type: 'sprite_sheet',
-                    storage_key: data.storage_key || targetPath, thumbnail_key: null, file_format: 'png',
-                    width: ((output?.frame_width as number) || 512) * animFrames,
-                    height: (output?.frame_height as number) || 512,
-                    metadata: {
-                        tags: [animPrompt.trim(), 'animation'],
-                        frames: Array.from({ length: animFrames }, (_, i) => ({ x: i * ((output?.frame_width as number) || 512), y: 0, width: (output?.frame_width as number) || 512, height: (output?.frame_height as number) || 512, duration: 1 })),
-                        frameRate: 12, loop: true,
-                    },
-                    generation_prompt: `${asset.name} ${animPrompt.trim()}`,
-                    generation_model: (output?.model_used as string) || null,
-                    size_bytes: 0, created_at: new Date().toISOString(),
-                });
-                setPreviewAssetId(assetId);
-                refreshProjectFiles(project.id);
-                setActiveAction(null);
-                addConsoleEntry({ id: crypto.randomUUID(), level: 'log', message: `[Asset Studio] Animation complete → ${targetPath}`, timestamp: new Date().toISOString() });
-            } else {
-                setActionError(data.error || 'Animation failed');
+            const videoUrl = (data.output as Record<string, unknown> | undefined)?.video_url as string | undefined;
+
+            if (!res.ok || !data.success || !videoUrl) {
+                setActionError(data.error || 'Video generation failed');
+                return;
             }
-        } catch { setActionError('Network error'); }
+
+            addConsoleEntry({ id: crypto.randomUUID(), level: 'log', message: `[Asset Studio] Extracting ${animFrames} frames from video...`, timestamp: new Date().toISOString() });
+
+            // Step 2: Extract frames client-side
+            const spriteBlob = await extractFrames(videoUrl, animFrames, fw, fh);
+
+            // Step 3: Upload sprite sheet
+            const formData = new FormData();
+            formData.append('file', spriteBlob, `${baseName}_spritesheet.png`);
+            formData.append('project_id', project.id);
+            formData.append('target_path', targetPath);
+            const uploadRes = await fetch('/api/assets/upload', { method: 'POST', body: formData });
+            const uploadData = await uploadRes.json();
+
+            if (!uploadRes.ok || !uploadData.success) {
+                setActionError(uploadData.error || 'Sprite sheet upload failed');
+                return;
+            }
+
+            // Step 4: Register asset
+            const assetId = crypto.randomUUID();
+            addAsset({
+                id: assetId, project_id: project.id,
+                name: `${asset.name} (${animPrompt.trim().slice(0, 20)})`, asset_type: 'sprite_sheet',
+                storage_key: uploadData.storage_key || targetPath, thumbnail_key: null, file_format: 'png',
+                width: fw * animFrames, height: fh,
+                metadata: {
+                    tags: ['animation'],
+                    frames: Array.from({ length: animFrames }, (_, i) => ({ x: i * fw, y: 0, width: fw, height: fh, duration: 1 })),
+                    frameRate: 12, loop: true,
+                },
+                generation_prompt: animPrompt.trim(),
+                generation_model: (data.output as Record<string, unknown>)?.model_used as string || null,
+                size_bytes: spriteBlob.size, created_at: new Date().toISOString(),
+            });
+            setPreviewAssetId(assetId);
+            refreshProjectFiles(project.id);
+            setActiveAction(null);
+            addConsoleEntry({ id: crypto.randomUUID(), level: 'log', message: `[Asset Studio] Animation complete → ${targetPath} (${animFrames} frames)`, timestamp: new Date().toISOString() });
+        } catch (err) { setActionError(err instanceof Error ? err.message : 'Animation failed'); }
         finally { setActionBusy(false); setAssetGenerating(false); }
     };
 
@@ -300,20 +349,10 @@ function ActionPanel({ action, busy, error, asset, animPrompt, setAnimPrompt, an
                 <textarea
                     value={animPrompt}
                     onChange={e => setAnimPrompt(e.target.value)}
-                    placeholder="Describe the animation (e.g. 'walk cycle', 'sword slash', 'jumping'...)"
+                    placeholder="Describe the motion (e.g. 'walking forward', 'rocking on waves', 'spinning slowly'...)"
                     className="w-full bg-zinc-900 border border-white/10 rounded px-2 py-1.5 text-[11px] text-zinc-200 placeholder:text-zinc-600 resize-none focus:outline-none focus:border-violet-500/50 transition-colors"
                     rows={2}
                 />
-                {/* Quick presets */}
-                <div className="flex gap-1">
-                    {ANIM_PRESETS.map(t => (
-                        <button key={t.value} onClick={() => setAnimPrompt(t.value + ' cycle')}
-                            className={`flex-1 py-1 rounded text-[10px] transition-colors ${
-                                animPrompt.toLowerCase().startsWith(t.value) ? 'bg-violet-500/20 text-violet-300 border border-violet-500/30' : 'bg-zinc-900 text-zinc-500 border border-transparent hover:text-zinc-300'
-                            }`}
-                        >{t.label}</button>
-                    ))}
-                </div>
                 {/* Frames */}
                 <div className="flex items-center gap-2">
                     <label className="text-[10px] text-zinc-500 whitespace-nowrap">Frames</label>
