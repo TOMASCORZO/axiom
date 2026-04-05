@@ -4,12 +4,6 @@ const nextConfig: NextConfig = {
   // Turbopack config (Next.js 16 uses Turbopack by default)
   turbopack: {},
 
-  // Ensure native binaries are bundled into serverless functions
-  serverExternalPackages: ['ffmpeg-static', 'sharp'],
-  outputFileTracingIncludes: {
-    '/api/assets/generate': ['./node_modules/ffmpeg-static/**/*'],
-  },
-
   // Headers for engine WASM files
   // SharedArrayBuffer requires Cross-Origin-Opener-Policy + Cross-Origin-Embedder-Policy
   async headers() {

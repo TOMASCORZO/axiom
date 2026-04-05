@@ -877,6 +877,47 @@ function GalleryTab() {
 
     const selectedAsset = assets.find(a => a.id === previewAssetId);
 
+    /** Extract N evenly-spaced frames from a video URL using <video> + <canvas> */
+    const extractFrames = useCallback(async (videoUrl: string, frameCount: number, fw: number, fh: number): Promise<Blob> => {
+        // Download video as blob to avoid CORS issues with canvas
+        const videoRes = await fetch(videoUrl);
+        const videoBlob = await videoRes.blob();
+        const localUrl = URL.createObjectURL(videoBlob);
+
+        try {
+            return await new Promise<Blob>((resolve, reject) => {
+                const video = document.createElement('video');
+                video.muted = true;
+                video.playsInline = true;
+                video.src = localUrl;
+
+                video.onloadedmetadata = async () => {
+                    const canvas = document.createElement('canvas');
+                    canvas.width = fw * frameCount;
+                    canvas.height = fh;
+                    const ctx = canvas.getContext('2d')!;
+                    const duration = video.duration;
+
+                    for (let i = 0; i < frameCount; i++) {
+                        video.currentTime = i * duration / frameCount;
+                        await new Promise<void>(r => { video.onseeked = () => r(); });
+                        ctx.drawImage(video, 0, 0, video.videoWidth, video.videoHeight, i * fw, 0, fw, fh);
+                    }
+
+                    canvas.toBlob(blob => {
+                        if (blob) resolve(blob);
+                        else reject(new Error('Failed to create sprite sheet'));
+                    }, 'image/png');
+                };
+
+                video.onerror = () => reject(new Error('Failed to load video'));
+                video.load();
+            });
+        } finally {
+            URL.revokeObjectURL(localUrl);
+        }
+    }, []);
+
     const handleAnimate = async () => {
         if (!selectedAsset?.storage_key || !project?.id || !animPrompt.trim()) return;
         setAnimating(true);
@@ -887,14 +928,17 @@ function GalleryTab() {
         const baseName = selectedAsset.name.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 30);
         const promptSlug = animPrompt.trim().replace(/[^a-zA-Z0-9]/g, '_').slice(0, 20);
         const targetPath = `assets/${baseName}_${promptSlug}_${animFrames}f.png`;
+        const fw = selectedAsset.width || 512;
+        const fh = selectedAsset.height || 512;
 
         addConsoleEntry({
             id: crypto.randomUUID(), level: 'log',
-            message: `[Asset Studio] Animating "${selectedAsset.name}" → "${animPrompt}" (${animFrames} frames)...`,
+            message: `[Asset Studio] Generating animation video for "${selectedAsset.name}"...`,
             timestamp: new Date().toISOString(),
         });
 
         try {
+            // Step 1: Generate video on server
             const res = await fetch('/api/assets/generate', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -905,64 +949,70 @@ function GalleryTab() {
                     target_path: targetPath,
                     options: {
                         source_image_url: sourceUrl,
-                        frame_count: animFrames,
-                        width: selectedAsset.width || 512,
-                        height: selectedAsset.height || 512,
                         model_video: 'kling',
                     },
                 }),
             });
 
             const data = await res.json();
+            const videoUrl = (data.output as Record<string, unknown> | undefined)?.video_url as string | undefined;
 
-            if (res.ok && data.success) {
-                const output = data.output as Record<string, unknown> | undefined;
-                const assetId = crypto.randomUUID();
-                addAsset({
-                    id: assetId,
-                    project_id: project.id,
-                    name: `${selectedAsset.name} (${animPrompt.slice(0, 20)})`,
-                    asset_type: 'sprite_sheet',
-                    storage_key: data.storage_key || targetPath,
-                    thumbnail_key: null,
-                    file_format: 'png',
-                    width: ((output?.frame_width as number) || 512) * animFrames,
-                    height: (output?.frame_height as number) || 512,
-                    metadata: {
-                        tags: ['animation'],
-                        frames: Array.from({ length: animFrames }, (_, i) => ({
-                            x: i * ((output?.frame_width as number) || 512),
-                            y: 0,
-                            width: (output?.frame_width as number) || 512,
-                            height: (output?.frame_height as number) || 512,
-                            duration: 1,
-                        })),
-                        frameRate: 12,
-                        loop: true,
-                    },
-                    generation_prompt: animPrompt.trim(),
-                    generation_model: (output?.model_used as string) || null,
-                    size_bytes: 0,
-                    created_at: new Date().toISOString(),
-                });
-                setPreviewAssetId(assetId);
-                refreshProjectFiles(project.id);
-                setShowAnimPanel(false);
-                addConsoleEntry({
-                    id: crypto.randomUUID(), level: 'log',
-                    message: `[Asset Studio] Animation complete → ${targetPath} (${animFrames} frames)`,
-                    timestamp: new Date().toISOString(),
-                });
-            } else {
-                setAnimError(data.error || 'Animation failed');
-                addConsoleEntry({
-                    id: crypto.randomUUID(), level: 'error',
-                    message: `[Asset Studio] Animation failed: ${data.error}`,
-                    timestamp: new Date().toISOString(),
-                });
+            if (!res.ok || !data.success || !videoUrl) {
+                setAnimError(data.error || 'Video generation failed');
+                addConsoleEntry({ id: crypto.randomUUID(), level: 'error', message: `[Asset Studio] Video generation failed: ${data.error}`, timestamp: new Date().toISOString() });
+                return;
             }
-        } catch {
-            setAnimError('Network error');
+
+            addConsoleEntry({ id: crypto.randomUUID(), level: 'log', message: `[Asset Studio] Extracting ${animFrames} frames from video...`, timestamp: new Date().toISOString() });
+
+            // Step 2: Extract frames client-side and assemble sprite sheet
+            const spriteBlob = await extractFrames(videoUrl, animFrames, fw, fh);
+
+            // Step 3: Upload sprite sheet to server
+            const formData = new FormData();
+            formData.append('file', spriteBlob, `${baseName}_spritesheet.png`);
+            formData.append('project_id', project.id);
+            formData.append('target_path', targetPath);
+
+            const uploadRes = await fetch('/api/assets/upload', { method: 'POST', body: formData });
+            const uploadData = await uploadRes.json();
+
+            if (!uploadRes.ok || !uploadData.success) {
+                setAnimError(uploadData.error || 'Sprite sheet upload failed');
+                return;
+            }
+
+            // Step 4: Register asset in store
+            const assetId = crypto.randomUUID();
+            addAsset({
+                id: assetId,
+                project_id: project.id,
+                name: `${selectedAsset.name} (${animPrompt.slice(0, 20)})`,
+                asset_type: 'sprite_sheet',
+                storage_key: uploadData.storage_key || targetPath,
+                thumbnail_key: null,
+                file_format: 'png',
+                width: fw * animFrames,
+                height: fh,
+                metadata: {
+                    tags: ['animation'],
+                    frames: Array.from({ length: animFrames }, (_, i) => ({
+                        x: i * fw, y: 0, width: fw, height: fh, duration: 1,
+                    })),
+                    frameRate: 12,
+                    loop: true,
+                },
+                generation_prompt: animPrompt.trim(),
+                generation_model: (data.output as Record<string, unknown>)?.model_used as string || null,
+                size_bytes: spriteBlob.size,
+                created_at: new Date().toISOString(),
+            });
+            setPreviewAssetId(assetId);
+            refreshProjectFiles(project.id);
+            setShowAnimPanel(false);
+            addConsoleEntry({ id: crypto.randomUUID(), level: 'log', message: `[Asset Studio] Animation complete → ${targetPath} (${animFrames} frames)`, timestamp: new Date().toISOString() });
+        } catch (err) {
+            setAnimError(err instanceof Error ? err.message : 'Animation failed');
         } finally {
             setAnimating(false);
             setAssetGenerating(false);

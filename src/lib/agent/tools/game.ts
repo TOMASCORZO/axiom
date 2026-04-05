@@ -432,15 +432,12 @@ registerTool({
 
 registerTool({
     name: 'generate_animation',
-    description: 'Generate animation from a source image using image-to-video AI, then extract frames into a sprite sheet. Works for any subject or motion.',
+    description: 'Generate animation from a source image using image-to-video AI. Returns a video URL — frame extraction into sprite sheets is handled client-side.',
     parameters: {
         type: 'object',
         properties: {
             prompt: { type: 'string', description: 'Description of the desired motion (e.g. "tractor driving forward", "ship rocking on ocean waves", "character running")' },
             source_image_url: { type: 'string', description: 'Public URL of the source static image to animate' },
-            frame_count: { type: 'integer', default: 6, description: 'Number of frames to extract from the video (2–12)' },
-            width: { type: 'integer', default: 512 },
-            height: { type: 'integer', default: 512 },
             model_video: { type: 'string', enum: ['kling', 'minimax', 'wan'], description: 'Video model to use (default: kling)' },
             provider: { type: 'string' },
             target_path: { type: 'string' },
@@ -448,16 +445,11 @@ registerTool({
         required: ['prompt', 'source_image_url', 'target_path'],
     },
     access: ['build'],
-    execute: async (ctx, input) => {
+    execute: async (_ctx, input) => {
         const start = Date.now();
         const prompt = input.prompt as string;
         const sourceImageUrl = input.source_image_url as string;
-        const frameCount = Math.min(Math.max((input.frame_count as number) || 6, 2), 12);
-        const targetPath = input.target_path as string;
-        const width = (input.width as number) || 512;
-        const height = (input.height as number) || 512;
 
-        // 1. Generate video from source image
         const result = await generateAnimation({
             sourceImageUrl,
             prompt,
@@ -469,109 +461,17 @@ registerTool({
             return { callId: '', success: false, error: result.error || 'Video generation failed', output: { message: result.error }, filesModified: [], duration_ms: Date.now() - start };
         }
 
-        // 2. Download video and extract frames with ffmpeg
-        const { execSync } = await import('child_process');
-        const { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } = await import('fs');
-        const { join } = await import('path');
-        const os = await import('os');
-
-        const videoBuffer = await downloadResult(result.videoUrl);
-        const tmpDir = mkdtempSync(join(os.tmpdir(), 'axiom-anim-'));
-
-        try {
-            const videoPath = join(tmpDir, 'input.mp4');
-            writeFileSync(videoPath, Buffer.from(videoBuffer));
-
-            // Resolve ffmpeg binary: try ffmpeg-static first (bundled), fall back to system
-            let ffmpegBin: string | null = null;
-            try {
-                const mod = await import('ffmpeg-static');
-                const resolved = (mod.default ?? mod) as string;
-                if (typeof resolved === 'string') {
-                    // Verify the binary actually exists
-                    const { existsSync } = await import('fs');
-                    if (existsSync(resolved)) ffmpegBin = resolved;
-                }
-            } catch { /* ffmpeg-static not available */ }
-
-            if (!ffmpegBin) {
-                try {
-                    execSync('which ffmpeg', { stdio: 'pipe' });
-                    ffmpegBin = 'ffmpeg';
-                } catch { /* system ffmpeg not available either */ }
-            }
-
-            if (!ffmpegBin) {
-                return { callId: '', success: false, error: 'ffmpeg not found. Install ffmpeg on your system or ensure ffmpeg-static is properly bundled.', output: { message: 'ffmpeg binary not available' }, filesModified: [], duration_ms: Date.now() - start };
-            }
-
-            execSync(`"${ffmpegBin}" -i "${videoPath}" "${join(tmpDir, 'frame_%04d.png')}" -y -loglevel error`, { stdio: 'pipe' });
-
-            const allFrameFiles = readdirSync(tmpDir)
-                .filter((f: string) => f.startsWith('frame_') && f.endsWith('.png'))
-                .sort();
-
-            if (allFrameFiles.length === 0) {
-                return { callId: '', success: false, error: 'No frames extracted from video', output: { message: 'ffmpeg extracted 0 frames' }, filesModified: [], duration_ms: Date.now() - start };
-            }
-
-            // Pick N evenly-spaced frames
-            const totalFrames = allFrameFiles.length;
-            const selectedBuffers: Buffer[] = [];
-            for (let i = 0; i < frameCount; i++) {
-                const idx = Math.min(
-                    Math.round(i * (totalFrames - 1) / Math.max(frameCount - 1, 1)),
-                    totalFrames - 1,
-                );
-                selectedBuffers.push(readFileSync(join(tmpDir, allFrameFiles[idx])));
-            }
-
-            // 3. Assemble into horizontal sprite sheet
-            const sharp = (await import('sharp')).default;
-
-            const resizedFrames = await Promise.all(
-                selectedBuffers.map(buf =>
-                    sharp(buf).resize(width, height, { fit: 'fill' }).ensureAlpha().raw().toBuffer()
-                )
-            );
-
-            const stripWidth = width * frameCount;
-            const composites = resizedFrames.map((buf, i) => ({
-                input: buf,
-                raw: { width, height, channels: 4 as const },
-                left: i * width,
-                top: 0,
-            }));
-
-            const stripBuffer = await sharp({
-                create: { width: stripWidth, height, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } },
-            })
-                .composite(composites)
-                .png()
-                .toBuffer();
-
-            const ab = stripBuffer.buffer.slice(stripBuffer.byteOffset, stripBuffer.byteOffset + stripBuffer.byteLength) as ArrayBuffer;
-            const sk = await uploadBinaryAsset(ctx, targetPath, ab, 'image/png');
-
-            return {
-                callId: '', success: true,
-                output: {
-                    message: `Animation sprite sheet at ${targetPath} (${frameCount} frames from video, ${result.model}, ~$${result.cost.toFixed(3)})`,
-                    path: targetPath,
-                    storage_key: sk,
-                    frame_count: frameCount,
-                    frame_width: width,
-                    frame_height: height,
-                    total_video_frames: totalFrames,
-                    model_used: result.model,
-                    cost: result.cost,
-                },
-                filesModified: [targetPath],
-                duration_ms: Date.now() - start,
-            };
-        } finally {
-            rmSync(tmpDir, { recursive: true, force: true });
-        }
+        return {
+            callId: '', success: true,
+            output: {
+                message: `Animation video generated (${result.model}, ~$${result.cost.toFixed(3)})`,
+                video_url: result.videoUrl,
+                model_used: result.model,
+                cost: result.cost,
+            },
+            filesModified: [],
+            duration_ms: Date.now() - start,
+        };
     },
 });
 
