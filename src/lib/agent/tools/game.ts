@@ -482,16 +482,27 @@ registerTool({
             const videoPath = join(tmpDir, 'input.mp4');
             writeFileSync(videoPath, Buffer.from(videoBuffer));
 
-            // Resolve ffmpeg binary: prefer system ffmpeg, fall back to ffmpeg-static
-            let ffmpegBin = 'ffmpeg';
+            // Resolve ffmpeg binary: try ffmpeg-static first (bundled), fall back to system
+            let ffmpegBin: string | null = null;
             try {
-                execSync('which ffmpeg', { stdio: 'pipe' });
-            } catch {
+                const mod = await import('ffmpeg-static');
+                const resolved = (mod.default ?? mod) as string;
+                if (typeof resolved === 'string') {
+                    // Verify the binary actually exists
+                    const { existsSync } = await import('fs');
+                    if (existsSync(resolved)) ffmpegBin = resolved;
+                }
+            } catch { /* ffmpeg-static not available */ }
+
+            if (!ffmpegBin) {
                 try {
-                    const mod = await import('ffmpeg-static');
-                    const resolved = mod.default ?? mod;
-                    if (typeof resolved === 'string') ffmpegBin = resolved;
-                } catch { /* use system ffmpeg as last resort */ }
+                    execSync('which ffmpeg', { stdio: 'pipe' });
+                    ffmpegBin = 'ffmpeg';
+                } catch { /* system ffmpeg not available either */ }
+            }
+
+            if (!ffmpegBin) {
+                return { callId: '', success: false, error: 'ffmpeg not found. Install ffmpeg on your system or ensure ffmpeg-static is properly bundled.', output: { message: 'ffmpeg binary not available' }, filesModified: [], duration_ms: Date.now() - start };
             }
 
             execSync(`"${ffmpegBin}" -i "${videoPath}" "${join(tmpDir, 'frame_%04d.png')}" -y -loglevel error`, { stdio: 'pipe' });
