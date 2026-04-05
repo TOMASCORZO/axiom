@@ -866,36 +866,31 @@ function FreeAssetSearch() {
 
 // ── Gallery Tab ──────────────────────────────────────────────────────
 
-const ANIM_TYPES = [
-    { value: 'walk', label: 'Walk' },
-    { value: 'run', label: 'Run' },
-    { value: 'idle', label: 'Idle' },
-    { value: 'attack', label: 'Attack' },
-];
 
 function GalleryTab() {
     const { assets, project, previewAssetId, setPreviewAssetId, addAsset, removeAsset, addConsoleEntry, refreshProjectFiles, setAssetGenerating, assetGenerating } = useEditorStore();
     const [animating, setAnimating] = useState(false);
-    const [animFrames, setAnimFrames] = useState(4);
-    const [animType, setAnimType] = useState('walk');
+    const [animFrames, setAnimFrames] = useState(6);
+    const [animPrompt, setAnimPrompt] = useState('');
     const [animError, setAnimError] = useState('');
     const [showAnimPanel, setShowAnimPanel] = useState(false);
 
     const selectedAsset = assets.find(a => a.id === previewAssetId);
 
     const handleAnimate = async () => {
-        if (!selectedAsset?.storage_key || !project?.id) return;
+        if (!selectedAsset?.storage_key || !project?.id || !animPrompt.trim()) return;
         setAnimating(true);
         setAnimError('');
         setAssetGenerating(true);
 
         const sourceUrl = `${window.location.origin}/api/assets/serve?key=${encodeURIComponent(selectedAsset.storage_key)}`;
         const baseName = selectedAsset.name.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 30);
-        const targetPath = `assets/${baseName}_${animType}_${animFrames}f.png`;
+        const promptSlug = animPrompt.trim().replace(/[^a-zA-Z0-9]/g, '_').slice(0, 20);
+        const targetPath = `assets/${baseName}_${promptSlug}_${animFrames}f.png`;
 
         addConsoleEntry({
             id: crypto.randomUUID(), level: 'log',
-            message: `[Asset Studio] Animating "${selectedAsset.name}" → ${animType} (${animFrames} frames)...`,
+            message: `[Asset Studio] Animating "${selectedAsset.name}" → "${animPrompt}" (${animFrames} frames)...`,
             timestamp: new Date().toISOString(),
         });
 
@@ -905,7 +900,7 @@ function GalleryTab() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     project_id: project.id,
-                    prompt: `${selectedAsset.generation_prompt || selectedAsset.name}, ${animType} animation cycle`,
+                    prompt: animPrompt.trim(),
                     asset_type: 'animation',
                     target_path: targetPath,
                     options: {
@@ -913,6 +908,7 @@ function GalleryTab() {
                         frame_count: animFrames,
                         width: selectedAsset.width || 512,
                         height: selectedAsset.height || 512,
+                        model_video: 'kling',
                     },
                 }),
             });
@@ -925,7 +921,7 @@ function GalleryTab() {
                 addAsset({
                     id: assetId,
                     project_id: project.id,
-                    name: `${selectedAsset.name} (${animType})`,
+                    name: `${selectedAsset.name} (${animPrompt.slice(0, 20)})`,
                     asset_type: 'sprite_sheet',
                     storage_key: data.storage_key || targetPath,
                     thumbnail_key: null,
@@ -933,7 +929,7 @@ function GalleryTab() {
                     width: ((output?.frame_width as number) || 512) * animFrames,
                     height: (output?.frame_height as number) || 512,
                     metadata: {
-                        tags: [animType, 'animation'],
+                        tags: ['animation'],
                         frames: Array.from({ length: animFrames }, (_, i) => ({
                             x: i * ((output?.frame_width as number) || 512),
                             y: 0,
@@ -944,7 +940,7 @@ function GalleryTab() {
                         frameRate: 12,
                         loop: true,
                     },
-                    generation_prompt: `${selectedAsset.name} ${animType} animation`,
+                    generation_prompt: animPrompt.trim(),
                     generation_model: (output?.model_used as string) || null,
                     size_bytes: 0,
                     created_at: new Date().toISOString(),
@@ -1029,21 +1025,13 @@ function GalleryTab() {
                         <span className="text-[10px] uppercase tracking-wider text-zinc-500">Animate &quot;{selectedAsset.name.slice(0, 20)}&quot;</span>
                         <button onClick={() => setShowAnimPanel(false)} className="text-zinc-500 hover:text-zinc-300"><X size={12} /></button>
                     </div>
-                    <div className="flex gap-1.5">
-                        {ANIM_TYPES.map(t => (
-                            <button
-                                key={t.value}
-                                onClick={() => setAnimType(t.value)}
-                                className={`flex-1 py-1 rounded text-xs transition-colors ${
-                                    animType === t.value
-                                        ? 'bg-violet-500/20 text-violet-300 border border-violet-500/30'
-                                        : 'bg-zinc-800 text-zinc-500 border border-transparent hover:text-zinc-300'
-                                }`}
-                            >
-                                {t.label}
-                            </button>
-                        ))}
-                    </div>
+                    <input
+                        type="text"
+                        value={animPrompt}
+                        onChange={e => setAnimPrompt(e.target.value)}
+                        placeholder="Describe the motion (e.g. walking forward, rocking on waves...)"
+                        className="w-full px-2 py-1.5 rounded bg-zinc-800 border border-white/5 text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-violet-500/40"
+                    />
                     <div className="flex items-center gap-2">
                         <label className="text-[10px] text-zinc-500 whitespace-nowrap">Frames</label>
                         <input
@@ -1056,7 +1044,7 @@ function GalleryTab() {
                     {animError && <p className="text-[10px] text-red-400">{animError}</p>}
                     <button
                         onClick={handleAnimate}
-                        disabled={animating || assetGenerating}
+                        disabled={animating || assetGenerating || !animPrompt.trim()}
                         className="w-full py-1.5 rounded bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white text-xs font-medium disabled:opacity-40 hover:brightness-110 transition-all flex items-center justify-center gap-1.5"
                     >
                         {animating ? (

@@ -97,6 +97,9 @@ export const PRICING = {
         'flux-dev':      { label: 'Flux Dev',       cost: 0.025,  unit: 'per megapixel', speed: 'Medium' },
         'trellis':       { label: 'Trellis',        cost: 0.02,   unit: 'per model',     speed: 'Fast' },
         'hunyuan3d':     { label: 'Hunyuan3D v3',   cost: 0.375,  unit: 'per model',     speed: 'Slow' },
+        'kling':         { label: 'Kling v1',       cost: 0.065,  unit: 'per video',     speed: 'Medium' },
+        'minimax':       { label: 'Minimax',        cost: 0.04,   unit: 'per video',     speed: 'Fast' },
+        'wan':           { label: 'Wan 2.1',        cost: 0.04,   unit: 'per video',     speed: 'Medium' },
     },
     replicate: {
         'sdxl':          { label: 'SDXL',           cost: 0.005,  unit: 'per image',     speed: 'Fast' },
@@ -104,6 +107,9 @@ export const PRICING = {
         'flux-dev':      { label: 'Flux Dev',       cost: 0.025,  unit: 'per image',     speed: 'Medium' },
         'trellis':       { label: 'Trellis',        cost: 0.02,   unit: 'per model',     speed: 'Fast' },
         'hunyuan3d':     { label: 'Hunyuan3D v2',   cost: 0.18,   unit: 'per model',     speed: 'Slow' },
+        'kling':         { label: 'Wan 2.1',        cost: 0.05,   unit: 'per video',     speed: 'Medium' },
+        'minimax':       { label: 'Minimax',        cost: 0.05,   unit: 'per video',     speed: 'Fast' },
+        'wan':           { label: 'Wan 2.1',        cost: 0.05,   unit: 'per video',     speed: 'Medium' },
     },
 } as const;
 
@@ -644,159 +650,128 @@ async function img2imgReplicate(opts: Img2ImgOptions, model: Model2D): Promise<G
 }
 
 // =====================================================================
-// ANIMATION (image → sprite sheet via per-frame img2img)
+// ANIMATION (image → video → frame extraction)
 // =====================================================================
+
+export type ModelVideo = 'kling' | 'minimax' | 'wan';
 
 export interface AnimateOptions {
     sourceImageUrl: string;    // URL of the source static image
-    prompt: string;            // Base description of the character/object
-    frameCount?: number;       // Number of frames (default 4)
-    style?: string;
-    model?: Model2D;
+    prompt: string;            // Description of desired motion (e.g. "tractor driving", "ship rocking on waves")
+    model?: ModelVideo;
     provider?: Provider;
-    width?: number;
-    height?: number;
-    format?: 'png' | 'jpeg';
+    duration?: number;         // Video duration in seconds (default 5)
 }
 
 export interface AnimationResult {
     success: boolean;
-    frameUrls: string[];       // URLs for each individual frame
+    videoUrl?: string;         // URL of the generated video (mp4)
     model: string;
     provider: Provider;
     cost: number;
     error?: string;
 }
 
-/** Animation frame prompt templates — each describes a phase in a cycle */
-const WALK_CYCLE = [
-    'standing neutral pose, feet together, arms at sides',
-    'left foot stepping forward, right arm forward, weight shifting',
-    'full stride, left foot far forward, right foot back, mid-walk',
-    'right foot stepping forward, left arm forward, weight shifting',
-    'full stride, right foot far forward, left foot back, mid-walk',
-    'returning to neutral, feet coming together',
-];
-
-const IDLE_CYCLE = [
-    'neutral standing pose, relaxed',
-    'slight breathing motion, subtle chest rise',
-    'gentle sway, very slight lean',
-    'subtle breathing motion, chest lowering',
-];
-
-const ATTACK_CYCLE = [
-    'preparing to attack, winding up, weight shifting back',
-    'mid-swing, full extension, dynamic motion blur',
-    'follow-through, weapon or fist extended, impact frame',
-    'recovering to neutral, returning to stance',
-];
-
-const RUN_CYCLE = [
-    'right foot pushing off ground, left knee high, arms pumping',
-    'airborne phase, both feet off ground, leaning forward',
-    'left foot landing, right knee driving forward',
-    'right foot planting, full stride, left leg extending back',
-    'left foot pushing off, right knee rising',
-    'airborne phase, opposite leg configuration',
-];
-
-const FRAME_TEMPLATES: Record<string, string[]> = {
-    walk: WALK_CYCLE,
-    idle: IDLE_CYCLE,
-    attack: ATTACK_CYCLE,
-    run: RUN_CYCLE,
+const FAL_VIDEO_MAP: Record<ModelVideo, string> = {
+    'kling':   'fal-ai/kling-video/v1/standard/image-to-video',
+    'minimax': 'fal-ai/minimax-video/image-to-video',
+    'wan':     'fal-ai/wan/v2.1/image-to-video',
 };
 
-function getFramePrompts(basePrompt: string, frameCount: number, animType?: string): string[] {
-    const cycle = animType ? FRAME_TEMPLATES[animType] : undefined;
-    const prompts: string[] = [];
-
-    if (cycle) {
-        // Use predefined cycle phases
-        for (let i = 0; i < frameCount; i++) {
-            const phaseIdx = Math.floor((i / frameCount) * cycle.length) % cycle.length;
-            prompts.push(`${basePrompt}, ${cycle[phaseIdx]}, animation frame ${i + 1} of ${frameCount}, consistent character design, same style and proportions across all frames`);
-        }
-    } else {
-        // Custom animation — distribute progress across frames
-        for (let i = 0; i < frameCount; i++) {
-            const progress = i / (frameCount - 1 || 1);
-            const phase = progress < 0.25 ? 'beginning of motion'
-                : progress < 0.5 ? 'early phase of motion'
-                : progress < 0.75 ? 'peak of motion'
-                : 'returning to start';
-            prompts.push(`${basePrompt}, ${phase}, frame ${i + 1} of ${frameCount}, smooth animation sequence, consistent character design, same style and proportions across all frames`);
-        }
-    }
-
-    return prompts;
-}
+const REPLICATE_VIDEO_MAP: Record<ModelVideo, string> = {
+    'kling':   'wavespeedai/wan-2.1-i2v-480p',   // no Kling on Replicate, fallback to Wan
+    'minimax': 'minimax/video-01-live/image-to-video',
+    'wan':     'wavespeedai/wan-2.1-i2v-480p',
+};
 
 /**
- * Generate animation frames from a source image.
- * Calls img2img once per frame with varying prompts describing each animation phase.
- * Returns an array of image URLs (one per frame).
+ * Generate a short video from a source image using an image-to-video model.
+ * Returns a video URL — frame extraction into sprite sheets is handled by the caller.
  */
 export async function generateAnimation(opts: AnimateOptions): Promise<AnimationResult> {
-    const frameCount = opts.frameCount ?? 4;
     const provider = pickProvider(opts.provider);
-    const model = opts.model ?? 'flux-schnell';
+    const model = opts.model ?? 'kling';
 
-    // Detect animation type from prompt — use preset cycle if it matches, otherwise custom
-    const lowerPrompt = opts.prompt.toLowerCase();
-    let animType: string | undefined;
-    if (/\bwalk\b/.test(lowerPrompt)) animType = 'walk';
-    else if (/\b(run|sprint|dash)\b/.test(lowerPrompt)) animType = 'run';
-    else if (/\b(idle|breath|stand)\b/.test(lowerPrompt)) animType = 'idle';
-    else if (/\b(attack|slash|swing|hit|strike|punch|kick)\b/.test(lowerPrompt)) animType = 'attack';
-    // else: custom prompt — no preset
+    if (provider === 'fal') return generateAnimationFal(opts, model);
+    return generateAnimationReplicate(opts, model);
+}
 
-    const framePrompts = getFramePrompts(opts.prompt, frameCount, animType);
+// ── fal.ai Image-to-Video ───────────────────────────────────────────
 
-    const frameUrls: string[] = [];
-    let totalCost = 0;
-    let lastModel = model as string;
+async function generateAnimationFal(opts: AnimateOptions, model: ModelVideo): Promise<AnimationResult> {
+    const falModel = FAL_VIDEO_MAP[model];
+    const duration = opts.duration ?? 5;
 
-    // Generate frames sequentially (each uses the source image as reference)
-    // Use decreasing strength: first frame close to original, later frames allow more deviation
-    for (let i = 0; i < frameCount; i++) {
-        // Lower strength keeps frames consistent with source
-        const strength = 0.45 + (i / frameCount) * 0.15; // 0.45–0.60
+    try {
+        const input: Record<string, unknown> = {
+            image_url: opts.sourceImageUrl,
+            prompt: opts.prompt,
+        };
 
-        const result = await img2img({
-            imageUrl: opts.sourceImageUrl,
-            prompt: framePrompts[i],
-            model,
-            provider,
-            strength,
-            width: opts.width,
-            height: opts.height,
-            format: opts.format ?? 'png',
-            style: opts.style,
-        });
-
-        if (!result.success || !result.imageUrl) {
-            return {
-                success: false,
-                frameUrls,
-                model: result.model,
-                provider,
-                cost: totalCost,
-                error: `Frame ${i + 1}/${frameCount} failed: ${result.error}`,
-            };
+        if (model === 'kling') {
+            input.duration = String(duration) as '5' | '10';
+        } else if (model === 'minimax') {
+            input.prompt_optimizer = true;
         }
 
-        frameUrls.push(result.imageUrl);
-        totalCost += result.cost;
-        lastModel = result.model;
+        const result = await fal.subscribe(falModel, { input });
+        const data = result.data as { video?: { url: string } };
+
+        if (!data.video?.url) {
+            return { success: false, model: falModel, provider: 'fal', cost: 0, error: 'No video returned' };
+        }
+
+        const costs: Record<ModelVideo, number> = { kling: 0.065, minimax: 0.04, wan: 0.04 };
+        return {
+            success: true,
+            videoUrl: data.video.url,
+            model: falModel,
+            provider: 'fal',
+            cost: costs[model],
+        };
+    } catch (err) {
+        return { success: false, model: falModel, provider: 'fal', cost: 0, error: err instanceof Error ? err.message : 'Video generation failed' };
+    }
+}
+
+// ── Replicate Image-to-Video ────────────────────────────────────────
+
+async function generateAnimationReplicate(opts: AnimateOptions, model: ModelVideo): Promise<AnimationResult> {
+    if (!replicate) {
+        return { success: false, model, provider: 'replicate', cost: 0, error: 'REPLICATE_API_TOKEN not set' };
     }
 
-    return {
-        success: true,
-        frameUrls,
-        model: lastModel,
-        provider,
-        cost: totalCost,
-    };
+    const repModel = REPLICATE_VIDEO_MAP[model];
+
+    try {
+        const output = await replicate.run(repModel as `${string}/${string}`, {
+            input: {
+                image: opts.sourceImageUrl,
+                prompt: opts.prompt,
+            },
+        });
+
+        let videoUrl: string | null = null;
+        const raw = output as unknown;
+        if (typeof raw === 'string' && raw.startsWith('http')) {
+            videoUrl = raw;
+        } else if (raw && typeof raw === 'object') {
+            const str = String(raw);
+            if (str.startsWith('http')) videoUrl = str;
+        }
+
+        if (!videoUrl) {
+            return { success: false, model: repModel, provider: 'replicate', cost: 0, error: 'No video URL in response' };
+        }
+
+        return {
+            success: true,
+            videoUrl,
+            model: repModel,
+            provider: 'replicate',
+            cost: 0.05,
+        };
+    } catch (err) {
+        return { success: false, model: repModel, provider: 'replicate', cost: 0, error: err instanceof Error ? err.message : 'Replicate video generation failed' };
+    }
 }
