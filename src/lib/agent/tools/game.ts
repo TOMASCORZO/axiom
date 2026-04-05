@@ -482,8 +482,18 @@ registerTool({
             const videoPath = join(tmpDir, 'input.mp4');
             writeFileSync(videoPath, Buffer.from(videoBuffer));
 
-            // Extract all frames from video
-            const ffmpegBin = (await import('ffmpeg-static')).default;
+            // Resolve ffmpeg binary: prefer system ffmpeg, fall back to ffmpeg-static
+            let ffmpegBin = 'ffmpeg';
+            try {
+                execSync('which ffmpeg', { stdio: 'pipe' });
+            } catch {
+                try {
+                    const mod = await import('ffmpeg-static');
+                    const resolved = mod.default ?? mod;
+                    if (typeof resolved === 'string') ffmpegBin = resolved;
+                } catch { /* use system ffmpeg as last resort */ }
+            }
+
             execSync(`"${ffmpegBin}" -i "${videoPath}" "${join(tmpDir, 'frame_%04d.png')}" -y -loglevel error`, { stdio: 'pipe' });
 
             const allFrameFiles = readdirSync(tmpDir)
