@@ -107,7 +107,7 @@ export const PRICING = {
         'flux-dev':      { label: 'Flux Dev',       cost: 0.025,  unit: 'per image',     speed: 'Medium' },
         'trellis':       { label: 'Trellis',        cost: 0.02,   unit: 'per model',     speed: 'Fast' },
         'hunyuan3d':     { label: 'Hunyuan3D v2',   cost: 0.18,   unit: 'per model',     speed: 'Slow' },
-        'kling':         { label: 'Wan 2.1',        cost: 0.05,   unit: 'per video',     speed: 'Medium' },
+        'kling':         { label: 'Kling v2.6',     cost: 0.05,   unit: 'per video',     speed: 'Medium' },
         'minimax':       { label: 'Minimax',        cost: 0.05,   unit: 'per video',     speed: 'Fast' },
         'wan':           { label: 'Wan 2.1',        cost: 0.05,   unit: 'per video',     speed: 'Medium' },
     },
@@ -503,24 +503,51 @@ export async function downloadResult(url: string): Promise<ArrayBuffer> {
 // ── Background Removal ──────────────────────────────────────────────
 
 /**
- * Remove background from an image using fal.ai BiRefNet.
- * Accepts a public URL or a raw buffer (which gets uploaded to fal storage first).
- * Returns a transparent PNG URL.
+ * Remove background from an image using BiRefNet.
+ * Accepts a public URL or a raw buffer.
+ * Uses Replicate by default, falls back to fal.ai.
  */
-export async function removeBackground(input: string | ArrayBuffer): Promise<{ success: boolean; imageUrl?: string; error?: string }> {
-    if (!falKey) {
-        return { success: false, error: 'FAL_KEY required for background removal' };
-    }
+export async function removeBackground(input: string | ArrayBuffer, provider?: Provider): Promise<{ success: boolean; imageUrl?: string; error?: string }> {
+    const p = provider ?? pickProvider();
+
     try {
+        // Resolve input to a public URL
         let imageUrl: string;
         if (typeof input === 'string') {
             imageUrl = input;
-        } else {
-            // Upload buffer to fal storage using the already-configured client
+        } else if (p === 'fal' && falKey) {
             const blob = new Blob([input], { type: 'image/png' });
             imageUrl = await fal.storage.upload(blob);
+        } else if (replicate) {
+            // Replicate accepts data URIs directly
+            const buf = Buffer.from(input);
+            imageUrl = `data:image/png;base64,${buf.toString('base64')}`;
+        } else {
+            return { success: false, error: 'No provider available for background removal' };
         }
 
+        if (p === 'replicate' && replicate) {
+            const output = await replicate.run('lucataco/remove-bg:95fcc2a26d3899cd6c2691c900f7aefd65523a007f7fceeea83016e1e25e9a37' as `${string}/${string}`, {
+                input: { image: imageUrl },
+            });
+            const raw = output as unknown;
+            let resultUrl: string | null = null;
+            if (typeof raw === 'string' && raw.startsWith('http')) {
+                resultUrl = raw;
+            } else if (raw && typeof raw === 'object') {
+                const str = String(raw);
+                if (str.startsWith('http')) resultUrl = str;
+            }
+            if (!resultUrl) {
+                return { success: false, error: 'No image returned from Replicate background removal' };
+            }
+            return { success: true, imageUrl: resultUrl };
+        }
+
+        // fal.ai path
+        if (!falKey) {
+            return { success: false, error: 'FAL_KEY required for fal.ai background removal' };
+        }
         const result = await fal.subscribe('fal-ai/birefnet', {
             input: { image_url: imageUrl },
         });
@@ -713,7 +740,7 @@ const FAL_VIDEO_MAP: Record<ModelVideo, string> = {
 };
 
 const REPLICATE_VIDEO_MAP: Record<ModelVideo, string> = {
-    'kling':   'wavespeedai/wan-2.1-i2v-480p',   // no Kling on Replicate, fallback to Wan
+    'kling':   'kwaivgi/kling-v2.6',
     'minimax': 'minimax/video-01-live/image-to-video',
     'wan':     'wavespeedai/wan-2.1-i2v-480p',
 };
@@ -782,12 +809,16 @@ async function generateAnimationReplicate(opts: AnimateOptions, model: ModelVide
     const repModel = REPLICATE_VIDEO_MAP[model];
 
     try {
-        const output = await replicate.run(repModel as `${string}/${string}`, {
-            input: {
-                image: opts.sourceImageUrl,
-                prompt: opts.prompt,
-            },
-        });
+        const input: Record<string, unknown> = {
+            image: opts.sourceImageUrl,
+            prompt: opts.prompt,
+        };
+
+        if (model === 'kling') {
+            input.duration = String(opts.duration ?? 5);
+        }
+
+        const output = await replicate.run(repModel as `${string}/${string}`, { input });
 
         let videoUrl: string | null = null;
         const raw = output as unknown;
