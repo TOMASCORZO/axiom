@@ -65,7 +65,7 @@ async function uploadBinaryAsset(ctx: ToolContext, path: string, buffer: ArrayBu
 
 // ── Image / 3D Generation (via fal.ai) ─────────────────────────────
 
-import { generate2D, generate3D, generateAnimation, img2img, downloadResult, type Model2D, type Provider } from '@/lib/assets/generate';
+import { generate2D, generate3D, generateAnimation, img2img, downloadResult, removeBackground, type Model2D, type Provider } from '@/lib/assets/generate';
 
 async function generateImage(params: { prompt: string; width: number; height: number; style?: string; model_2d?: string; provider?: string; loras?: Array<{ url: string; scale?: number }> }): Promise<{ buffer: ArrayBuffer } | { error: string }> {
     const model: Model2D = (params.model_2d as Model2D) || (process.env.REPLICATE_API_TOKEN ? 'flux-schnell' : 'sdxl');
@@ -360,7 +360,24 @@ registerTool({
         }
 
         if ('buffer' in result) {
-            const sk = await uploadBinaryAsset(ctx, targetPath, result.buffer, 'image/png');
+            let finalBuffer = result.buffer;
+
+            // Remove background for guaranteed transparency (default: true)
+            const wantTransparent = input.transparent_bg !== false;
+            if (wantTransparent) {
+                try {
+                    // Upload to temp URL, run birefnet, download result
+                    const tmpBlob = new Blob([finalBuffer], { type: 'image/png' });
+                    const { fal } = await import('@fal-ai/client');
+                    const tmpUrl = await fal.storage.upload(tmpBlob);
+                    const bgResult = await removeBackground(tmpUrl);
+                    if (bgResult.success && bgResult.imageUrl) {
+                        finalBuffer = await downloadResult(bgResult.imageUrl);
+                    }
+                } catch { /* bg removal failed, use original */ }
+            }
+
+            const sk = await uploadBinaryAsset(ctx, targetPath, finalBuffer, 'image/png');
             return { callId: '', success: true, output: { message: `Sprite generated at ${targetPath}`, path: targetPath, storage_key: sk }, filesModified: [targetPath], duration_ms: Date.now() - start };
         }
         return { callId: '', success: false, output: { message: result.error }, error: result.error, filesModified: [], duration_ms: Date.now() - start };

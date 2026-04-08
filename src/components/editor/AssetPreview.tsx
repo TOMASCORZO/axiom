@@ -53,41 +53,65 @@ export default function AssetPreview() {
     const goPrev = () => { if (hasPrev) setPreviewAssetId(assets[currentIdx - 1].id); };
     const goNext = () => { if (hasNext) setPreviewAssetId(assets[currentIdx + 1].id); };
 
-    // ── Extract frames from video using <video> + <canvas> ──
-    // Uses the video's native resolution per frame for maximum quality.
+    /** Extract N frames from video, remove background from each, assemble transparent sprite sheet. */
     const extractFrames = useCallback(async (videoUrl: string, frameCount: number): Promise<{ blob: Blob; frameW: number; frameH: number }> => {
         const videoRes = await fetch(videoUrl);
         const videoBlob = await videoRes.blob();
         const localUrl = URL.createObjectURL(videoBlob);
+
         try {
-            return await new Promise<{ blob: Blob; frameW: number; frameH: number }>((resolve, reject) => {
+            // 1. Extract individual frames from video
+            const { frames, vw, vh } = await new Promise<{ frames: Blob[]; vw: number; vh: number }>((resolve, reject) => {
                 const video = document.createElement('video');
                 video.muted = true;
                 video.playsInline = true;
                 video.src = localUrl;
                 video.onloadedmetadata = async () => {
-                    const vw = video.videoWidth;
-                    const vh = video.videoHeight;
-                    const canvas = document.createElement('canvas');
-                    canvas.width = vw * frameCount;
-                    canvas.height = vh;
-                    const ctx = canvas.getContext('2d')!;
-                    ctx.imageSmoothingEnabled = true;
-                    ctx.imageSmoothingQuality = 'high';
+                    const w = video.videoWidth;
+                    const h = video.videoHeight;
                     const duration = video.duration;
+                    const blobs: Blob[] = [];
                     for (let i = 0; i < frameCount; i++) {
                         video.currentTime = i * duration / frameCount;
                         await new Promise<void>(r => { video.onseeked = () => r(); });
-                        ctx.drawImage(video, i * vw, 0, vw, vh);
+                        const fc = document.createElement('canvas');
+                        fc.width = w; fc.height = h;
+                        fc.getContext('2d')!.drawImage(video, 0, 0, w, h);
+                        const blob = await new Promise<Blob>((res, rej) =>
+                            fc.toBlob(b => b ? res(b) : rej(new Error('Frame export failed')), 'image/png'));
+                        blobs.push(blob);
                     }
-                    canvas.toBlob(blob => {
-                        if (blob) resolve({ blob, frameW: vw, frameH: vh });
-                        else reject(new Error('Failed to create sprite sheet'));
-                    }, 'image/png');
+                    resolve({ frames: blobs, vw: w, vh: h });
                 };
                 video.onerror = () => reject(new Error('Failed to load video'));
                 video.load();
             });
+
+            // 2. Remove background from each frame in parallel
+            const transparentFrames = await Promise.all(frames.map(async (frame) => {
+                const fd = new FormData();
+                fd.append('file', frame, 'frame.png');
+                const res = await fetch('/api/assets/remove-bg', { method: 'POST', body: fd });
+                if (!res.ok) throw new Error('Background removal failed');
+                return res.blob();
+            }));
+
+            // 3. Assemble transparent frames into sprite sheet
+            const canvas = document.createElement('canvas');
+            canvas.width = vw * frameCount;
+            canvas.height = vh;
+            const ctx = canvas.getContext('2d')!;
+
+            for (let i = 0; i < frameCount; i++) {
+                const img = new Image();
+                const url = URL.createObjectURL(transparentFrames[i]);
+                await new Promise<void>(r => { img.onload = () => { ctx.drawImage(img, i * vw, 0, vw, vh); URL.revokeObjectURL(url); r(); }; img.src = url; });
+            }
+
+            const blob = await new Promise<Blob>((res, rej) =>
+                canvas.toBlob(b => b ? res(b) : rej(new Error('Sprite sheet export failed')), 'image/png'));
+
+            return { blob, frameW: vw, frameH: vh };
         } finally { URL.revokeObjectURL(localUrl); }
     }, []);
 

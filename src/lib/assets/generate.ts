@@ -500,6 +500,30 @@ export async function downloadResult(url: string): Promise<ArrayBuffer> {
     return res.arrayBuffer();
 }
 
+// ── Background Removal ──────────────────────────────────────────────
+
+/**
+ * Remove background from an image using fal.ai BiRefNet.
+ * Returns a transparent PNG. Works with any image URL or data URI.
+ */
+export async function removeBackground(imageUrl: string): Promise<{ success: boolean; imageUrl?: string; error?: string }> {
+    if (!falKey) {
+        return { success: false, error: 'FAL_KEY required for background removal' };
+    }
+    try {
+        const result = await fal.subscribe('fal-ai/birefnet', {
+            input: { image_url: imageUrl },
+        });
+        const data = result.data as { image?: { url: string } };
+        if (!data.image?.url) {
+            return { success: false, error: 'No image returned from background removal' };
+        }
+        return { success: true, imageUrl: data.image.url };
+    } catch (err) {
+        return { success: false, error: err instanceof Error ? err.message : 'Background removal failed' };
+    }
+}
+
 // =====================================================================
 // IMAGE-TO-IMAGE (img2img)
 // =====================================================================
