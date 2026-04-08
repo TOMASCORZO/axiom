@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { removeBackground } from '@/lib/assets/generate';
-import { fal } from '@fal-ai/client';
+import { removeBackground, downloadResult } from '@/lib/assets/generate';
 
 // POST /api/assets/remove-bg — Remove background from an image, returns transparent PNG
 export async function POST(request: NextRequest) {
@@ -12,21 +11,16 @@ export async function POST(request: NextRequest) {
             return NextResponse.json({ error: 'file is required' }, { status: 400 });
         }
 
-        // Upload to fal.ai storage to get a public URL
-        const fileUrl = await fal.storage.upload(file);
-
-        // Run background removal
-        const result = await removeBackground(fileUrl);
+        const buffer = await file.arrayBuffer();
+        const result = await removeBackground(buffer);
 
         if (!result.success || !result.imageUrl) {
             return NextResponse.json({ error: result.error || 'Background removal failed' }, { status: 500 });
         }
 
-        // Download the transparent image and return it directly as PNG
-        const imgRes = await fetch(result.imageUrl);
-        const buffer = await imgRes.arrayBuffer();
+        const imgBuffer = await downloadResult(result.imageUrl);
 
-        return new NextResponse(buffer, {
+        return new NextResponse(imgBuffer, {
             headers: {
                 'Content-Type': 'image/png',
                 'Cache-Control': 'no-store',

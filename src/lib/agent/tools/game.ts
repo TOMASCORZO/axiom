@@ -365,16 +365,12 @@ registerTool({
             // Remove background for guaranteed transparency (default: true)
             const wantTransparent = input.transparent_bg !== false;
             if (wantTransparent) {
-                try {
-                    // Upload to temp URL, run birefnet, download result
-                    const tmpBlob = new Blob([finalBuffer], { type: 'image/png' });
-                    const { fal } = await import('@fal-ai/client');
-                    const tmpUrl = await fal.storage.upload(tmpBlob);
-                    const bgResult = await removeBackground(tmpUrl);
-                    if (bgResult.success && bgResult.imageUrl) {
-                        finalBuffer = await downloadResult(bgResult.imageUrl);
-                    }
-                } catch { /* bg removal failed, use original */ }
+                const bgResult = await removeBackground(finalBuffer);
+                if (bgResult.success && bgResult.imageUrl) {
+                    finalBuffer = await downloadResult(bgResult.imageUrl);
+                } else {
+                    console.warn('[axiom] Background removal failed, using original:', bgResult.error);
+                }
             }
 
             const sk = await uploadBinaryAsset(ctx, targetPath, finalBuffer, 'image/png');
