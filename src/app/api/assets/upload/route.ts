@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { getAdminClient } from '@/lib/supabase/admin';
 
+export const maxDuration = 60;
+
 // POST /api/assets/upload — Upload a client-generated binary asset (e.g. sprite sheet)
 export async function POST(request: NextRequest) {
     try {

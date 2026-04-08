@@ -66,20 +66,23 @@ export default function AssetPreview() {
                 video.playsInline = true;
                 video.src = localUrl;
                 video.onloadedmetadata = async () => {
-                    const vw = video.videoWidth;
-                    const vh = video.videoHeight;
+                    // Scale frames down to max 256px height to keep sprite sheet under upload limits
+                    const MAX_H = 256;
+                    const scale = Math.min(1, MAX_H / video.videoHeight);
+                    const fw = Math.round(video.videoWidth * scale);
+                    const fh = Math.round(video.videoHeight * scale);
                     const canvas = document.createElement('canvas');
-                    canvas.width = vw * frameCount;
-                    canvas.height = vh;
+                    canvas.width = fw * frameCount;
+                    canvas.height = fh;
                     const ctx = canvas.getContext('2d')!;
                     const duration = video.duration;
                     for (let i = 0; i < frameCount; i++) {
                         video.currentTime = i * duration / frameCount;
                         await new Promise<void>(r => { video.onseeked = () => r(); });
-                        ctx.drawImage(video, i * vw, 0, vw, vh);
+                        ctx.drawImage(video, i * fw, 0, fw, fh);
                     }
                     canvas.toBlob(blob => {
-                        if (blob) resolve({ blob, frameW: vw, frameH: vh });
+                        if (blob) resolve({ blob, frameW: fw, frameH: fh });
                         else reject(new Error('Failed to create sprite sheet'));
                     }, 'image/png');
                 };
