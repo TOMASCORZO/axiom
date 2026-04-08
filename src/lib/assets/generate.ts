@@ -810,12 +810,14 @@ async function generateAnimationReplicate(opts: AnimateOptions, model: ModelVide
 
     try {
         const input: Record<string, unknown> = {
-            image: opts.sourceImageUrl,
             prompt: opts.prompt,
         };
 
         if (model === 'kling') {
+            input.start_image = opts.sourceImageUrl;
             input.duration = 5;
+        } else {
+            input.image = opts.sourceImageUrl;
         }
 
         const output = await replicate.run(repModel as `${string}/${string}`, { input });

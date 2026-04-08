@@ -55,7 +55,7 @@ export default function AssetPreview() {
 
     /** Extract N frames from video at native resolution, assemble into sprite sheet. */
     const extractFrames = useCallback(async (videoUrl: string, frameCount: number): Promise<{ blob: Blob; frameW: number; frameH: number }> => {
-        const videoRes = await fetch(videoUrl);
+        const videoRes = await fetch(`/api/assets/proxy-video?url=${encodeURIComponent(videoUrl)}`);
         const videoBlob = await videoRes.blob();
         const localUrl = URL.createObjectURL(videoBlob);
 
