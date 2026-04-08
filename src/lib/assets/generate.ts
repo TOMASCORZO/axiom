@@ -815,7 +815,7 @@ async function generateAnimationReplicate(opts: AnimateOptions, model: ModelVide
         };
 
         if (model === 'kling') {
-            input.duration = String(opts.duration ?? 5);
+            input.duration = 5;
         }
 
         const output = await replicate.run(repModel as `${string}/${string}`, { input });
