@@ -716,8 +716,12 @@ export async function generateAnimation(opts: AnimateOptions): Promise<Animation
     const provider = pickProvider(opts.provider);
     const model = opts.model ?? 'kling';
 
-    if (provider === 'fal') return generateAnimationFal(opts, model);
-    return generateAnimationReplicate(opts, model);
+    // Force plain white background so frames work cleanly on any game map/scene
+    const prompt = `${opts.prompt}. Plain solid white background, no scenery, no environment, isolated subject on white`;
+    const enriched = { ...opts, prompt };
+
+    if (provider === 'fal') return generateAnimationFal(enriched, model);
+    return generateAnimationReplicate(enriched, model);
 }
 
 // ── fal.ai Image-to-Video ───────────────────────────────────────────
