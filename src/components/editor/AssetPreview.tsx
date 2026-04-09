@@ -55,41 +55,33 @@ export default function AssetPreview() {
 
     /** Extract N frames from video at native resolution, assemble into sprite sheet. */
     const extractFrames = useCallback(async (videoUrl: string, frameCount: number): Promise<{ blob: Blob; frameW: number; frameH: number }> => {
-        const videoRes = await fetch(`/api/assets/proxy-video?url=${encodeURIComponent(videoUrl)}`);
-        const videoBlob = await videoRes.blob();
-        const localUrl = URL.createObjectURL(videoBlob);
-
-        try {
-            return await new Promise<{ blob: Blob; frameW: number; frameH: number }>((resolve, reject) => {
-                const video = document.createElement('video');
-                video.muted = true;
-                video.playsInline = true;
-                video.src = localUrl;
-                video.onloadedmetadata = async () => {
-                    // Scale frames down to max 256px height to keep sprite sheet under upload limits
-                    const MAX_H = 256;
-                    const scale = Math.min(1, MAX_H / video.videoHeight);
-                    const fw = Math.round(video.videoWidth * scale);
-                    const fh = Math.round(video.videoHeight * scale);
-                    const canvas = document.createElement('canvas');
-                    canvas.width = fw * frameCount;
-                    canvas.height = fh;
-                    const ctx = canvas.getContext('2d')!;
-                    const duration = video.duration;
-                    for (let i = 0; i < frameCount; i++) {
-                        video.currentTime = i * duration / frameCount;
-                        await new Promise<void>(r => { video.onseeked = () => r(); });
-                        ctx.drawImage(video, i * fw, 0, fw, fh);
-                    }
-                    canvas.toBlob(blob => {
-                        if (blob) resolve({ blob, frameW: fw, frameH: fh });
-                        else reject(new Error('Failed to create sprite sheet'));
-                    }, 'image/png');
-                };
-                video.onerror = () => reject(new Error('Failed to load video'));
-                video.load();
-            });
-        } finally { URL.revokeObjectURL(localUrl); }
+        return new Promise<{ blob: Blob; frameW: number; frameH: number }>((resolve, reject) => {
+            const video = document.createElement('video');
+            video.crossOrigin = 'anonymous';
+            video.muted = true;
+            video.playsInline = true;
+            video.src = videoUrl;
+            video.onloadedmetadata = async () => {
+                const vw = video.videoWidth;
+                const vh = video.videoHeight;
+                const canvas = document.createElement('canvas');
+                canvas.width = vw * frameCount;
+                canvas.height = vh;
+                const ctx = canvas.getContext('2d')!;
+                const duration = video.duration;
+                for (let i = 0; i < frameCount; i++) {
+                    video.currentTime = i * duration / frameCount;
+                    await new Promise<void>(r => { video.onseeked = () => r(); });
+                    ctx.drawImage(video, i * vw, 0, vw, vh);
+                }
+                canvas.toBlob(blob => {
+                    if (blob) resolve({ blob, frameW: vw, frameH: vh });
+                    else reject(new Error('Failed to create sprite sheet'));
+                }, 'image/png');
+            };
+            video.onerror = () => reject(new Error('Failed to load video'));
+            video.load();
+        });
     }, []);
 
     // ── Animate handler ──
@@ -132,25 +124,46 @@ export default function AssetPreview() {
             // Step 2: Extract frames client-side (native video resolution)
             const { blob: spriteBlob, frameW, frameH } = await extractFrames(videoUrl, animFrames);
 
-            // Step 3: Upload sprite sheet
-            const formData = new FormData();
-            formData.append('file', spriteBlob, `${baseName}_spritesheet.png`);
-            formData.append('project_id', project.id);
-            formData.append('target_path', targetPath);
-            const uploadRes = await fetch('/api/assets/upload', { method: 'POST', body: formData });
-            const uploadData = await uploadRes.json();
-
-            if (!uploadRes.ok || !uploadData.success) {
-                setActionError(uploadData.error || 'Sprite sheet upload failed');
+            // Step 3: Get signed URL and upload sprite sheet directly to Supabase
+            const urlRes = await fetch('/api/assets/upload-url', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ project_id: project.id, target_path: targetPath }),
+            });
+            const urlData = await urlRes.json();
+            if (!urlRes.ok || !urlData.signed_url) {
+                setActionError(urlData.error || 'Failed to get upload URL');
                 return;
             }
+
+            const putRes = await fetch(urlData.signed_url, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'image/png' },
+                body: spriteBlob,
+            });
+            if (!putRes.ok) {
+                setActionError('Sprite sheet upload to storage failed');
+                return;
+            }
+
+            // Register the file in project_files
+            await fetch('/api/assets/register-file', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    project_id: project.id,
+                    target_path: targetPath,
+                    storage_key: urlData.storage_key,
+                    size_bytes: spriteBlob.size,
+                }),
+            });
 
             // Step 4: Register asset
             const assetId = crypto.randomUUID();
             addAsset({
                 id: assetId, project_id: project.id,
                 name: `${asset.name} (${animPrompt.trim().slice(0, 20)})`, asset_type: 'sprite_sheet',
-                storage_key: uploadData.storage_key || targetPath, thumbnail_key: null, file_format: 'png',
+                storage_key: urlData.storage_key || targetPath, thumbnail_key: null, file_format: 'png',
                 width: frameW * animFrames, height: frameH,
                 metadata: {
                     tags: ['animation'],
