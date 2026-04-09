@@ -74,6 +74,14 @@ export default function AssetPreview() {
                     await new Promise<void>(r => { video.onseeked = () => r(); });
                     ctx.drawImage(video, i * vw, 0, vw, vh);
                 }
+                // Remove white background → transparent
+                const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                const d = imageData.data;
+                const T = 230; // R,G,B all above this → transparent
+                for (let p = 0; p < d.length; p += 4) {
+                    if (d[p] >= T && d[p + 1] >= T && d[p + 2] >= T) d[p + 3] = 0;
+                }
+                ctx.putImageData(imageData, 0, 0);
                 canvas.toBlob(blob => {
                     if (blob) resolve({ blob, frameW: vw, frameH: vh });
                     else reject(new Error('Failed to create sprite sheet'));
