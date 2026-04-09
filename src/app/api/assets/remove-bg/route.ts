@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { removeBackground, downloadResult } from '@/lib/assets/generate';
+import { removeBackground } from '@/lib/assets/generate';
 
 // POST /api/assets/remove-bg — Remove background from an image, returns transparent PNG
 export async function POST(request: NextRequest) {
@@ -14,13 +14,11 @@ export async function POST(request: NextRequest) {
         const buffer = await file.arrayBuffer();
         const result = await removeBackground(buffer);
 
-        if (!result.success || !result.imageUrl) {
+        if (!result.success || !result.buffer) {
             return NextResponse.json({ error: result.error || 'Background removal failed' }, { status: 500 });
         }
 
-        const imgBuffer = await downloadResult(result.imageUrl);
-
-        return new NextResponse(imgBuffer, {
+        return new NextResponse(result.buffer, {
             headers: {
                 'Content-Type': 'image/png',
                 'Cache-Control': 'no-store',

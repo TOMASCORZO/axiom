@@ -366,8 +366,8 @@ registerTool({
             const wantTransparent = input.transparent_bg !== false;
             if (wantTransparent) {
                 const bgResult = await removeBackground(finalBuffer);
-                if (bgResult.success && bgResult.imageUrl) {
-                    finalBuffer = await downloadResult(bgResult.imageUrl);
+                if (bgResult.success && bgResult.buffer) {
+                    finalBuffer = bgResult.buffer;
                 } else {
                     console.warn('[axiom] Background removal failed, using original:', bgResult.error);
                 }

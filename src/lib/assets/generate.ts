@@ -503,59 +503,41 @@ export async function downloadResult(url: string): Promise<ArrayBuffer> {
 // ── Background Removal ──────────────────────────────────────────────
 
 /**
- * Remove background from an image using BiRefNet.
- * Accepts a public URL or a raw buffer.
- * Uses Replicate by default, falls back to fal.ai.
+ * Remove white/near-white background from an image using Sharp.
+ * Free, fast, no API calls — works because we force white backgrounds in generation.
+ * Accepts a URL or raw buffer, returns a transparent PNG buffer.
  */
-export async function removeBackground(input: string | ArrayBuffer, provider?: Provider): Promise<{ success: boolean; imageUrl?: string; error?: string }> {
-    const p = provider ?? pickProvider();
-
+export async function removeBackground(input: string | ArrayBuffer): Promise<{ success: boolean; buffer?: ArrayBuffer; error?: string }> {
+    const sharp = (await import('sharp')).default;
     try {
-        // Resolve input to a public URL
-        let imageUrl: string;
+        let buf: Buffer;
         if (typeof input === 'string') {
-            imageUrl = input;
-        } else if (p === 'fal' && falKey) {
-            const blob = new Blob([input], { type: 'image/png' });
-            imageUrl = await fal.storage.upload(blob);
-        } else if (replicate) {
-            // Replicate accepts data URIs directly
-            const buf = Buffer.from(input);
-            imageUrl = `data:image/png;base64,${buf.toString('base64')}`;
+            const res = await fetch(input);
+            buf = Buffer.from(await res.arrayBuffer());
         } else {
-            return { success: false, error: 'No provider available for background removal' };
+            buf = Buffer.from(input);
         }
 
-        if (p === 'replicate' && replicate) {
-            const output = await replicate.run('lucataco/remove-bg:95fcc2a26d3899cd6c2691c900f7aefd65523a007f7fceeea83016e1e25e9a37' as `${string}/${string}`, {
-                input: { image: imageUrl },
-            });
-            const raw = output as unknown;
-            let resultUrl: string | null = null;
-            if (typeof raw === 'string' && raw.startsWith('http')) {
-                resultUrl = raw;
-            } else if (raw && typeof raw === 'object') {
-                const str = String(raw);
-                if (str.startsWith('http')) resultUrl = str;
-            }
-            if (!resultUrl) {
-                return { success: false, error: 'No image returned from Replicate background removal' };
-            }
-            return { success: true, imageUrl: resultUrl };
+        const img = sharp(buf).ensureAlpha();
+        const { width, height } = await img.metadata();
+        if (!width || !height) {
+            return { success: false, error: 'Could not read image dimensions' };
         }
 
-        // fal.ai path
-        if (!falKey) {
-            return { success: false, error: 'FAL_KEY required for fal.ai background removal' };
+        const raw = await img.raw().toBuffer();
+        // 4 channels: RGBA — set alpha to 0 for pixels close to white
+        const THRESHOLD = 230; // R, G, B all above this → transparent
+        for (let i = 0; i < raw.length; i += 4) {
+            if (raw[i] >= THRESHOLD && raw[i + 1] >= THRESHOLD && raw[i + 2] >= THRESHOLD) {
+                raw[i + 3] = 0; // set alpha to 0
+            }
         }
-        const result = await fal.subscribe('fal-ai/birefnet', {
-            input: { image_url: imageUrl },
-        });
-        const data = result.data as { image?: { url: string } };
-        if (!data.image?.url) {
-            return { success: false, error: 'No image returned from background removal' };
-        }
-        return { success: true, imageUrl: data.image.url };
+
+        const result = await sharp(raw, { raw: { width, height, channels: 4 } })
+            .png()
+            .toBuffer();
+
+        return { success: true, buffer: result.buffer as ArrayBuffer };
     } catch (err) {
         return { success: false, error: err instanceof Error ? err.message : 'Background removal failed' };
     }
