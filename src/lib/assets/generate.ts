@@ -150,8 +150,14 @@ export async function generate2D(opts: Generate2DOptions): Promise<GenerationRes
     const provider = pickProvider(opts.provider);
     const model = opts.model ?? 'flux-schnell';
 
-    if (provider === 'replicate') return generate2DReplicate(opts, model);
-    return generate2DFal(opts, model);
+    // Force clean white background with no shadows for easy bg removal
+    const enriched = {
+        ...opts,
+        prompt: `${opts.prompt}. Plain solid white background, no shadows, no drop shadow, no cast shadow, no scenery, isolated subject on pure white`,
+    };
+
+    if (provider === 'replicate') return generate2DReplicate(enriched, model);
+    return generate2DFal(enriched, model);
 }
 
 // ── fal.ai 2D ────────────────────────────────────────────────────────
@@ -736,7 +742,7 @@ export async function generateAnimation(opts: AnimateOptions): Promise<Animation
     const model = opts.model ?? 'kling';
 
     // Force plain white background so frames work cleanly on any game map/scene
-    const prompt = `${opts.prompt}. Plain solid white background, no scenery, no environment, isolated subject on white`;
+    const prompt = `${opts.prompt}. Plain solid white background, no shadows, no drop shadow, no cast shadow, no scenery, no environment, isolated subject on pure white`;
     const enriched = { ...opts, prompt };
 
     if (provider === 'fal') return generateAnimationFal(enriched, model);
