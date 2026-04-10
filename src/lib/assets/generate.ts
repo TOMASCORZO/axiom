@@ -369,18 +369,58 @@ export async function generate2D(opts: Generate2DOptions): Promise<GenerationRes
 // =====================================================================
 
 /**
+ * Call PixelLab's `/remove-background` endpoint on an already-pixelated PNG
+ * buffer. Returns a transparent-background PNG. Max 400×400 per PixelLab spec.
+ */
+async function pixelLabRemoveBackground(
+    pngBuffer: Buffer,
+    width: number,
+    height: number,
+    textHint?: string,
+): Promise<{ buffer: Buffer; cost: number } | { error: string }> {
+    try {
+        const body: Record<string, unknown> = {
+            image: { type: 'base64', base64: pngBuffer.toString('base64'), format: 'png' },
+            image_size: { width, height },
+            background_removal_task: 'remove_complex_background',
+        };
+        if (textHint) body.text_hint = textHint;
+
+        const response = await pixelLabPost('/remove-background', body);
+        const out = extractImageBuffer(response);
+        if (!out) {
+            console.error('[pixellab] Unexpected /remove-background response:', JSON.stringify(response).slice(0, 500));
+            return { error: 'No image in /remove-background response' };
+        }
+        return { buffer: out, cost: response.usage?.credits_used ?? 0 };
+    } catch (err) {
+        return { error: err instanceof Error ? err.message : '/remove-background failed' };
+    }
+}
+
+/**
  * Convert an arbitrary photo into pixel art using PixelLab's dedicated
  * `/image-to-pixelart` endpoint. Unlike `img2img`, this does NOT take a text
  * prompt — it just faithfully pixelates the source. The caller provides the
  * desired output dimensions (must be ≤ 320×320 per PixelLab spec).
+ *
+ * When `removeBackground` is true (default), the pixelated output is piped
+ * through `/remove-background` to produce a transparent-background PNG.
  */
-export async function imageToPixelArt(opts: { imageUrl: string; outputWidth?: number; outputHeight?: number }): Promise<GenerationResult> {
+export async function imageToPixelArt(opts: {
+    imageUrl: string;
+    outputWidth?: number;
+    outputHeight?: number;
+    removeBackground?: boolean;
+    backgroundHint?: string;
+}): Promise<GenerationResult> {
     try {
         // PixelLab /image-to-pixelart requires image_size ≤ 1280×1280 and output_size ≤ 320×320.
         const { pixelImage, width: srcW, height: srcH } = await fetchImageAsPixelLabInput(opts.imageUrl, 1280);
 
         // Determine output size. If the caller gave one, clamp it; otherwise scale
         // the longest side to 128 (reasonable pixel-art default) preserving aspect ratio.
+        // /remove-background caps at 400×400, so the 320 output_size ceiling is safe.
         const MAX_OUT = 320;
         const MIN_OUT = 16;
         let outW: number;
@@ -402,14 +442,26 @@ export async function imageToPixelArt(opts: { imageUrl: string; outputWidth?: nu
         };
 
         const response = await pixelLabPost('/image-to-pixelart', body);
-        const buffer = extractImageBuffer(response);
+        let buffer = extractImageBuffer(response);
 
         if (!buffer) {
             console.error('[pixellab] Unexpected /image-to-pixelart response:', JSON.stringify(response).slice(0, 500));
             return { success: false, model: 'image-to-pixelart', provider: 'pixellab', cost: 0, error: 'No image in /image-to-pixelart response' };
         }
 
-        const cost = response.usage?.credits_used ?? 0.01;
+        let cost = response.usage?.credits_used ?? 0.01;
+
+        // Post-process: strip background via PixelLab's matting endpoint (default on).
+        if (opts.removeBackground !== false) {
+            const bgResult = await pixelLabRemoveBackground(buffer, outW, outH, opts.backgroundHint);
+            if ('error' in bgResult) {
+                console.warn('[pixellab] /remove-background failed, returning opaque pixel art:', bgResult.error);
+            } else {
+                buffer = bgResult.buffer;
+                cost += bgResult.cost;
+            }
+        }
+
         return {
             success: true,
             buffer: buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer,
