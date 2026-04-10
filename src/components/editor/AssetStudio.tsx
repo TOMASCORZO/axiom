@@ -2,7 +2,7 @@
 
 import { useState, useRef, useCallback } from 'react';
 import { useEditorStore } from '@/lib/store';
-import type { AssetType, AssetStyle } from '@/types/asset';
+import type { AssetType } from '@/types/asset';
 import type { FreeAssetResult } from '@/lib/assets/search';
 import {
     Sparkles,
@@ -17,8 +17,6 @@ import {
     ExternalLink,
     Check,
     X,
-    Upload,
-    Link,
     Film,
 } from 'lucide-react';
 
@@ -33,270 +31,36 @@ const TABS = [
 
 const ASSET_TYPES: { value: AssetType; label: string }[] = [
     { value: 'sprite', label: 'Sprite' },
-    { value: 'sprite_sheet', label: 'Sprite Sheet' },
     { value: 'texture', label: 'Texture' },
     { value: 'ui_element', label: 'UI Element' },
     { value: 'model_3d', label: '3D Model' },
 ];
 
-const STYLES: { value: AssetStyle; label: string }[] = [
-    { value: 'pixel_art', label: 'Pixel Art' },
-    { value: 'stylized', label: 'Stylized' },
-    { value: 'hand_drawn', label: 'Hand Drawn' },
-    { value: 'vector', label: 'Vector' },
-    { value: 'realistic', label: 'Realistic' },
-    { value: 'low_poly', label: 'Low Poly' },
-];
-
 const SIZE_PRESETS = [
+    { label: '32', w: 32, h: 32 },
     { label: '64', w: 64, h: 64 },
     { label: '128', w: 128, h: 128 },
     { label: '256', w: 256, h: 256 },
-    { label: '512', w: 512, h: 512 },
 ];
 
-// ── Model & Pricing Info ─────────────────────────────────────────────
-
-type ProviderChoice = 'fal' | 'replicate';
-type Model2DChoice = 'sdxl' | 'flux-schnell' | 'flux-dev';
 type Model3DChoice = 'trellis' | 'hunyuan3d';
 
-const PROVIDERS: { value: ProviderChoice; label: string; envHint: string }[] = [
-    { value: 'fal',       label: 'fal.ai',     envHint: 'FAL_KEY' },
-    { value: 'replicate', label: 'Replicate',   envHint: 'REPLICATE_API_TOKEN' },
+const MODELS_3D: { value: Model3DChoice; label: string; cost: string; desc: string }[] = [
+    { value: 'trellis',   label: 'Trellis',      cost: '$0.02',  desc: 'Fast, cheap' },
+    { value: 'hunyuan3d', label: 'Hunyuan3D',    cost: '$0.18',  desc: 'High quality' },
 ];
-
-const MODELS_2D: Record<ProviderChoice, { value: Model2DChoice; label: string; cost: string; desc: string }[]> = {
-    fal: [
-        { value: 'sdxl',         label: 'SDXL',         cost: 'Free',    desc: 'Fast, good quality' },
-        { value: 'flux-schnell', label: 'Flux Schnell',  cost: '$0.003',  desc: 'Best value' },
-        { value: 'flux-dev',     label: 'Flux Dev',      cost: '$0.025',  desc: 'Highest quality' },
-    ],
-    replicate: [
-        { value: 'sdxl',         label: 'SDXL',         cost: '$0.005',  desc: 'Fast, good quality' },
-        { value: 'flux-schnell', label: 'Flux Schnell',  cost: '$0.003',  desc: 'Best value' },
-        { value: 'flux-dev',     label: 'Flux Dev',      cost: '$0.025',  desc: 'Highest quality' },
-    ],
-};
-
-const MODELS_3D: Record<ProviderChoice, { value: Model3DChoice; label: string; cost: string; desc: string }[]> = {
-    fal: [
-        { value: 'trellis',   label: 'Trellis',      cost: '$0.02',  desc: 'Fast, cheap' },
-        { value: 'hunyuan3d', label: 'Hunyuan3D v3', cost: '$0.375', desc: 'High quality' },
-    ],
-    replicate: [
-        { value: 'hunyuan3d', label: 'Hunyuan3D v2', cost: '$0.18',  desc: 'High quality' },
-    ],
-};
-
-// ── LoRA Input (URL or File Upload) ──────────────────────────────────
-
-function LoraInput({
-    loraUrl, setLoraUrl, loraScale, setLoraScale,
-}: {
-    loraUrl: string; setLoraUrl: (v: string) => void;
-    loraScale: number; setLoraScale: (v: number) => void;
-}) {
-    const [mode, setMode] = useState<'url' | 'upload'>('upload');
-    const [uploading, setUploading] = useState(false);
-    const [uploadProgress, setUploadProgress] = useState(0);
-    const [uploadedName, setUploadedName] = useState<string | null>(null);
-    const [error, setError] = useState<string | null>(null);
-    const fileRef = useRef<HTMLInputElement>(null);
-
-    const handleFile = async (file: File) => {
-        if (!file.name.endsWith('.safetensors')) {
-            setError('Only .safetensors files are supported');
-            return;
-        }
-        if (file.size > 500 * 1024 * 1024) {
-            setError('File too large (max 500MB)');
-            return;
-        }
-        setUploading(true);
-        setUploadProgress(0);
-        setError(null);
-        try {
-            // Step 1: Initialize chunked upload (tiny JSON)
-            const initRes = await fetch('/api/assets/lora', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ action: 'init', filename: file.name, size: file.size }),
-            });
-            const initData = await initRes.json();
-            if (!initRes.ok || !initData.success) {
-                setError(initData.error || 'Failed to initialize upload');
-                return;
-            }
-
-            const { uploadId, chunkSize, totalChunks } = initData;
-
-            // Step 2: Send chunks (5MB each) via PUT
-            for (let i = 0; i < totalChunks; i++) {
-                const start = i * chunkSize;
-                const end = Math.min(start + chunkSize, file.size);
-                const chunk = file.slice(start, end);
-
-                const chunkRes = await fetch('/api/assets/lora', {
-                    method: 'PUT',
-                    headers: {
-                        'Content-Type': 'application/octet-stream',
-                        'X-Upload-Id': uploadId,
-                        'X-Chunk-Index': String(i),
-                    },
-                    body: chunk,
-                });
-
-                if (!chunkRes.ok) {
-                    const err = await chunkRes.json().catch(() => ({ error: 'Chunk failed' }));
-                    setError(err.error || `Chunk ${i + 1} failed`);
-                    return;
-                }
-
-                setUploadProgress(Math.round(((i + 1) / totalChunks) * 85));
-            }
-
-            // Step 3: Complete — server assembles chunks and uploads to Supabase via TUS
-            setUploadProgress(90);
-            const completeRes = await fetch('/api/assets/lora', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ action: 'complete', uploadId, filename: file.name }),
-            });
-            const completeData = await completeRes.json();
-
-            if (!completeRes.ok || !completeData.success) {
-                setError(completeData.error || 'Failed to finalize upload');
-                return;
-            }
-
-            setUploadProgress(100);
-            setLoraUrl(completeData.url);
-            setUploadedName(completeData.name);
-        } catch (err) {
-            setError(err instanceof Error ? err.message : 'Upload failed');
-        } finally {
-            setUploading(false);
-        }
-    };
-
-    const handleDrop = (e: React.DragEvent) => {
-        e.preventDefault();
-        const file = e.dataTransfer.files[0];
-        if (file) handleFile(file);
-    };
-
-    const clear = () => {
-        setLoraUrl('');
-        setUploadedName(null);
-        setError(null);
-        if (fileRef.current) fileRef.current.value = '';
-    };
-
-    return (
-        <div>
-            <div className="flex items-center justify-between mb-1">
-                <label className="text-[10px] uppercase tracking-wider text-zinc-500">LoRA (optional)</label>
-                <div className="flex gap-0.5">
-                    <button
-                        onClick={() => { setMode('upload'); clear(); }}
-                        className={`p-1 rounded transition-colors ${mode === 'upload' ? 'text-violet-400 bg-violet-500/10' : 'text-zinc-600 hover:text-zinc-400'}`}
-                        title="Upload file"
-                    >
-                        <Upload size={11} />
-                    </button>
-                    <button
-                        onClick={() => { setMode('url'); clear(); }}
-                        className={`p-1 rounded transition-colors ${mode === 'url' ? 'text-violet-400 bg-violet-500/10' : 'text-zinc-600 hover:text-zinc-400'}`}
-                        title="Paste URL"
-                    >
-                        <Link size={11} />
-                    </button>
-                </div>
-            </div>
-
-            {mode === 'url' ? (
-                <input
-                    type="text"
-                    value={loraUrl}
-                    onChange={(e) => setLoraUrl(e.target.value)}
-                    placeholder="https://huggingface.co/... or .safetensors URL"
-                    className="w-full bg-zinc-900 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-violet-500/50 transition-colors"
-                />
-            ) : uploadedName ? (
-                <div className="flex items-center gap-2 bg-zinc-900 border border-emerald-500/20 rounded-lg px-3 py-1.5">
-                    <Check size={12} className="text-emerald-400 flex-shrink-0" />
-                    <span className="text-xs text-emerald-300 truncate flex-1">{uploadedName}</span>
-                    <button onClick={clear} className="text-zinc-500 hover:text-zinc-300 flex-shrink-0"><X size={12} /></button>
-                </div>
-            ) : (
-                <div
-                    onClick={() => !uploading && fileRef.current?.click()}
-                    onDragOver={(e) => e.preventDefault()}
-                    onDrop={handleDrop}
-                    className={`flex flex-col items-center gap-1 py-3 rounded-lg border border-dashed bg-zinc-900/50 transition-colors ${uploading ? 'border-violet-500/30' : 'border-white/10 cursor-pointer hover:border-violet-500/30'}`}
-                >
-                    {uploading ? (
-                        <Loader2 size={16} className="text-violet-400 animate-spin" />
-                    ) : (
-                        <Upload size={16} className="text-zinc-600" />
-                    )}
-                    <span className="text-[10px] text-zinc-500">
-                        {uploading ? `Uploading... ${uploadProgress}%` : 'Drop .safetensors or click to browse'}
-                    </span>
-                    {uploading && (
-                        <div className="w-3/4 h-1 bg-zinc-800 rounded-full overflow-hidden mt-0.5">
-                            <div className="h-full bg-violet-500 rounded-full transition-all duration-300" style={{ width: `${uploadProgress}%` }} />
-                        </div>
-                    )}
-                    <input
-                        ref={fileRef}
-                        type="file"
-                        accept=".safetensors"
-                        className="hidden"
-                        onChange={(e) => { if (e.target.files?.[0]) handleFile(e.target.files[0]); }}
-                    />
-                </div>
-            )}
-
-            {error && <p className="text-[10px] text-red-400 mt-1">{error}</p>}
-
-            {/* Scale slider — show when a LoRA is active */}
-            {loraUrl && (
-                <div className="flex items-center gap-2 mt-1.5">
-                    <span className="text-[10px] text-zinc-500 w-10">Scale</span>
-                    <input
-                        type="range"
-                        min={0} max={2} step={0.05}
-                        value={loraScale}
-                        onChange={(e) => setLoraScale(Number(e.target.value))}
-                        className="flex-1 h-1 accent-violet-500"
-                    />
-                    <span className="text-[10px] text-zinc-400 font-mono w-7 text-right">{loraScale.toFixed(2)}</span>
-                </div>
-            )}
-        </div>
-    );
-}
 
 function GenerateTab() {
     const { project, assetGenerating, setAssetGenerating, addConsoleEntry, addAsset, setAssetStudioTab, setPreviewAssetId, refreshProjectFiles } = useEditorStore();
     const [prompt, setPrompt] = useState('');
     const [assetType, setAssetType] = useState<AssetType>('sprite');
-    const [style, setStyle] = useState<AssetStyle>('pixel_art');
-    const [sizeIdx, setSizeIdx] = useState(1); // 128x128 default
+    const [sizeIdx, setSizeIdx] = useState(1); // 64x64 default
     const [transparentBg, setTransparentBg] = useState(true);
-    const [frameCount, setFrameCount] = useState(4);
-    const [provider, setProvider] = useState<ProviderChoice>('replicate');
-    const [model2d, setModel2d] = useState<Model2DChoice>('flux-schnell');
     const [model3d, setModel3d] = useState<Model3DChoice>('trellis');
-    const [loraUrl, setLoraUrl] = useState('');
-    const [loraScale, setLoraScale] = useState(1.0);
     const [genError, setGenError] = useState<string | null>(null);
     const [lastCost, setLastCost] = useState<number | null>(null);
 
     const size = SIZE_PRESETS[sizeIdx];
-    const isSheet = assetType === 'sprite_sheet';
     const is3D = assetType === 'model_3d';
 
     const handleGenerate = async () => {
@@ -311,7 +75,7 @@ function GenerateTab() {
 
         addConsoleEntry({
             id: crypto.randomUUID(), level: 'log',
-            message: `[Asset Studio] Generating "${prompt}" (${assetType}, ${is3D ? model3d : model2d})...`,
+            message: `[Asset Studio] Generating "${prompt}" (${assetType}, ${is3D ? model3d : 'pixellab'})...`,
             timestamp: new Date().toISOString(),
         });
 
@@ -323,17 +87,13 @@ function GenerateTab() {
                     project_id: project.id,
                     prompt: prompt.trim(),
                     asset_type: assetType,
-                    style,
+                    style: 'pixel_art',
                     target_path: targetPath,
                     options: {
                         width: size.w,
                         height: size.h,
                         transparent_bg: transparentBg,
-                        frame_count: isSheet ? frameCount : undefined,
-                        model_2d: is3D ? undefined : model2d,
                         model_3d: is3D ? model3d : undefined,
-                        provider,
-                        loras: loraUrl.trim() ? [{ url: loraUrl.trim(), scale: loraScale }] : undefined,
                     },
                 }),
             });
@@ -358,9 +118,9 @@ function GenerateTab() {
                     file_format: ext,
                     width: is3D ? null : size.w,
                     height: is3D ? null : size.h,
-                    metadata: { tags: [style, is3D ? model3d : model2d] },
+                    metadata: { tags: ['pixel_art', is3D ? model3d : 'pixellab'] },
                     generation_prompt: prompt.trim(),
-                    generation_model: is3D ? model3d : model2d,
+                    generation_model: is3D ? model3d : 'pixflux',
                     size_bytes: 0,
                     created_at: new Date().toISOString(),
                 });
@@ -416,26 +176,6 @@ function GenerateTab() {
                 </div>
             </div>
 
-            {/* Style */}
-            <div>
-                <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">Style</label>
-                <div className="flex flex-wrap gap-1">
-                    {STYLES.map((s) => (
-                        <button
-                            key={s.value}
-                            onClick={() => setStyle(s.value)}
-                            className={`px-2 py-1 rounded text-xs transition-colors ${
-                                style === s.value
-                                    ? 'bg-fuchsia-500/20 text-fuchsia-300 border border-fuchsia-500/30'
-                                    : 'bg-zinc-900 text-zinc-500 border border-white/5 hover:text-zinc-300'
-                            }`}
-                        >
-                            {s.label}
-                        </button>
-                    ))}
-                </div>
-            </div>
-
             {/* Size */}
             <div>
                 <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">
@@ -469,72 +209,36 @@ function GenerateTab() {
                     />
                     Transparent
                 </label>
-                {isSheet && (
-                    <div className="flex items-center gap-1.5">
-                        <span className="text-xs text-zinc-500">Frames:</span>
-                        <input
-                            type="number"
-                            min={2}
-                            max={32}
-                            value={frameCount}
-                            onChange={(e) => setFrameCount(Number(e.target.value))}
-                            className="w-12 bg-zinc-900 border border-white/10 rounded px-1.5 py-0.5 text-xs text-zinc-200 text-center focus:outline-none focus:border-violet-500/50"
-                        />
-                    </div>
+                {!is3D && (
+                    <span className="text-[10px] text-zinc-600 font-mono">PixelLab ~$0.01</span>
                 )}
             </div>
 
-            {/* LoRA (2D only) */}
-            {!is3D && <LoraInput loraUrl={loraUrl} setLoraUrl={setLoraUrl} loraScale={loraScale} setLoraScale={setLoraScale} />}
-
-            {/* Provider + AI Model Selection */}
-            <div>
-                <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">Provider</label>
-                <div className="flex gap-1 mb-2">
-                    {PROVIDERS.map((p) => (
-                        <button
-                            key={p.value}
-                            onClick={() => {
-                                setProvider(p.value);
-                                // Reset 3D model if switching to replicate (no Trellis)
-                                if (p.value === 'replicate' && model3d === 'trellis') setModel3d('hunyuan3d');
-                            }}
-                            className={`flex-1 py-1 rounded text-xs transition-colors ${
-                                provider === p.value
-                                    ? 'bg-violet-500/20 text-violet-300 border border-violet-500/30'
-                                    : 'bg-zinc-900 text-zinc-500 border border-white/5 hover:text-zinc-300'
-                            }`}
-                        >
-                            {p.label}
-                        </button>
-                    ))}
-                </div>
-
-                <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">
-                    {is3D ? '3D Model' : '2D Model'}
-                </label>
-                <div className="flex flex-col gap-1">
-                    {(is3D ? MODELS_3D[provider] : MODELS_2D[provider]).map((m) => (
-                        <button
-                            key={m.value}
-                            onClick={() => is3D ? setModel3d(m.value as Model3DChoice) : setModel2d(m.value as Model2DChoice)}
-                            className={`flex items-center justify-between px-2.5 py-1.5 rounded text-xs transition-colors ${
-                                (is3D ? model3d : model2d) === m.value
-                                    ? 'bg-violet-500/20 text-violet-300 border border-violet-500/30'
-                                    : 'bg-zinc-900 text-zinc-500 border border-white/5 hover:text-zinc-300'
-                            }`}
-                        >
-                            <span className="font-medium">{m.label}</span>
-                            <span className="flex items-center gap-2">
-                                <span className="text-zinc-600">{m.desc}</span>
-                                <span className={`font-mono ${m.cost === 'Free' ? 'text-emerald-400' : 'text-amber-400'}`}>
-                                    {m.cost}
+            {/* 3D Model Selection (only for 3D assets) */}
+            {is3D && (
+                <div>
+                    <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">3D Model</label>
+                    <div className="flex flex-col gap-1">
+                        {MODELS_3D.map((m) => (
+                            <button
+                                key={m.value}
+                                onClick={() => setModel3d(m.value)}
+                                className={`flex items-center justify-between px-2.5 py-1.5 rounded text-xs transition-colors ${
+                                    model3d === m.value
+                                        ? 'bg-violet-500/20 text-violet-300 border border-violet-500/30'
+                                        : 'bg-zinc-900 text-zinc-500 border border-white/5 hover:text-zinc-300'
+                                }`}
+                            >
+                                <span className="font-medium">{m.label}</span>
+                                <span className="flex items-center gap-2">
+                                    <span className="text-zinc-600">{m.desc}</span>
+                                    <span className="font-mono text-amber-400">{m.cost}</span>
                                 </span>
-                            </span>
-                        </button>
-                    ))}
+                            </button>
+                        ))}
+                    </div>
                 </div>
-            </div>
+            )}
 
             {/* Error / Cost display */}
             {genError && (
@@ -877,45 +581,6 @@ function GalleryTab() {
 
     const selectedAsset = assets.find(a => a.id === previewAssetId);
 
-    /** Extract N frames from video at native resolution, assemble into sprite sheet. */
-    const extractFrames = useCallback(async (videoUrl: string, frameCount: number): Promise<{ blob: Blob; frameW: number; frameH: number }> => {
-        return new Promise<{ blob: Blob; frameW: number; frameH: number }>((resolve, reject) => {
-            const video = document.createElement('video');
-            video.crossOrigin = 'anonymous';
-            video.muted = true;
-            video.playsInline = true;
-            video.src = videoUrl;
-            video.onloadedmetadata = async () => {
-                const vw = video.videoWidth;
-                const vh = video.videoHeight;
-                const canvas = document.createElement('canvas');
-                canvas.width = vw * frameCount;
-                canvas.height = vh;
-                const ctx = canvas.getContext('2d')!;
-                const duration = video.duration;
-                for (let i = 0; i < frameCount; i++) {
-                    video.currentTime = i * duration / frameCount;
-                    await new Promise<void>(r => { video.onseeked = () => r(); });
-                    ctx.drawImage(video, i * vw, 0, vw, vh);
-                }
-                // Remove white background → transparent
-                const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-                const d = imageData.data;
-                const T = 230; // R,G,B all above this → transparent
-                for (let p = 0; p < d.length; p += 4) {
-                    if (d[p] >= T && d[p + 1] >= T && d[p + 2] >= T) d[p + 3] = 0;
-                }
-                ctx.putImageData(imageData, 0, 0);
-                canvas.toBlob(blob => {
-                    if (blob) resolve({ blob, frameW: vw, frameH: vh });
-                    else reject(new Error('Failed to create sprite sheet'));
-                }, 'image/png');
-            };
-            video.onerror = () => reject(new Error('Failed to load video'));
-            video.load();
-        });
-    }, []);
-
     const handleAnimate = async () => {
         if (!selectedAsset?.storage_key || !project?.id || !animPrompt.trim()) return;
         setAnimating(true);
@@ -929,12 +594,11 @@ function GalleryTab() {
 
         addConsoleEntry({
             id: crypto.randomUUID(), level: 'log',
-            message: `[Asset Studio] Generating animation video for "${selectedAsset.name}"...`,
+            message: `[Asset Studio] Generating ${animFrames}-frame animation for "${selectedAsset.name}"...`,
             timestamp: new Date().toISOString(),
         });
 
         try {
-            // Step 1: Generate video on server
             const res = await fetch('/api/assets/generate', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -943,90 +607,52 @@ function GalleryTab() {
                     prompt: animPrompt.trim(),
                     asset_type: 'animation',
                     target_path: targetPath,
-                    options: {
-                        source_image_url: sourceUrl,
-                        model_video: 'kling',
-                    },
+                    options: { source_image_url: sourceUrl, frame_count: animFrames },
                 }),
             });
 
             const data = await res.json();
-            const videoUrl = (data.output as Record<string, unknown> | undefined)?.video_url as string | undefined;
 
-            if (!res.ok || !data.success || !videoUrl) {
-                setAnimError(data.error || 'Video generation failed');
-                addConsoleEntry({ id: crypto.randomUUID(), level: 'error', message: `[Asset Studio] Video generation failed: ${data.error}`, timestamp: new Date().toISOString() });
+            if (!res.ok || !data.success) {
+                setAnimError(data.error || 'Animation generation failed');
+                addConsoleEntry({ id: crypto.randomUUID(), level: 'error', message: `[Asset Studio] Animation failed: ${data.error}`, timestamp: new Date().toISOString() });
                 return;
             }
 
-            addConsoleEntry({ id: crypto.randomUUID(), level: 'log', message: `[Asset Studio] Extracting ${animFrames} frames from video...`, timestamp: new Date().toISOString() });
+            const output = data.output as Record<string, unknown> | undefined;
+            const storageKey = (data.storage_key || output?.storage_key) as string;
+            const frameW = (output?.frame_width as number) || 64;
+            const frameH = (output?.frame_height as number) || 64;
+            const actualFrames = (output?.frame_count as number) || animFrames;
 
-            // Step 2: Extract frames client-side (native video resolution)
-            const { blob: spriteBlob, frameW, frameH } = await extractFrames(videoUrl, animFrames);
-
-            // Step 3: Get signed URL and upload sprite sheet directly to Supabase
-            const urlRes = await fetch('/api/assets/upload-url', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ project_id: project.id, target_path: targetPath }),
-            });
-            const urlData = await urlRes.json();
-            if (!urlRes.ok || !urlData.signed_url) {
-                setAnimError(urlData.error || 'Failed to get upload URL');
-                return;
-            }
-
-            const putRes = await fetch(urlData.signed_url, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'image/png' },
-                body: spriteBlob,
-            });
-            if (!putRes.ok) {
-                setAnimError('Sprite sheet upload to storage failed');
-                return;
-            }
-
-            // Register the file in project_files
-            await fetch('/api/assets/register-file', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    project_id: project.id,
-                    target_path: targetPath,
-                    storage_key: urlData.storage_key,
-                    size_bytes: spriteBlob.size,
-                }),
-            });
-
-            // Step 4: Register asset in store
             const assetId = crypto.randomUUID();
             addAsset({
                 id: assetId,
                 project_id: project.id,
                 name: `${selectedAsset.name} (${animPrompt.slice(0, 20)})`,
                 asset_type: 'sprite_sheet',
-                storage_key: urlData.storage_key || targetPath,
+                storage_key: storageKey || targetPath,
                 thumbnail_key: null,
                 file_format: 'png',
-                width: frameW * animFrames,
+                width: frameW * actualFrames,
                 height: frameH,
                 metadata: {
                     tags: ['animation'],
-                    frames: Array.from({ length: animFrames }, (_, i) => ({
+                    frames: Array.from({ length: actualFrames }, (_, i) => ({
                         x: i * frameW, y: 0, width: frameW, height: frameH, duration: 1,
                     })),
                     frameRate: 12,
                     loop: true,
                 },
                 generation_prompt: animPrompt.trim(),
-                generation_model: (data.output as Record<string, unknown>)?.model_used as string || null,
-                size_bytes: spriteBlob.size,
+                generation_model: (output?.model_used as string) || 'pixellab',
+                size_bytes: 0,
                 created_at: new Date().toISOString(),
             });
             setPreviewAssetId(assetId);
             refreshProjectFiles(project.id);
             setShowAnimPanel(false);
-            addConsoleEntry({ id: crypto.randomUUID(), level: 'log', message: `[Asset Studio] Animation complete → ${targetPath} (${animFrames} frames)`, timestamp: new Date().toISOString() });
+            addConsoleEntry({ id: crypto.randomUUID(), level: 'log', message: `[Asset Studio] Animation complete → ${targetPath} (${actualFrames} frames)`, timestamp: new Date().toISOString() });
         } catch (err) {
             setAnimError(err instanceof Error ? err.message : 'Animation failed');
         } finally {

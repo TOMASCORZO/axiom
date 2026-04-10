@@ -49,37 +49,35 @@ async function upsertProjectFile(ctx: ToolContext, path: string, content: string
 
 async function uploadBinaryAsset(ctx: ToolContext, path: string, buffer: ArrayBuffer, mimeType: string): Promise<string> {
     const storageKey = `projects/${ctx.userId}/${ctx.projectId}/${path}`;
-    try {
-        const admin = getAdmin();
-        const { error } = await admin.storage.from('assets').upload(storageKey, buffer, { contentType: mimeType, upsert: true });
-        if (error) console.error(`[axiom] Storage upload failed for ${path}:`, error.message);
-        admin.from('project_files').upsert({
-            project_id: ctx.projectId, path, content_type: 'binary',
-            size_bytes: buffer.byteLength, storage_key: storageKey,
-        }, { onConflict: 'project_id,path' }).then(({ error: e }) => {
-            if (e) console.error(`[axiom] File registration failed for ${path}:`, e.message);
-        });
-    } catch (e) { console.error(`[axiom] Upload failed for ${path}:`, e); }
+    const admin = getAdmin();
+    const { error } = await admin.storage.from('assets').upload(storageKey, buffer, { contentType: mimeType, upsert: true });
+    if (error) throw new Error(`Storage upload failed for ${path}: ${error.message}`);
+    const { error: regErr } = await admin.from('project_files').upsert({
+        project_id: ctx.projectId, path, content_type: 'binary',
+        size_bytes: buffer.byteLength, storage_key: storageKey,
+    }, { onConflict: 'project_id,path' });
+    if (regErr) console.error(`[axiom] File registration failed for ${path}:`, regErr.message);
     return storageKey;
 }
 
-// ── Image / 3D Generation (via fal.ai) ─────────────────────────────
+// ── Image / 3D Generation (PixelLab for 2D, fal.ai/Replicate for 3D) ──
 
 import { generate2D, generate3D, generateAnimation, img2img, downloadResult, removeBackground, type Model2D, type Provider } from '@/lib/assets/generate';
 
-async function generateImage(params: { prompt: string; width: number; height: number; style?: string; model_2d?: string; provider?: string; loras?: Array<{ url: string; scale?: number }> }): Promise<{ buffer: ArrayBuffer } | { error: string }> {
-    const model: Model2D = (params.model_2d as Model2D) || (process.env.REPLICATE_API_TOKEN ? 'flux-schnell' : 'sdxl');
-    const provider = params.provider as Provider | undefined;
+async function generateImage(params: { prompt: string; width: number; height: number; style?: string; model_2d?: string; provider?: string }): Promise<{ buffer: ArrayBuffer } | { error: string }> {
     const result = await generate2D({
         prompt: params.prompt,
-        model,
-        provider,
+        model: (params.model_2d as Model2D) || 'pixflux',
         width: params.width,
         height: params.height,
         style: params.style,
-        format: 'png',
-        loras: params.loras,
+        noBackground: true,
     });
+    // PixelLab returns buffer directly
+    if (result.success && result.buffer) {
+        return { buffer: result.buffer };
+    }
+    // Fallback: if imageUrl returned (shouldn't happen with PixelLab, but just in case)
     if (result.success && result.imageUrl) {
         try {
             const buffer = await downloadResult(result.imageUrl);
@@ -303,14 +301,13 @@ registerTool({
 
 registerTool({
     name: 'generate_sprite',
-    description: 'AI-generate a CUSTOM 2D sprite image, or create a variation via img2img when source_image_url is provided.',
+    description: 'AI-generate a pixel art sprite image via PixelLab, or create a variation via img2img when source_image_url is provided.',
     parameters: {
         type: 'object',
         properties: {
             prompt: { type: 'string' },
-            style: { type: 'string', enum: ['pixel_art', 'hand_drawn', 'vector', 'realistic', 'stylized'], default: 'stylized' },
-            width: { type: 'integer', default: 128 },
-            height: { type: 'integer', default: 128 },
+            width: { type: 'integer', default: 64 },
+            height: { type: 'integer', default: 64 },
             transparent_bg: { type: 'boolean', default: true },
             target_path: { type: 'string' },
             source_image_url: { type: 'string', description: 'Source image URL for img2img variation' },
@@ -322,13 +319,9 @@ registerTool({
     execute: async (ctx, input) => {
         const start = Date.now();
         const prompt = input.prompt as string;
-        const width = (input.width as number) || 128;
-        const height = (input.height as number) || 128;
+        const width = (input.width as number) || 64;
+        const height = (input.height as number) || 64;
         const targetPath = input.target_path as string;
-        const style = input.style as string | undefined;
-        const model2d = input.model_2d as string | undefined;
-        const prov = input.provider as string | undefined;
-        const loras = input.loras as Array<{ url: string; scale?: number }> | undefined;
         const sourceImageUrl = input.source_image_url as string | undefined;
         const strength = input.strength as number | undefined;
 
@@ -339,41 +332,24 @@ registerTool({
             const i2iResult = await img2img({
                 imageUrl: sourceImageUrl,
                 prompt,
-                model: (model2d as Model2D) || undefined,
-                provider: (prov as Provider) || undefined,
                 strength: strength ?? 0.5,
-                width, height, style, format: 'png',
+                width, height,
             });
-            if (i2iResult.success && i2iResult.imageUrl) {
-                try {
-                    const buffer = await downloadResult(i2iResult.imageUrl);
-                    result = { buffer };
-                } catch (err) {
-                    result = { error: `Download failed: ${err instanceof Error ? err.message : 'unknown'}` };
-                }
+            if (i2iResult.success && i2iResult.buffer) {
+                result = { buffer: i2iResult.buffer };
+            } else if (i2iResult.success && i2iResult.imageUrl) {
+                try { result = { buffer: await downloadResult(i2iResult.imageUrl) }; }
+                catch (err) { result = { error: `Download failed: ${err instanceof Error ? err.message : 'unknown'}` }; }
             } else {
                 result = { error: i2iResult.error || 'Img2Img failed' };
             }
         } else {
-            // Text-to-image mode
-            result = await generateImage({ prompt: `Game sprite: ${prompt}`, width, height, style, model_2d: model2d, provider: prov, loras });
+            // Text-to-image mode (PixelLab generates with transparent bg by default)
+            result = await generateImage({ prompt: `Game sprite: ${prompt}`, width, height });
         }
 
         if ('buffer' in result) {
-            let finalBuffer = result.buffer;
-
-            // Remove background for guaranteed transparency (default: true)
-            const wantTransparent = input.transparent_bg !== false;
-            if (wantTransparent) {
-                const bgResult = await removeBackground(finalBuffer);
-                if (bgResult.success && bgResult.buffer) {
-                    finalBuffer = bgResult.buffer;
-                } else {
-                    console.warn('[axiom] Background removal failed, using original:', bgResult.error);
-                }
-            }
-
-            const sk = await uploadBinaryAsset(ctx, targetPath, finalBuffer, 'image/png');
+            const sk = await uploadBinaryAsset(ctx, targetPath, result.buffer, 'image/png');
             return { callId: '', success: true, output: { message: `Sprite generated at ${targetPath}`, path: targetPath, storage_key: sk }, filesModified: [targetPath], duration_ms: Date.now() - start };
         }
         return { callId: '', success: false, output: { message: result.error }, error: result.error, filesModified: [], duration_ms: Date.now() - start };
@@ -382,24 +358,20 @@ registerTool({
 
 registerTool({
     name: 'generate_texture',
-    description: 'AI-generate a texture. Costs 5 credits.',
+    description: 'AI-generate a pixel art texture via PixelLab.',
     parameters: {
         type: 'object',
-        properties: { prompt: { type: 'string' }, style: { type: 'string', enum: ['pbr', 'stylized', 'pixel', 'hand_painted'], default: 'stylized' }, width: { type: 'integer', default: 512 }, height: { type: 'integer', default: 512 }, tileable: { type: 'boolean', default: false }, target_path: { type: 'string' } },
+        properties: { prompt: { type: 'string' }, width: { type: 'integer', default: 64 }, height: { type: 'integer', default: 64 }, tileable: { type: 'boolean', default: false }, target_path: { type: 'string' } },
         required: ['prompt', 'target_path'],
     },
     access: ['build'],
     execute: async (ctx, input) => {
         const start = Date.now();
         const prompt = input.prompt as string;
-        const width = (input.width as number) || 512;
-        const height = (input.height as number) || 512;
+        const width = (input.width as number) || 64;
+        const height = (input.height as number) || 64;
         const targetPath = input.target_path as string;
-        const tStyle = input.style as string | undefined;
-        const tModel = input.model_2d as string | undefined;
-        const tProv = input.provider as string | undefined;
-        const tLoras = input.loras as Array<{ url: string; scale?: number }> | undefined;
-        const result = await generateImage({ prompt: `Seamless game texture: ${prompt}`, width, height, style: tStyle, model_2d: tModel, provider: tProv, loras: tLoras });
+        const result = await generateImage({ prompt: `Seamless game texture: ${prompt}`, width, height });
         if ('buffer' in result) {
             const sk = await uploadBinaryAsset(ctx, targetPath, result.buffer, 'image/png');
             return { callId: '', success: true, output: { message: `Texture at ${targetPath}`, path: targetPath, storage_key: sk }, filesModified: [targetPath], duration_ms: Date.now() - start };
@@ -428,9 +400,8 @@ registerTool({
         const targetPath = input.target_path as string;
         const model3d = (input.model as 'trellis' | 'hunyuan3d') || 'trellis';
         const imageUrl = input.image_url as string | undefined;
-        const gen3dProv = input.provider as Provider | undefined;
 
-        const result = await generate3D({ prompt, imageUrl, model: model3d, provider: gen3dProv });
+        const result = await generate3D({ prompt, imageUrl, model: model3d });
         if (result.success && result.modelUrl) {
             const buf = await downloadResult(result.modelUrl);
             const sk = await uploadBinaryAsset(ctx, targetPath, buf, 'model/gltf-binary');
@@ -445,44 +416,57 @@ registerTool({
 
 registerTool({
     name: 'generate_animation',
-    description: 'Generate animation from a source image using image-to-video AI. Returns a video URL — frame extraction into sprite sheets is handled client-side.',
+    description: 'Generate a pixel art animation sprite sheet from a source image using PixelLab. Returns the sprite sheet as an uploaded asset with frame metadata.',
     parameters: {
         type: 'object',
         properties: {
-            prompt: { type: 'string', description: 'Description of the desired motion (e.g. "tractor driving forward", "ship rocking on ocean waves", "character running")' },
+            prompt: { type: 'string', description: 'Description of the desired motion (e.g. "walking forward", "idle breathing", "attacking with sword")' },
             source_image_url: { type: 'string', description: 'Public URL of the source static image to animate' },
-            model_video: { type: 'string', enum: ['kling', 'minimax', 'wan'], description: 'Video model to use (default: kling)' },
-            provider: { type: 'string' },
+            frame_count: { type: 'integer', description: 'Number of animation frames (4-16, must be even)', default: 6 },
             target_path: { type: 'string' },
         },
         required: ['prompt', 'source_image_url', 'target_path'],
     },
     access: ['build'],
-    execute: async (_ctx, input) => {
+    execute: async (ctx, input) => {
         const start = Date.now();
         const prompt = input.prompt as string;
         const sourceImageUrl = input.source_image_url as string;
+        const targetPath = input.target_path as string;
+        const frameCount = (input.frame_count as number) || 6;
 
         const result = await generateAnimation({
             sourceImageUrl,
             prompt,
-            model: input.model_video as import('@/lib/assets/generate').ModelVideo | undefined,
-            provider: input.provider as Provider | undefined,
+            frameCount,
+            noBackground: true,
         });
 
-        if (!result.success || !result.videoUrl) {
-            return { callId: '', success: false, error: result.error || 'Video generation failed', output: { message: result.error }, filesModified: [], duration_ms: Date.now() - start };
+        if (!result.success || !result.spriteSheetBuffer) {
+            return { callId: '', success: false, error: result.error || 'Animation generation failed', output: { message: result.error }, filesModified: [], duration_ms: Date.now() - start };
+        }
+
+        // Upload the composed sprite sheet to storage
+        let sk: string;
+        try {
+            sk = await uploadBinaryAsset(ctx, targetPath, result.spriteSheetBuffer, 'image/png');
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : 'Upload failed';
+            return { callId: '', success: false, error: msg, output: { message: msg }, filesModified: [], duration_ms: Date.now() - start };
         }
 
         return {
             callId: '', success: true,
             output: {
-                message: `Animation video generated (${result.model}, ~$${result.cost.toFixed(3)})`,
-                video_url: result.videoUrl,
+                message: `Animation sprite sheet generated at ${targetPath} (${result.frameCount} frames, ~$${result.cost.toFixed(3)})`,
+                storage_key: sk,
+                frame_width: result.frameWidth,
+                frame_height: result.frameHeight,
+                frame_count: result.frameCount,
                 model_used: result.model,
                 cost: result.cost,
             },
-            filesModified: [],
+            filesModified: [targetPath],
             duration_ms: Date.now() - start,
         };
     },

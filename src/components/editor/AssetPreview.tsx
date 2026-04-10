@@ -33,7 +33,7 @@ export default function AssetPreview() {
 
     // Animate options
     const [animPrompt, setAnimPrompt] = useState('');
-    const [animFrames, setAnimFrames] = useState(6);
+    const [animFrames, setAnimFrames] = useState(6); // PixelLab requires even, 4-16
 
     // Img2Img options
     const [img2imgPrompt, setImg2imgPrompt] = useState('');
@@ -53,46 +53,7 @@ export default function AssetPreview() {
     const goPrev = () => { if (hasPrev) setPreviewAssetId(assets[currentIdx - 1].id); };
     const goNext = () => { if (hasNext) setPreviewAssetId(assets[currentIdx + 1].id); };
 
-    /** Extract N frames from video at native resolution, assemble into sprite sheet. */
-    const extractFrames = useCallback(async (videoUrl: string, frameCount: number): Promise<{ blob: Blob; frameW: number; frameH: number }> => {
-        return new Promise<{ blob: Blob; frameW: number; frameH: number }>((resolve, reject) => {
-            const video = document.createElement('video');
-            video.crossOrigin = 'anonymous';
-            video.muted = true;
-            video.playsInline = true;
-            video.src = videoUrl;
-            video.onloadedmetadata = async () => {
-                const vw = video.videoWidth;
-                const vh = video.videoHeight;
-                const canvas = document.createElement('canvas');
-                canvas.width = vw * frameCount;
-                canvas.height = vh;
-                const ctx = canvas.getContext('2d')!;
-                const duration = video.duration;
-                for (let i = 0; i < frameCount; i++) {
-                    video.currentTime = i * duration / frameCount;
-                    await new Promise<void>(r => { video.onseeked = () => r(); });
-                    ctx.drawImage(video, i * vw, 0, vw, vh);
-                }
-                // Remove white background → transparent
-                const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-                const d = imageData.data;
-                const T = 230; // R,G,B all above this → transparent
-                for (let p = 0; p < d.length; p += 4) {
-                    if (d[p] >= T && d[p + 1] >= T && d[p + 2] >= T) d[p + 3] = 0;
-                }
-                ctx.putImageData(imageData, 0, 0);
-                canvas.toBlob(blob => {
-                    if (blob) resolve({ blob, frameW: vw, frameH: vh });
-                    else reject(new Error('Failed to create sprite sheet'));
-                }, 'image/png');
-            };
-            video.onerror = () => reject(new Error('Failed to load video'));
-            video.load();
-        });
-    }, []);
-
-    // ── Animate handler ──
+    // ── Animate handler (PixelLab: server generates sprite sheet directly) ──
     const handleAnimate = async () => {
         if (!asset?.storage_key || !project?.id || !animPrompt.trim()) return;
         setActionBusy(true);
@@ -104,10 +65,9 @@ export default function AssetPreview() {
         const promptSlug = animPrompt.trim().replace(/[^a-zA-Z0-9]/g, '_').slice(0, 20);
         const targetPath = `assets/${baseName}_${promptSlug}_${animFrames}f.png`;
 
-        addConsoleEntry({ id: crypto.randomUUID(), level: 'log', message: `[Asset Studio] Generating animation video for "${asset.name}"...`, timestamp: new Date().toISOString() });
+        addConsoleEntry({ id: crypto.randomUUID(), level: 'log', message: `[Asset Studio] Generating ${animFrames}-frame animation for "${asset.name}"...`, timestamp: new Date().toISOString() });
 
         try {
-            // Step 1: Generate video on server
             const res = await fetch('/api/assets/generate', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -116,76 +76,46 @@ export default function AssetPreview() {
                     prompt: animPrompt.trim(),
                     asset_type: 'animation',
                     target_path: targetPath,
-                    options: { source_image_url: sourceUrl, model_video: 'kling' },
+                    options: { source_image_url: sourceUrl, frame_count: animFrames },
                 }),
             });
             const data = await res.json();
-            const videoUrl = (data.output as Record<string, unknown> | undefined)?.video_url as string | undefined;
 
-            if (!res.ok || !data.success || !videoUrl) {
-                setActionError(data.error || 'Video generation failed');
+            if (!res.ok || !data.success) {
+                setActionError(data.error || 'Animation generation failed');
                 return;
             }
 
-            addConsoleEntry({ id: crypto.randomUUID(), level: 'log', message: `[Asset Studio] Extracting ${animFrames} frames from video...`, timestamp: new Date().toISOString() });
+            const output = data.output as Record<string, unknown> | undefined;
+            const storageKey = (data.storage_key || output?.storage_key) as string | undefined;
+            const frameW = output?.frame_width as number | undefined;
+            const frameH = output?.frame_height as number | undefined;
+            const actualFrames = output?.frame_count as number | undefined;
 
-            // Step 2: Extract frames client-side (native video resolution)
-            const { blob: spriteBlob, frameW, frameH } = await extractFrames(videoUrl, animFrames);
-
-            // Step 3: Get signed URL and upload sprite sheet directly to Supabase
-            const urlRes = await fetch('/api/assets/upload-url', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ project_id: project.id, target_path: targetPath }),
-            });
-            const urlData = await urlRes.json();
-            if (!urlRes.ok || !urlData.signed_url) {
-                setActionError(urlData.error || 'Failed to get upload URL');
+            if (!storageKey || !frameW || !frameH || !actualFrames) {
+                setActionError('Animation succeeded but response is missing frame metadata — try again.');
                 return;
             }
 
-            const putRes = await fetch(urlData.signed_url, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'image/png' },
-                body: spriteBlob,
-            });
-            if (!putRes.ok) {
-                setActionError('Sprite sheet upload to storage failed');
-                return;
-            }
-
-            // Register the file in project_files
-            await fetch('/api/assets/register-file', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    project_id: project.id,
-                    target_path: targetPath,
-                    storage_key: urlData.storage_key,
-                    size_bytes: spriteBlob.size,
-                }),
-            });
-
-            // Step 4: Register asset
             const assetId = crypto.randomUUID();
             addAsset({
                 id: assetId, project_id: project.id,
                 name: `${asset.name} (${animPrompt.trim().slice(0, 20)})`, asset_type: 'sprite_sheet',
-                storage_key: urlData.storage_key || targetPath, thumbnail_key: null, file_format: 'png',
-                width: frameW * animFrames, height: frameH,
+                storage_key: storageKey, thumbnail_key: null, file_format: 'png',
+                width: frameW * actualFrames, height: frameH,
                 metadata: {
                     tags: ['animation'],
-                    frames: Array.from({ length: animFrames }, (_, i) => ({ x: i * frameW, y: 0, width: frameW, height: frameH, duration: 1 })),
+                    frames: Array.from({ length: actualFrames }, (_, i) => ({ x: i * frameW, y: 0, width: frameW, height: frameH, duration: 1 })),
                     frameRate: 12, loop: true,
                 },
                 generation_prompt: animPrompt.trim(),
-                generation_model: (data.output as Record<string, unknown>)?.model_used as string || null,
-                size_bytes: spriteBlob.size, created_at: new Date().toISOString(),
+                generation_model: (output?.model_used as string) || 'pixellab',
+                size_bytes: 0, created_at: new Date().toISOString(),
             });
             setPreviewAssetId(assetId);
             refreshProjectFiles(project.id);
             setActiveAction(null);
-            addConsoleEntry({ id: crypto.randomUUID(), level: 'log', message: `[Asset Studio] Animation complete → ${targetPath} (${animFrames} frames)`, timestamp: new Date().toISOString() });
+            addConsoleEntry({ id: crypto.randomUUID(), level: 'log', message: `[Asset Studio] Animation complete → ${targetPath} (${actualFrames} frames)`, timestamp: new Date().toISOString() });
         } catch (err) { setActionError(err instanceof Error ? err.message : 'Animation failed'); }
         finally { setActionBusy(false); setAssetGenerating(false); }
     };
@@ -381,8 +311,8 @@ function ActionPanel({ action, busy, error, asset, animPrompt, setAnimPrompt, an
                 {/* Frames */}
                 <div className="flex items-center gap-2">
                     <label className="text-[10px] text-zinc-500 whitespace-nowrap">Frames</label>
-                    <input type="range" min={2} max={12} value={animFrames} onChange={e => setAnimFrames(Number(e.target.value))} className="flex-1 accent-violet-500 h-1" />
-                    <span className="text-[10px] text-zinc-400 w-4 text-center font-mono">{animFrames}</span>
+                    <input type="range" min={4} max={16} step={2} value={animFrames} onChange={e => setAnimFrames(Number(e.target.value))} className="flex-1 accent-violet-500 h-1" />
+                    <span className="text-[10px] text-zinc-400 w-6 text-center font-mono">{animFrames}</span>
                 </div>
                 {error && <p className="text-[10px] text-red-400">{error}</p>}
                 <button onClick={onAnimate} disabled={busy || generating || !animPrompt.trim()}

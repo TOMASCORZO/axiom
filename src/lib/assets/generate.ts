@@ -1,16 +1,11 @@
 /**
- * Unified AI Asset Generation — fal.ai + Replicate
+ * Unified AI Asset Generation — PixelLab (2D pixel art & animation) + fal.ai/Replicate (3D)
  *
- * Provider is auto-selected based on available env keys:
- *   FAL_KEY            → fal.ai
- *   REPLICATE_API_TOKEN → Replicate
+ * PixelLab API for pixel art:
+ *   - Pixflux         ~$0.01   — native pixel art generation (up to 400×400)
+ *   - Animate v3      ~$0.015  — text-driven sprite animation (4-16 frames)
  *
- * 2D Models:
- *   - SDXL          fal ~$0.00 | replicate ~$0.005   — fast
- *   - Flux schnell  fal $0.003 | replicate $0.003    — best value
- *   - Flux dev      fal $0.025 | replicate $0.025    — highest quality
- *
- * 3D Models:
+ * 3D Models (unchanged):
  *   - Trellis       fal $0.02                        — fast image→3D
  *   - Hunyuan3D     fal $0.375 | replicate $0.18     — high quality
  */
@@ -18,7 +13,12 @@
 import { fal } from '@fal-ai/client';
 import Replicate from 'replicate';
 
-// ── Configuration ────────────────────────────────────────────────────
+// ── PixelLab Configuration ──────────────────────────────────────────
+
+const PIXELLAB_BASE = 'https://api.pixellab.ai/v2';
+const pixelLabToken = process.env.PIXELLAB_API_TOKEN;
+
+// ── 3D Provider Configuration (unchanged) ───────────────────────────
 
 const falKey = process.env.FAL_KEY;
 if (falKey) fal.config({ credentials: falKey });
@@ -26,32 +26,11 @@ if (falKey) fal.config({ credentials: falKey });
 const replicateToken = process.env.REPLICATE_API_TOKEN;
 const replicate = replicateToken ? new Replicate({ auth: replicateToken }) : null;
 
-export type Provider = 'fal' | 'replicate';
-
-/** Returns which providers are available based on env keys */
-export function availableProviders(): Provider[] {
-    const p: Provider[] = [];
-    if (falKey) p.push('fal');
-    if (replicateToken) p.push('replicate');
-    return p;
-}
-
-function pickProvider(preferred?: Provider): Provider {
-    if (preferred && (preferred === 'fal' ? falKey : replicateToken)) return preferred;
-    if (falKey) return 'fal';
-    if (replicateToken) return 'replicate';
-    return 'fal'; // will fail with a clear error
-}
-
 // ── Types ────────────────────────────────────────────────────────────
 
-export type Model2D = 'sdxl' | 'flux-schnell' | 'flux-dev';
+export type Provider = 'pixellab' | 'fal' | 'replicate';
+export type Model2D = 'pixflux' | 'pixflux-pro';
 export type Model3D = 'trellis' | 'hunyuan3d';
-
-export interface LoraWeight {
-    url: string;       // HuggingFace URL, Civitai URL, or direct .safetensors URL
-    scale?: number;    // 0.0–2.0, default 1.0
-}
 
 export interface Generate2DOptions {
     prompt: string;
@@ -63,7 +42,20 @@ export interface Generate2DOptions {
     steps?: number;
     format?: 'png' | 'jpeg';
     style?: string;
-    loras?: LoraWeight[];
+    noBackground?: boolean;
+    /** PixelLab outline style */
+    outline?: string;
+    /** PixelLab shading level */
+    shading?: string;
+    /** PixelLab detail level */
+    detail?: string;
+    /** PixelLab view direction (e.g. 'side', 'top-down', '3/4') */
+    view?: string;
+    /** PixelLab facing direction (e.g. 'right', 'left', 'front') */
+    direction?: string;
+    /** Isometric projection */
+    isometric?: boolean;
+    loras?: Array<{ url: string; scale?: number }>;
 }
 
 export interface Generate3DOptions {
@@ -78,12 +70,51 @@ export interface Generate3DOptions {
 export interface GenerationResult {
     success: boolean;
     imageUrl?: string;
+    buffer?: ArrayBuffer;
     modelUrl?: string;
     thumbnailUrl?: string;
     width?: number;
     height?: number;
     model: string;
-    provider: Provider;
+    provider: string;
+    cost: number;
+    error?: string;
+}
+
+export interface Img2ImgOptions {
+    imageUrl: string;
+    prompt: string;
+    model?: Model2D;
+    provider?: Provider;
+    strength?: number;
+    width?: number;
+    height?: number;
+    negativePrompt?: string;
+    steps?: number;
+    format?: 'png' | 'jpeg';
+    style?: string;
+}
+
+export type ModelVideo = 'pixellab';
+
+export interface AnimateOptions {
+    sourceImageUrl: string;
+    prompt: string;
+    model?: ModelVideo;
+    provider?: Provider;
+    frameCount?: number;
+    noBackground?: boolean;
+}
+
+export interface AnimationResult {
+    success: boolean;
+    /** Composed sprite sheet PNG buffer (frames arranged horizontally) */
+    spriteSheetBuffer?: ArrayBuffer;
+    frameWidth?: number;
+    frameHeight?: number;
+    frameCount?: number;
+    model: string;
+    provider: string;
     cost: number;
     error?: string;
 }
@@ -91,269 +122,362 @@ export interface GenerationResult {
 // ── Pricing ──────────────────────────────────────────────────────────
 
 export const PRICING = {
+    pixellab: {
+        'pixflux':      { label: 'Pixflux',          cost: 0.01,   unit: 'per image',  speed: 'Fast' },
+        'pixflux-pro':  { label: 'Pixflux Pro',      cost: 0.013,  unit: 'per image',  speed: 'Medium' },
+        'animate':      { label: 'Animate v3',       cost: 0.015,  unit: 'per anim',   speed: 'Medium' },
+    },
     fal: {
-        'sdxl':          { label: 'SDXL',           cost: 0.00,   unit: 'per image',     speed: 'Fast' },
-        'flux-schnell':  { label: 'Flux Schnell',   cost: 0.003,  unit: 'per megapixel', speed: 'Fast' },
-        'flux-dev':      { label: 'Flux Dev',       cost: 0.025,  unit: 'per megapixel', speed: 'Medium' },
-        'trellis':       { label: 'Trellis',        cost: 0.02,   unit: 'per model',     speed: 'Fast' },
-        'hunyuan3d':     { label: 'Hunyuan3D v3',   cost: 0.375,  unit: 'per model',     speed: 'Slow' },
-        'kling':         { label: 'Kling v1',       cost: 0.065,  unit: 'per video',     speed: 'Medium' },
-        'minimax':       { label: 'Minimax',        cost: 0.04,   unit: 'per video',     speed: 'Fast' },
-        'wan':           { label: 'Wan 2.1',        cost: 0.04,   unit: 'per video',     speed: 'Medium' },
+        'trellis':   { label: 'Trellis',      cost: 0.02,  unit: 'per model', speed: 'Fast' },
+        'hunyuan3d': { label: 'Hunyuan3D v3', cost: 0.375, unit: 'per model', speed: 'Slow' },
     },
     replicate: {
-        'sdxl':          { label: 'SDXL',           cost: 0.005,  unit: 'per image',     speed: 'Fast' },
-        'flux-schnell':  { label: 'Flux Schnell',   cost: 0.003,  unit: 'per image',     speed: 'Fast' },
-        'flux-dev':      { label: 'Flux Dev',       cost: 0.025,  unit: 'per image',     speed: 'Medium' },
-        'trellis':       { label: 'Trellis',        cost: 0.02,   unit: 'per model',     speed: 'Fast' },
-        'hunyuan3d':     { label: 'Hunyuan3D v2',   cost: 0.18,   unit: 'per model',     speed: 'Slow' },
-        'kling':         { label: 'Kling v2.6',     cost: 0.05,   unit: 'per video',     speed: 'Medium' },
-        'minimax':       { label: 'Minimax',        cost: 0.05,   unit: 'per video',     speed: 'Fast' },
-        'wan':           { label: 'Wan 2.1',        cost: 0.05,   unit: 'per video',     speed: 'Medium' },
+        'trellis':   { label: 'Trellis',      cost: 0.02,  unit: 'per model', speed: 'Fast' },
+        'hunyuan3d': { label: 'Hunyuan3D v2', cost: 0.18,  unit: 'per model', speed: 'Slow' },
     },
 } as const;
 
-// ── Helpers ──────────────────────────────────────────────────────────
+// =====================================================================
+// PIXELLAB API HELPERS
+// =====================================================================
 
-type FalImageSize = 'square' | 'square_hd' | 'portrait_4_3' | 'portrait_16_9' | 'landscape_4_3' | 'landscape_16_9';
-
-function toFalSize(w: number, h: number): FalImageSize {
-    const ratio = w / h;
-    if (Math.abs(ratio - 1) < 0.1) return w >= 768 ? 'square_hd' : 'square';
-    if (ratio > 1) return ratio > 1.5 ? 'landscape_16_9' : 'landscape_4_3';
-    return ratio < 0.67 ? 'portrait_16_9' : 'portrait_4_3';
+interface PixelLabImage {
+    type: 'base64';
+    base64: string;
+    format: 'png' | 'jpeg';
 }
 
-const STYLE_SUFFIXES: Record<string, string> = {
-    pixel_art:    'pixel art style, retro, crisp pixels, no anti-aliasing',
-    hand_drawn:   'hand-drawn illustration style, sketchy lines',
-    vector:       'vector art, flat colors, clean edges, SVG-like',
-    realistic:    'photorealistic, highly detailed, 8K quality',
-    stylized:     'stylized game art, vibrant colors, game-ready',
-    low_poly:     'low poly 3D style, minimal geometry, flat shading',
-    pbr:          'PBR material, physically based, metallic roughness',
-    hand_painted: 'hand-painted texture, painterly style',
-};
+interface PixelLabResponse {
+    // Some endpoints wrap in success/data/error, some return data directly
+    success?: boolean;
+    data?: Record<string, unknown>;
+    error?: string | null;
+    usage?: { credits_used?: number; remaining_credits?: number };
+    // Direct fields (some endpoints)
+    image?: PixelLabImage;
+    images?: PixelLabImage[];
+    background_job_id?: string;
+    // Character endpoints
+    character_id?: string;
+}
 
-function buildPrompt(prompt: string, style?: string, is3D = false): string {
-    const parts = [prompt];
-    if (style && STYLE_SUFFIXES[style]) parts.push(STYLE_SUFFIXES[style]);
-    if (!is3D) parts.push('game asset, transparent background, isolated object, no text');
-    return parts.join('. ');
+async function pixelLabPost(endpoint: string, body: unknown, initialTimeoutMs = 120_000): Promise<PixelLabResponse> {
+    if (!pixelLabToken) {
+        throw new Error('PIXELLAB_API_TOKEN not set — get your key at https://pixellab.ai/account');
+    }
+
+    const res = await fetch(`${PIXELLAB_BASE}${endpoint}`, {
+        method: 'POST',
+        headers: {
+            'Authorization': `Bearer ${pixelLabToken}`,
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(initialTimeoutMs),
+    });
+
+    if (res.status === 202) {
+        // Async job — poll for completion
+        const data = await res.json();
+        const jobId = data.background_job_id ?? data.data?.background_job_id;
+        if (!jobId) throw new Error('Async endpoint returned 202 but no job ID');
+        return pollBackgroundJob(jobId);
+    }
+
+    if (!res.ok) {
+        const errBody = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+        throw new Error(errBody.error || errBody.detail || `PixelLab API error: ${res.status}`);
+    }
+
+    return res.json();
+}
+
+async function pixelLabGet(endpoint: string): Promise<PixelLabResponse> {
+    if (!pixelLabToken) throw new Error('PIXELLAB_API_TOKEN not set');
+
+    const res = await fetch(`${PIXELLAB_BASE}${endpoint}`, {
+        headers: { 'Authorization': `Bearer ${pixelLabToken}` },
+        signal: AbortSignal.timeout(30_000),
+    });
+
+    if (!res.ok) {
+        if (res.status === 423) throw new Error('STILL_PROCESSING');
+        const errBody = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+        throw new Error(errBody.error || `PixelLab API error: ${res.status}`);
+    }
+
+    return res.json();
+}
+
+async function pollBackgroundJob(jobId: string, maxAttempts = 110): Promise<PixelLabResponse> {
+    for (let i = 0; i < maxAttempts; i++) {
+        await new Promise(r => setTimeout(r, 2000));
+        try {
+            const result = await pixelLabGet(`/background-jobs/${jobId}`);
+            return result; // 200 = done
+        } catch (err) {
+            if (err instanceof Error && err.message === 'STILL_PROCESSING') continue;
+            throw err;
+        }
+    }
+    throw new Error(`PixelLab job ${jobId} timed out after ${maxAttempts * 2}s`);
+}
+
+/** Convert an image URL to PixelLab base64 image input format */
+async function imageUrlToBase64(url: string): Promise<PixelLabImage> {
+    const res = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+    if (!res.ok) throw new Error(`Failed to fetch image: ${res.status}`);
+    const arrayBuf = await res.arrayBuffer();
+    const base64 = Buffer.from(arrayBuf).toString('base64');
+    const contentType = res.headers.get('content-type') || 'image/png';
+    const format = contentType.includes('jpeg') || contentType.includes('jpg') ? 'jpeg' : 'png';
+    return { type: 'base64', base64, format } as PixelLabImage;
+}
+
+/** Extract image buffer from PixelLab response (handles multiple response formats) */
+function extractImageBuffer(response: PixelLabResponse): Buffer | null {
+    // Try: response.image
+    const img = response.image ?? (response.data?.image as PixelLabImage | undefined);
+    if (img?.base64) return Buffer.from(img.base64, 'base64');
+
+    // Try: response.images[0]
+    const images = response.images ?? (response.data?.images as PixelLabImage[] | undefined);
+    if (images?.[0]?.base64) return Buffer.from(images[0].base64, 'base64');
+
+    // Try: response.data.base64 (direct)
+    const directB64 = response.data?.base64 as string | undefined;
+    if (directB64) return Buffer.from(directB64, 'base64');
+
+    return null;
+}
+
+/** Extract multiple image buffers from PixelLab response (for animations) */
+function extractImageBuffers(response: PixelLabResponse): Buffer[] {
+    const images = response.images ?? (response.data?.images as PixelLabImage[] | undefined);
+    if (images?.length) {
+        return images.filter(img => img.base64).map(img => Buffer.from(img.base64, 'base64'));
+    }
+
+    // Fallback: try single image
+    const single = extractImageBuffer(response);
+    return single ? [single] : [];
 }
 
 // =====================================================================
-// 2D GENERATION
+// 2D GENERATION (PixelLab Pixflux)
 // =====================================================================
 
 export async function generate2D(opts: Generate2DOptions): Promise<GenerationResult> {
-    const provider = pickProvider(opts.provider);
-    const model = opts.model ?? 'flux-schnell';
-
-    // Force clean white background with no shadows for easy bg removal
-    const enriched = {
-        ...opts,
-        prompt: `${opts.prompt}. Plain solid white background, no shadows, no drop shadow, no cast shadow, no scenery, isolated subject on pure white`,
-    };
-
-    if (provider === 'replicate') return generate2DReplicate(enriched, model);
-    return generate2DFal(enriched, model);
-}
-
-// ── fal.ai 2D ────────────────────────────────────────────────────────
-
-const FAL_2D_MAP: Record<Model2D, string> = {
-    'sdxl':         'fal-ai/fast-sdxl',
-    'flux-schnell': 'fal-ai/flux/schnell',
-    'flux-dev':     'fal-ai/flux/dev',
-};
-
-async function generate2DFal(opts: Generate2DOptions, model: Model2D): Promise<GenerationResult> {
-    const falModel = FAL_2D_MAP[model];
-    // AI models need minimum resolution to produce quality output — generate at
-    // model-native size, the caller (game tool) will downscale to game-asset size
-    const minRes = model === 'sdxl' ? 512 : 1024;
-    const w = Math.max(opts.width ?? 512, minRes);
-    const h = Math.max(opts.height ?? 512, minRes);
-    const prompt = buildPrompt(opts.prompt, opts.style);
+    const model = opts.model ?? 'pixflux';
+    const w = Math.min(Math.max(opts.width ?? 64, 16), 400);
+    const h = Math.min(Math.max(opts.height ?? 64, 16), 400);
 
     try {
-        const input: Record<string, unknown> = {
-            prompt,
-            image_size: toFalSize(w, h),
-            num_images: 1,
-            output_format: opts.format ?? 'png',
-            enable_safety_checker: true,
+        const body: Record<string, unknown> = {
+            description: opts.prompt,
+            image_size: { width: w, height: h },
+            no_background: opts.noBackground !== false, // default true
         };
 
-        if (opts.negativePrompt) input.negative_prompt = opts.negativePrompt;
+        if (opts.outline) body.outline = opts.outline;
+        if (opts.shading) body.shading = opts.shading;
+        if (opts.detail) body.detail = opts.detail;
+        if (opts.view) body.view = opts.view;
+        if (opts.direction) body.direction = opts.direction;
+        if (opts.isometric !== undefined) body.isometric = opts.isometric;
 
-        if (model === 'sdxl') {
-            input.num_inference_steps = opts.steps ?? 25;
-            input.guidance_scale = 7.5;
-            input.format = opts.format ?? 'png';
-            delete input.output_format;
-        } else if (model === 'flux-schnell') {
-            input.num_inference_steps = opts.steps ?? 4;
-        } else {
-            input.num_inference_steps = opts.steps ?? 28;
-            input.guidance_scale = 3.5;
+        const endpoint = model === 'pixflux-pro' ? '/generate-image-v2' : '/create-image-pixflux';
+        const response = await pixelLabPost(endpoint, body);
+        const buffer = extractImageBuffer(response);
+
+        if (!buffer) {
+            console.error('[pixellab] Unexpected response shape:', JSON.stringify(response).slice(0, 500));
+            return { success: false, model, provider: 'pixellab', cost: 0, error: 'No image in PixelLab response' };
         }
 
-        // LoRA support — fal.ai accepts loras on SDXL and Flux models
-        if (opts.loras?.length) {
-            input.loras = opts.loras.map(l => ({ path: l.url, scale: l.scale ?? 1.0 }));
-        }
-
-        const result = await fal.subscribe(falModel, { input });
-        const data = result.data as { images?: Array<{ url: string; width: number; height: number }> };
-        const img = data.images?.[0];
-
-        if (!img?.url) {
-            return { success: false, model: falModel, provider: 'fal', cost: 0, error: 'No image returned' };
-        }
-
-        const megapixels = Math.ceil((img.width * img.height) / 1_000_000);
-        const cost = model === 'sdxl' ? 0 : PRICING.fal[model].cost * megapixels;
-
-        return { success: true, imageUrl: img.url, width: img.width, height: img.height, model: falModel, provider: 'fal', cost };
-    } catch (err) {
-        return { success: false, model: falModel, provider: 'fal', cost: 0, error: err instanceof Error ? err.message : 'fal.ai generation failed' };
-    }
-}
-
-// ── Replicate 2D ─────────────────────────────────────────────────────
-
-const REPLICATE_2D_MAP: Record<Model2D, string> = {
-    'sdxl':         'stability-ai/sdxl:7762fd07cf82c948538e41f63f77d685e02b063e37e496e96eefd46c929f9bdc',
-    'flux-schnell': 'black-forest-labs/flux-schnell',
-    'flux-dev':     'black-forest-labs/flux-dev',
-};
-
-async function generate2DReplicate(opts: Generate2DOptions, model: Model2D): Promise<GenerationResult> {
-    if (!replicate) {
-        return { success: false, model: model, provider: 'replicate', cost: 0, error: 'REPLICATE_API_TOKEN not set' };
-    }
-
-    let repModel = REPLICATE_2D_MAP[model];
-    // AI models need minimum resolution — generate at model-native size,
-    // the caller (game tool) will downscale to game-asset size
-    const minRes = model === 'sdxl' ? 512 : 1024;
-    const w = Math.max(opts.width ?? 512, minRes);
-    const h = Math.max(opts.height ?? 512, minRes);
-    const prompt = buildPrompt(opts.prompt, opts.style);
-    const hasLoras = opts.loras && opts.loras.length > 0;
-
-    // Replicate uses a dedicated model for Flux + LoRA
-    if (hasLoras && model === 'flux-dev') {
-        repModel = 'lucataco/flux-dev-lora';
-    }
-
-    try {
-        let input: Record<string, unknown>;
-
-        if (model === 'sdxl') {
-            input = {
-                prompt,
-                negative_prompt: opts.negativePrompt ?? 'blurry, low quality, text, watermark',
-                width: Math.min(w, 1024),
-                height: Math.min(h, 1024),
-                num_outputs: 1,
-                num_inference_steps: opts.steps ?? 25,
-                guidance_scale: 7.5,
-                output_format: opts.format ?? 'png',
-            };
-        } else {
-            // Flux models
-            input = {
-                prompt,
-                num_outputs: 1,
-                output_format: opts.format ?? 'png',
-                aspect_ratio: w === h ? '1:1' : w > h ? '16:9' : '9:16',
-            };
-            if (model === 'flux-schnell') {
-                input.num_inference_steps = opts.steps ?? 8;
-                input.go_fast = true;
-            } else {
-                input.num_inference_steps = opts.steps ?? 28;
-                input.guidance = 3.5;
-            }
-        }
-
-        // LoRA support for Replicate
-        if (hasLoras) {
-            const lora = opts.loras![0]; // Replicate typically takes one LoRA at a time
-            if (model === 'flux-dev') {
-                // lucataco/flux-dev-lora uses hf_lora param
-                input.hf_lora = lora.url;
-                input.lora_scale = lora.scale ?? 1.0;
-            } else if (model === 'sdxl') {
-                // SDXL on Replicate doesn't natively support LoRAs in the base model,
-                // but some fine-tuned versions do. Pass as extra_lora_scale.
-                input.lora_url = lora.url;
-                input.lora_scale = lora.scale ?? 0.8;
-            }
-        }
-
-        const output = await replicate.run(repModel as `${string}/${string}`, { input });
-
-        // Replicate returns various formats:
-        // - Array of URL strings (older models)
-        // - Array of FileOutput objects with .url() method (newer SDK)
-        // - Single FileOutput object
-        // - ReadableStream
-        let imageUrl: string | null = null;
-
-        const extractUrl = (val: unknown): string | null => {
-            if (typeof val === 'string') return val;
-            if (val && typeof val === 'object') {
-                // FileOutput objects have a .url() method or toString() that returns the URL
-                if (typeof (val as { url: unknown }).url === 'function') {
-                    const u = (val as { url: () => URL }).url();
-                    return u?.href ?? String(u);
-                }
-                if ('href' in val) return (val as { href: string }).href;
-                // Try toString — FileOutput.toString() returns the URL string
-                const str = String(val);
-                if (str.startsWith('http')) return str;
-            }
-            return null;
+        const cost = response.usage?.credits_used ?? PRICING.pixellab[model]?.cost ?? 0.01;
+        return {
+            success: true,
+            buffer: buffer.buffer as ArrayBuffer,
+            width: w,
+            height: h,
+            model,
+            provider: 'pixellab',
+            cost,
         };
-
-        if (Array.isArray(output) && output.length > 0) {
-            imageUrl = extractUrl(output[0]);
-        } else {
-            imageUrl = extractUrl(output);
-        }
-
-        if (!imageUrl) {
-            return { success: false, model: repModel, provider: 'replicate', cost: 0, error: 'No image URL in Replicate response' };
-        }
-
-        const cost = PRICING.replicate[model].cost;
-        return { success: true, imageUrl, width: w, height: h, model: repModel, provider: 'replicate', cost };
     } catch (err) {
-        return { success: false, model: repModel, provider: 'replicate', cost: 0, error: err instanceof Error ? err.message : 'Replicate generation failed' };
+        return {
+            success: false,
+            model,
+            provider: 'pixellab',
+            cost: 0,
+            error: err instanceof Error ? err.message : 'PixelLab generation failed',
+        };
     }
 }
 
 // =====================================================================
-// 3D GENERATION
+// IMG2IMG (PixelLab Pixflux with init_image)
 // =====================================================================
+
+export async function img2img(opts: Img2ImgOptions): Promise<GenerationResult> {
+    const w = Math.min(Math.max(opts.width ?? 64, 16), 400);
+    const h = Math.min(Math.max(opts.height ?? 64, 16), 400);
+
+    try {
+        const initImage = await imageUrlToBase64(opts.imageUrl);
+
+        // Map strength (0-1) to text_guidance_scale (1-20)
+        // Low strength = close to original = low guidance, High strength = more creative = high guidance
+        const strength = opts.strength ?? 0.5;
+        const textGuidance = Math.round(1 + strength * 19);
+
+        const body: Record<string, unknown> = {
+            description: opts.prompt,
+            image_size: { width: w, height: h },
+            init_image: initImage,
+            text_guidance_scale: textGuidance,
+            no_background: true,
+        };
+
+        const response = await pixelLabPost('/create-image-pixflux', body);
+        const buffer = extractImageBuffer(response);
+
+        if (!buffer) {
+            return { success: false, model: 'pixflux', provider: 'pixellab', cost: 0, error: 'No image in img2img response' };
+        }
+
+        const cost = response.usage?.credits_used ?? 0.01;
+        return {
+            success: true,
+            buffer: buffer.buffer as ArrayBuffer,
+            width: w,
+            height: h,
+            model: 'pixflux',
+            provider: 'pixellab',
+            cost,
+        };
+    } catch (err) {
+        return {
+            success: false,
+            model: 'pixflux',
+            provider: 'pixellab',
+            cost: 0,
+            error: err instanceof Error ? err.message : 'PixelLab img2img failed',
+        };
+    }
+}
+
+// =====================================================================
+// ANIMATION (PixelLab animate-with-text-v3 → sprite sheet)
+// =====================================================================
+
+/**
+ * Generate animation frames from a source image using PixelLab's text-driven animation.
+ * Returns a composed sprite sheet (frames arranged horizontally) ready for game use.
+ */
+export async function generateAnimation(opts: AnimateOptions): Promise<AnimationResult> {
+    // frame_count must be even, 4-16
+    let frameCount = opts.frameCount ?? 6;
+    if (frameCount % 2 !== 0) frameCount += 1;
+    frameCount = Math.min(Math.max(frameCount, 4), 16);
+
+    try {
+        // Fetch source image and convert to base64
+        const firstFrame = await imageUrlToBase64(opts.sourceImageUrl);
+
+        const body: Record<string, unknown> = {
+            first_frame: firstFrame,
+            action: opts.prompt.slice(0, 500),
+            frame_count: frameCount,
+            no_background: opts.noBackground !== false,
+        };
+
+        // Use a shorter initial fetch timeout (60s) so that when PixelLab returns 202 + job id,
+        // the polling budget below fits inside the Vercel 300s function limit.
+        const response = await pixelLabPost('/animate-with-text-v3', body, 60_000);
+        const frames = extractImageBuffers(response);
+
+        if (frames.length === 0) {
+            console.error('[pixellab] No animation frames in response:', JSON.stringify(response).slice(0, 500));
+            return { success: false, model: 'animate-v3', provider: 'pixellab', cost: 0, error: 'No frames in animation response' };
+        }
+
+        // Compose frames into horizontal sprite sheet using Sharp
+        const sharp = (await import('sharp')).default;
+        const firstMeta = await sharp(frames[0]).metadata();
+        if (!firstMeta.width || !firstMeta.height) {
+            return { success: false, model: 'animate-v3', provider: 'pixellab', cost: 0, error: 'Could not read frame dimensions from PixelLab response' };
+        }
+        const fw = firstMeta.width;
+        const fh = firstMeta.height;
+
+        // Ensure all frames are the same size (resize if needed)
+        const normalizedFrames = await Promise.all(
+            frames.map(f => sharp(f).resize(fw, fh).png().toBuffer())
+        );
+
+        const spriteSheet = await sharp({
+            create: {
+                width: fw * normalizedFrames.length,
+                height: fh,
+                channels: 4,
+                background: { r: 0, g: 0, b: 0, alpha: 0 },
+            },
+        })
+        .composite(normalizedFrames.map((frame, i) => ({
+            input: frame,
+            left: i * fw,
+            top: 0,
+        })))
+        .png()
+        .toBuffer();
+
+        const cost = response.usage?.credits_used ?? PRICING.pixellab.animate.cost;
+        return {
+            success: true,
+            spriteSheetBuffer: spriteSheet.buffer as ArrayBuffer,
+            frameWidth: fw,
+            frameHeight: fh,
+            frameCount: normalizedFrames.length,
+            model: 'animate-v3',
+            provider: 'pixellab',
+            cost,
+        };
+    } catch (err) {
+        return {
+            success: false,
+            model: 'animate-v3',
+            provider: 'pixellab',
+            cost: 0,
+            error: err instanceof Error ? err.message : 'PixelLab animation failed',
+        };
+    }
+}
+
+// =====================================================================
+// 3D GENERATION (fal.ai + Replicate — unchanged)
+// =====================================================================
+
+function pick3DProvider(preferred?: Provider): 'fal' | 'replicate' {
+    if (preferred === 'fal' && falKey) return 'fal';
+    if (preferred === 'replicate' && replicateToken) return 'replicate';
+    if (falKey) return 'fal';
+    if (replicateToken) return 'replicate';
+    return 'fal';
+}
 
 export async function generate3D(opts: Generate3DOptions): Promise<GenerationResult> {
-    const provider = pickProvider(opts.provider);
+    const provider = pick3DProvider(opts.provider);
     const model = opts.model ?? 'trellis';
 
     try {
         if (model === 'trellis') {
-            // Trellis is only on fal.ai — use fal regardless of provider preference
             if (!falKey) {
                 return { success: false, model: 'trellis', provider: 'fal', cost: 0, error: 'Trellis requires FAL_KEY' };
             }
             return await generateTrellisFal(opts);
         } else {
-            // Hunyuan3D — available on both
             if (provider === 'replicate') return await generateHunyuanReplicate(opts);
             return await generateHunyuanFal(opts);
         }
@@ -362,16 +486,24 @@ export async function generate3D(opts: Generate3DOptions): Promise<GenerationRes
     }
 }
 
-// ── fal.ai Trellis ───────────────────────────────────────────────────
+// Helper: generate a reference image for 3D (uses PixelLab if available, falls back to basic)
+async function generateReferenceImage(prompt: string): Promise<string | null> {
+    const result = await generate2D({ prompt, width: 256, height: 256, style: 'stylized' });
+    if (result.success && result.buffer) {
+        // Convert buffer to data URL for 3D model input
+        const base64 = Buffer.from(result.buffer).toString('base64');
+        return `data:image/png;base64,${base64}`;
+    }
+    return null;
+}
 
 async function generateTrellisFal(opts: Generate3DOptions): Promise<GenerationResult> {
     let imageUrl = opts.imageUrl;
     if (!imageUrl && opts.prompt) {
-        const imgResult = await generate2D({ prompt: opts.prompt, model: 'flux-schnell', style: 'stylized', width: 512, height: 512, provider: 'fal' });
-        if (!imgResult.success || !imgResult.imageUrl) {
-            return { success: false, model: 'fal-ai/trellis', provider: 'fal', cost: imgResult.cost, error: 'Failed to generate input image for 3D' };
+        imageUrl = await generateReferenceImage(opts.prompt) ?? undefined;
+        if (!imageUrl) {
+            return { success: false, model: 'fal-ai/trellis', provider: 'fal', cost: 0, error: 'Failed to generate input image for 3D' };
         }
-        imageUrl = imgResult.imageUrl;
     }
 
     if (!imageUrl) {
@@ -398,11 +530,9 @@ async function generateTrellisFal(opts: Generate3DOptions): Promise<GenerationRe
         thumbnailUrl: imageUrl,
         model: 'fal-ai/trellis',
         provider: 'fal',
-        cost: PRICING.fal.trellis.cost + (opts.imageUrl ? 0 : PRICING.fal['flux-schnell'].cost),
+        cost: PRICING.fal.trellis.cost,
     };
 }
-
-// ── fal.ai Hunyuan3D ─────────────────────────────────────────────────
 
 async function generateHunyuanFal(opts: Generate3DOptions): Promise<GenerationResult> {
     let endpoint: string;
@@ -444,21 +574,17 @@ async function generateHunyuanFal(opts: Generate3DOptions): Promise<GenerationRe
     };
 }
 
-// ── Replicate Hunyuan3D ──────────────────────────────────────────────
-
 async function generateHunyuanReplicate(opts: Generate3DOptions): Promise<GenerationResult> {
     if (!replicate) {
         return { success: false, model: 'tencent/hunyuan3d-2', provider: 'replicate', cost: 0, error: 'REPLICATE_API_TOKEN not set' };
     }
 
-    // Hunyuan3D on Replicate needs an image — generate one if only text prompt
     let imageUrl = opts.imageUrl;
     if (!imageUrl && opts.prompt) {
-        const imgResult = await generate2D({ prompt: opts.prompt, model: 'flux-schnell', style: 'stylized', width: 512, height: 512 });
-        if (!imgResult.success || !imgResult.imageUrl) {
-            return { success: false, model: 'tencent/hunyuan3d-2', provider: 'replicate', cost: imgResult.cost, error: 'Failed to generate input image for 3D' };
+        imageUrl = await generateReferenceImage(opts.prompt) ?? undefined;
+        if (!imageUrl) {
+            return { success: false, model: 'tencent/hunyuan3d-2', provider: 'replicate', cost: 0, error: 'Failed to generate input image for 3D' };
         }
-        imageUrl = imgResult.imageUrl;
     }
 
     if (!imageUrl) {
@@ -470,7 +596,6 @@ async function generateHunyuanReplicate(opts: Generate3DOptions): Promise<Genera
             input: { image: imageUrl },
         });
 
-        // Replicate returns the GLB URL directly or in an object
         let modelUrl: string | null = null;
         if (typeof output === 'string') {
             modelUrl = output;
@@ -484,14 +609,13 @@ async function generateHunyuanReplicate(opts: Generate3DOptions): Promise<Genera
             return { success: false, model: 'tencent/hunyuan3d-2', provider: 'replicate', cost: PRICING.replicate.hunyuan3d.cost, error: 'No model URL in response' };
         }
 
-        const imgCost = opts.imageUrl ? 0 : PRICING.replicate['flux-schnell'].cost;
         return {
             success: true,
             modelUrl,
             thumbnailUrl: imageUrl,
             model: 'tencent/hunyuan3d-2',
             provider: 'replicate',
-            cost: PRICING.replicate.hunyuan3d.cost + imgCost,
+            cost: PRICING.replicate.hunyuan3d.cost,
         };
     } catch (err) {
         return { success: false, model: 'tencent/hunyuan3d-2', provider: 'replicate', cost: 0, error: err instanceof Error ? err.message : 'Replicate 3D failed' };
@@ -509,9 +633,8 @@ export async function downloadResult(url: string): Promise<ArrayBuffer> {
 // ── Background Removal ──────────────────────────────────────────────
 
 /**
- * Remove white/near-white background from an image using Sharp.
- * Free, fast, no API calls — works because we force white backgrounds in generation.
- * Accepts a URL or raw buffer, returns a transparent PNG buffer.
+ * Remove background from an image using Sharp threshold.
+ * Kept as a fallback — PixelLab's `no_background` param handles most cases.
  */
 export async function removeBackground(input: string | ArrayBuffer): Promise<{ success: boolean; buffer?: ArrayBuffer; error?: string }> {
     const sharp = (await import('sharp')).default;
@@ -531,11 +654,10 @@ export async function removeBackground(input: string | ArrayBuffer): Promise<{ s
         }
 
         const raw = await img.raw().toBuffer();
-        // 4 channels: RGBA — set alpha to 0 for pixels close to white
-        const THRESHOLD = 230; // R, G, B all above this → transparent
+        const THRESHOLD = 230;
         for (let i = 0; i < raw.length; i += 4) {
             if (raw[i] >= THRESHOLD && raw[i + 1] >= THRESHOLD && raw[i + 2] >= THRESHOLD) {
-                raw[i + 3] = 0; // set alpha to 0
+                raw[i + 3] = 0;
             }
         }
 
@@ -546,291 +668,5 @@ export async function removeBackground(input: string | ArrayBuffer): Promise<{ s
         return { success: true, buffer: result.buffer as ArrayBuffer };
     } catch (err) {
         return { success: false, error: err instanceof Error ? err.message : 'Background removal failed' };
-    }
-}
-
-// =====================================================================
-// IMAGE-TO-IMAGE (img2img)
-// =====================================================================
-
-export interface Img2ImgOptions {
-    imageUrl: string;          // Source image URL (public or data URI)
-    prompt: string;
-    model?: Model2D;
-    provider?: Provider;
-    strength?: number;         // 0.0–1.0 — how much to deviate from source (default 0.6)
-    width?: number;
-    height?: number;
-    negativePrompt?: string;
-    steps?: number;
-    format?: 'png' | 'jpeg';
-    style?: string;
-}
-
-export async function img2img(opts: Img2ImgOptions): Promise<GenerationResult> {
-    const provider = pickProvider(opts.provider);
-    const model = opts.model ?? 'flux-schnell';
-    if (provider === 'replicate') return img2imgReplicate(opts, model);
-    return img2imgFal(opts, model);
-}
-
-// ── fal.ai img2img ──────────────────────────────────────────────────
-
-const FAL_IMG2IMG_MAP: Record<Model2D, string> = {
-    'sdxl':         'fal-ai/fast-sdxl/image-to-image',
-    'flux-schnell': 'fal-ai/flux/dev/image-to-image',   // schnell has no img2img, use dev
-    'flux-dev':     'fal-ai/flux/dev/image-to-image',
-};
-
-async function img2imgFal(opts: Img2ImgOptions, model: Model2D): Promise<GenerationResult> {
-    const falModel = FAL_IMG2IMG_MAP[model];
-    const prompt = buildPrompt(opts.prompt, opts.style);
-    const strength = opts.strength ?? 0.6;
-
-    try {
-        const input: Record<string, unknown> = {
-            prompt,
-            image_url: opts.imageUrl,
-            strength,
-            num_images: 1,
-            output_format: opts.format ?? 'png',
-            enable_safety_checker: true,
-        };
-
-        if (opts.negativePrompt) input.negative_prompt = opts.negativePrompt;
-
-        if (model === 'sdxl') {
-            input.num_inference_steps = opts.steps ?? 25;
-            input.guidance_scale = 7.5;
-        } else {
-            input.num_inference_steps = opts.steps ?? 28;
-            input.guidance_scale = 3.5;
-        }
-
-        const result = await fal.subscribe(falModel, { input });
-        const data = result.data as { images?: Array<{ url: string; width: number; height: number }> };
-        const img = data.images?.[0];
-
-        if (!img?.url) {
-            return { success: false, model: falModel, provider: 'fal', cost: 0, error: 'No image returned from img2img' };
-        }
-
-        return { success: true, imageUrl: img.url, width: img.width, height: img.height, model: falModel, provider: 'fal', cost: 0.025 };
-    } catch (err) {
-        return { success: false, model: falModel, provider: 'fal', cost: 0, error: err instanceof Error ? err.message : 'fal.ai img2img failed' };
-    }
-}
-
-// ── Replicate img2img ───────────────────────────────────────────────
-
-const REPLICATE_IMG2IMG_MAP: Record<Model2D, string> = {
-    'sdxl':         'stability-ai/sdxl:7762fd07cf82c948538e41f63f77d685e02b063e37e496e96eefd46c929f9bdc',
-    'flux-schnell': 'black-forest-labs/flux-dev',         // schnell has no img2img, use dev
-    'flux-dev':     'black-forest-labs/flux-dev',
-};
-
-async function img2imgReplicate(opts: Img2ImgOptions, model: Model2D): Promise<GenerationResult> {
-    if (!replicate) {
-        return { success: false, model, provider: 'replicate', cost: 0, error: 'REPLICATE_API_TOKEN not set' };
-    }
-
-    const repModel = REPLICATE_IMG2IMG_MAP[model];
-    const prompt = buildPrompt(opts.prompt, opts.style);
-    const strength = opts.strength ?? 0.6;
-
-    try {
-        let input: Record<string, unknown>;
-
-        if (model === 'sdxl') {
-            input = {
-                prompt,
-                image: opts.imageUrl,
-                prompt_strength: strength,
-                negative_prompt: opts.negativePrompt ?? 'blurry, low quality, text, watermark',
-                num_outputs: 1,
-                num_inference_steps: opts.steps ?? 25,
-                guidance_scale: 7.5,
-                output_format: opts.format ?? 'png',
-            };
-        } else {
-            // Flux dev img2img
-            input = {
-                prompt,
-                image: opts.imageUrl,
-                prompt_strength: strength,
-                num_outputs: 1,
-                output_format: opts.format ?? 'png',
-                num_inference_steps: opts.steps ?? 28,
-                guidance: 3.5,
-            };
-        }
-
-        const output = await replicate.run(repModel as `${string}/${string}`, { input });
-
-        let imageUrl: string | null = null;
-        const extractUrl = (val: unknown): string | null => {
-            if (typeof val === 'string') return val;
-            if (val && typeof val === 'object') {
-                if (typeof (val as { url: unknown }).url === 'function') {
-                    const u = (val as { url: () => URL }).url();
-                    return u?.href ?? String(u);
-                }
-                if ('href' in val) return (val as { href: string }).href;
-                const str = String(val);
-                if (str.startsWith('http')) return str;
-            }
-            return null;
-        };
-
-        if (Array.isArray(output) && output.length > 0) {
-            imageUrl = extractUrl(output[0]);
-        } else {
-            imageUrl = extractUrl(output);
-        }
-
-        if (!imageUrl) {
-            return { success: false, model: repModel, provider: 'replicate', cost: 0, error: 'No image URL in img2img response' };
-        }
-
-        return { success: true, imageUrl, model: repModel, provider: 'replicate', cost: 0.025 };
-    } catch (err) {
-        return { success: false, model: repModel, provider: 'replicate', cost: 0, error: err instanceof Error ? err.message : 'Replicate img2img failed' };
-    }
-}
-
-// =====================================================================
-// ANIMATION (image → video → frame extraction)
-// =====================================================================
-
-export type ModelVideo = 'kling' | 'minimax' | 'wan';
-
-export interface AnimateOptions {
-    sourceImageUrl: string;    // URL of the source static image
-    prompt: string;            // Description of desired motion (e.g. "tractor driving", "ship rocking on waves")
-    model?: ModelVideo;
-    provider?: Provider;
-    duration?: number;         // Video duration in seconds (default 5)
-}
-
-export interface AnimationResult {
-    success: boolean;
-    videoUrl?: string;         // URL of the generated video (mp4)
-    model: string;
-    provider: Provider;
-    cost: number;
-    error?: string;
-}
-
-const FAL_VIDEO_MAP: Record<ModelVideo, string> = {
-    'kling':   'fal-ai/kling-video/v1/standard/image-to-video',
-    'minimax': 'fal-ai/minimax-video/image-to-video',
-    'wan':     'fal-ai/wan/v2.1/image-to-video',
-};
-
-const REPLICATE_VIDEO_MAP: Record<ModelVideo, string> = {
-    'kling':   'kwaivgi/kling-v2.6',
-    'minimax': 'minimax/video-01-live/image-to-video',
-    'wan':     'wavespeedai/wan-2.1-i2v-480p',
-};
-
-/**
- * Generate a short video from a source image using an image-to-video model.
- * Returns a video URL — frame extraction into sprite sheets is handled by the caller.
- */
-export async function generateAnimation(opts: AnimateOptions): Promise<AnimationResult> {
-    const provider = pickProvider(opts.provider);
-    const model = opts.model ?? 'kling';
-
-    // Force plain white background so frames work cleanly on any game map/scene
-    const prompt = `${opts.prompt}. Plain solid white background, no shadows, no drop shadow, no cast shadow, no scenery, no environment, isolated subject on pure white`;
-    const enriched = { ...opts, prompt };
-
-    if (provider === 'fal') return generateAnimationFal(enriched, model);
-    return generateAnimationReplicate(enriched, model);
-}
-
-// ── fal.ai Image-to-Video ───────────────────────────────────────────
-
-async function generateAnimationFal(opts: AnimateOptions, model: ModelVideo): Promise<AnimationResult> {
-    const falModel = FAL_VIDEO_MAP[model];
-    const duration = opts.duration ?? 5;
-
-    try {
-        const input: Record<string, unknown> = {
-            image_url: opts.sourceImageUrl,
-            prompt: opts.prompt,
-        };
-
-        if (model === 'kling') {
-            input.duration = String(duration) as '5' | '10';
-        } else if (model === 'minimax') {
-            input.prompt_optimizer = true;
-        }
-
-        const result = await fal.subscribe(falModel, { input });
-        const data = result.data as { video?: { url: string } };
-
-        if (!data.video?.url) {
-            return { success: false, model: falModel, provider: 'fal', cost: 0, error: 'No video returned' };
-        }
-
-        const costs: Record<ModelVideo, number> = { kling: 0.065, minimax: 0.04, wan: 0.04 };
-        return {
-            success: true,
-            videoUrl: data.video.url,
-            model: falModel,
-            provider: 'fal',
-            cost: costs[model],
-        };
-    } catch (err) {
-        return { success: false, model: falModel, provider: 'fal', cost: 0, error: err instanceof Error ? err.message : 'Video generation failed' };
-    }
-}
-
-// ── Replicate Image-to-Video ────────────────────────────────────────
-
-async function generateAnimationReplicate(opts: AnimateOptions, model: ModelVideo): Promise<AnimationResult> {
-    if (!replicate) {
-        return { success: false, model, provider: 'replicate', cost: 0, error: 'REPLICATE_API_TOKEN not set' };
-    }
-
-    const repModel = REPLICATE_VIDEO_MAP[model];
-
-    try {
-        const input: Record<string, unknown> = {
-            prompt: opts.prompt,
-        };
-
-        if (model === 'kling') {
-            input.start_image = opts.sourceImageUrl;
-            input.duration = 5;
-        } else {
-            input.image = opts.sourceImageUrl;
-        }
-
-        const output = await replicate.run(repModel as `${string}/${string}`, { input });
-
-        let videoUrl: string | null = null;
-        const raw = output as unknown;
-        if (typeof raw === 'string' && raw.startsWith('http')) {
-            videoUrl = raw;
-        } else if (raw && typeof raw === 'object') {
-            const str = String(raw);
-            if (str.startsWith('http')) videoUrl = str;
-        }
-
-        if (!videoUrl) {
-            return { success: false, model: repModel, provider: 'replicate', cost: 0, error: 'No video URL in response' };
-        }
-
-        return {
-            success: true,
-            videoUrl,
-            model: repModel,
-            provider: 'replicate',
-            cost: 0.05,
-        };
-    } catch (err) {
-        return { success: false, model: repModel, provider: 'replicate', cost: 0, error: err instanceof Error ? err.message : 'Replicate video generation failed' };
     }
 }
