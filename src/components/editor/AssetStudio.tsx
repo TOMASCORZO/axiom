@@ -4,6 +4,7 @@ import { useState, useRef, useCallback } from 'react';
 import { useEditorStore } from '@/lib/store';
 import type { AssetType } from '@/types/asset';
 import type { FreeAssetResult } from '@/lib/assets/search';
+import { uploadImageFile } from '@/lib/assets/client-upload';
 import {
     Sparkles,
     Image as ImageIcon,
@@ -18,6 +19,7 @@ import {
     Check,
     X,
     Film,
+    Upload,
 } from 'lucide-react';
 
 // ── Tab Navigation ───────────────────────────────────────────────────
@@ -50,6 +52,17 @@ const MODELS_3D: { value: Model3DChoice; label: string; cost: string; desc: stri
     { value: 'hunyuan3d', label: 'Hunyuan3D',    cost: '$0.18',  desc: 'High quality' },
 ];
 
+interface SourceImageState {
+    storageKey: string;
+    sourceUrl: string;
+    width: number;
+    height: number;
+    fileName: string;
+    fileFormat: string;
+    sizeBytes: number;
+    assetId: string;
+}
+
 function GenerateTab() {
     const { project, assetGenerating, setAssetGenerating, addConsoleEntry, addAsset, setAssetStudioTab, setPreviewAssetId, refreshProjectFiles } = useEditorStore();
     const [prompt, setPrompt] = useState('');
@@ -60,8 +73,54 @@ function GenerateTab() {
     const [genError, setGenError] = useState<string | null>(null);
     const [lastCost, setLastCost] = useState<number | null>(null);
 
+    // Source image (img2img mode)
+    const [sourceImage, setSourceImage] = useState<SourceImageState | null>(null);
+    const [uploading, setUploading] = useState(false);
+    const [strength, setStrength] = useState(0.5);
+    const sourceFileInputRef = useRef<HTMLInputElement>(null);
+
     const size = SIZE_PRESETS[sizeIdx];
     const is3D = assetType === 'model_3d';
+    const isImg2Img = !!sourceImage && !is3D;
+
+    const handleSourceUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        e.target.value = '';
+        if (!file || !project?.id) return;
+
+        setUploading(true);
+        setGenError(null);
+        try {
+            const uploaded = await uploadImageFile(file, project.id);
+            const assetId = crypto.randomUUID();
+            const displayName = file.name.replace(/\.[^.]+$/, '').slice(0, 40) || 'upload';
+            addAsset({
+                id: assetId, project_id: project.id,
+                name: displayName, asset_type: 'sprite',
+                storage_key: uploaded.storageKey, thumbnail_key: null, file_format: uploaded.fileFormat,
+                width: uploaded.width, height: uploaded.height,
+                metadata: { tags: ['upload'] },
+                generation_prompt: null, generation_model: null,
+                size_bytes: uploaded.sizeBytes, created_at: new Date().toISOString(),
+            });
+            refreshProjectFiles(project.id);
+            setSourceImage({
+                storageKey: uploaded.storageKey, sourceUrl: uploaded.sourceUrl,
+                width: uploaded.width, height: uploaded.height,
+                fileName: file.name, fileFormat: uploaded.fileFormat, sizeBytes: uploaded.sizeBytes,
+                assetId,
+            });
+            addConsoleEntry({ id: crypto.randomUUID(), level: 'log', message: `[Asset Studio] Source image uploaded → ${uploaded.targetPath} (${uploaded.width}×${uploaded.height})`, timestamp: new Date().toISOString() });
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : 'Upload failed';
+            setGenError(msg);
+            addConsoleEntry({ id: crypto.randomUUID(), level: 'error', message: `[Asset Studio] Upload failed: ${msg}`, timestamp: new Date().toISOString() });
+        } finally {
+            setUploading(false);
+        }
+    };
+
+    const clearSource = () => setSourceImage(null);
 
     const handleGenerate = async () => {
         if (!prompt.trim() || !project?.id) return;
@@ -71,19 +130,31 @@ function GenerateTab() {
 
         const safeName = prompt.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 30);
         const ext = is3D ? 'glb' : 'png';
-        const targetPath = `assets/${safeName}.${ext}`;
+        const targetPath = isImg2Img ? `assets/${safeName}_v${Date.now() % 10000}.png` : `assets/${safeName}.${ext}`;
 
         addConsoleEntry({
             id: crypto.randomUUID(), level: 'log',
-            message: `[Asset Studio] Generating "${prompt}" (${assetType}, ${is3D ? model3d : 'pixellab'})...`,
+            message: isImg2Img
+                ? `[Asset Studio] Pixel-art from image: "${prompt}" (strength ${strength})...`
+                : `[Asset Studio] Generating "${prompt}" (${assetType}, ${is3D ? model3d : 'pixellab'})...`,
             timestamp: new Date().toISOString(),
         });
 
         try {
-            const res = await fetch('/api/assets/generate', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
+            const body = isImg2Img
+                ? {
+                    project_id: project.id,
+                    prompt: prompt.trim(),
+                    asset_type: 'sprite' as const,
+                    target_path: targetPath,
+                    options: {
+                        source_image_url: sourceImage!.sourceUrl,
+                        strength,
+                        width: size.w,
+                        height: size.h,
+                    },
+                }
+                : {
                     project_id: project.id,
                     prompt: prompt.trim(),
                     asset_type: assetType,
@@ -95,7 +166,11 @@ function GenerateTab() {
                         transparent_bg: transparentBg,
                         model_3d: is3D ? model3d : undefined,
                     },
-                }),
+                };
+            const res = await fetch('/api/assets/generate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
             });
 
             const data = await res.json();
@@ -112,15 +187,15 @@ function GenerateTab() {
                     id: assetId,
                     project_id: project.id,
                     name: `${prompt.trim().slice(0, 40)}`,
-                    asset_type: assetType,
+                    asset_type: isImg2Img ? 'sprite' : assetType,
                     storage_key: data.storage_key || targetPath,
                     thumbnail_key: null,
-                    file_format: ext,
-                    width: is3D ? null : size.w,
-                    height: is3D ? null : size.h,
-                    metadata: { tags: ['pixel_art', is3D ? model3d : 'pixellab'] },
+                    file_format: isImg2Img ? 'png' : ext,
+                    width: isImg2Img || !is3D ? size.w : null,
+                    height: isImg2Img || !is3D ? size.h : null,
+                    metadata: { tags: isImg2Img ? ['pixel_art', 'img2img'] : ['pixel_art', is3D ? model3d : 'pixellab'] },
                     generation_prompt: prompt.trim(),
-                    generation_model: is3D ? model3d : 'pixflux',
+                    generation_model: isImg2Img ? 'pixflux' : (is3D ? model3d : 'pixflux'),
                     size_bytes: 0,
                     created_at: new Date().toISOString(),
                 });
@@ -144,37 +219,77 @@ function GenerateTab() {
 
     return (
         <div className="flex flex-col gap-3 p-3 overflow-y-auto flex-1">
+            {/* Hidden file input for source image upload */}
+            <input ref={sourceFileInputRef} type="file" accept="image/*" className="hidden" onChange={handleSourceUpload} />
+
+            {/* Source image (optional) — when present, switches to img2img pixel-art mode */}
+            <div>
+                <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 flex items-center justify-between">
+                    <span>Source image <span className="text-zinc-600 normal-case tracking-normal">— optional, turns prompt into pixel-art variation</span></span>
+                </label>
+                {sourceImage ? (
+                    <div className="flex items-center gap-2 p-2 rounded-lg bg-fuchsia-500/5 border border-fuchsia-500/20">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img src={sourceImage.sourceUrl} alt={sourceImage.fileName} className="w-10 h-10 object-cover rounded border border-white/10 bg-zinc-900" />
+                        <div className="flex-1 min-w-0">
+                            <div className="text-xs text-fuchsia-200 truncate">{sourceImage.fileName}</div>
+                            <div className="text-[10px] text-zinc-500 font-mono">{sourceImage.width}×{sourceImage.height} · img2img mode</div>
+                        </div>
+                        <button onClick={clearSource} className="p-1 rounded text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors" title="Remove source image">
+                            <X size={12} />
+                        </button>
+                    </div>
+                ) : (
+                    <button
+                        onClick={() => sourceFileInputRef.current?.click()}
+                        disabled={uploading || !project?.id}
+                        className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg bg-zinc-900 border border-dashed border-white/15 text-zinc-400 text-xs hover:border-fuchsia-500/40 hover:text-fuchsia-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                        {uploading ? <><Loader2 size={12} className="animate-spin" />Uploading...</> : <><Upload size={12} />Upload picture</>}
+                    </button>
+                )}
+                {isImg2Img && (
+                    <div className="mt-2 flex items-center gap-2">
+                        <label className="text-[10px] text-zinc-500 whitespace-nowrap">Strength</label>
+                        <input type="range" min={0.1} max={0.95} step={0.05} value={strength} onChange={(e) => setStrength(Number(e.target.value))} className="flex-1 accent-fuchsia-500 h-1" />
+                        <span className="text-[10px] text-zinc-400 w-8 text-center font-mono">{strength.toFixed(2)}</span>
+                    </div>
+                )}
+            </div>
+
             {/* Prompt */}
             <div>
                 <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">Prompt</label>
                 <textarea
                     value={prompt}
                     onChange={(e) => setPrompt(e.target.value)}
-                    placeholder="A warrior character with sword and shield, side view..."
+                    placeholder={isImg2Img ? 'Describe the pixel-art version (e.g. "pixel art knight, 64x64")...' : 'A warrior character with sword and shield, side view...'}
                     className="w-full bg-zinc-900 border border-white/10 rounded-lg px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-600 resize-none focus:outline-none focus:border-violet-500/50 transition-colors"
                     rows={3}
                 />
             </div>
 
-            {/* Asset Type */}
-            <div>
-                <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">Type</label>
-                <div className="flex flex-wrap gap-1">
-                    {ASSET_TYPES.map((t) => (
-                        <button
-                            key={t.value}
-                            onClick={() => setAssetType(t.value)}
-                            className={`px-2 py-1 rounded text-xs transition-colors ${
-                                assetType === t.value
-                                    ? 'bg-violet-500/20 text-violet-300 border border-violet-500/30'
-                                    : 'bg-zinc-900 text-zinc-500 border border-white/5 hover:text-zinc-300'
-                            }`}
-                        >
-                            {t.label}
-                        </button>
-                    ))}
+            {/* Asset Type — hide 3D when img2img (source image present), since PixelLab img2img is 2D-only */}
+            {!sourceImage && (
+                <div>
+                    <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">Type</label>
+                    <div className="flex flex-wrap gap-1">
+                        {ASSET_TYPES.map((t) => (
+                            <button
+                                key={t.value}
+                                onClick={() => setAssetType(t.value)}
+                                className={`px-2 py-1 rounded text-xs transition-colors ${
+                                    assetType === t.value
+                                        ? 'bg-violet-500/20 text-violet-300 border border-violet-500/30'
+                                        : 'bg-zinc-900 text-zinc-500 border border-white/5 hover:text-zinc-300'
+                                }`}
+                            >
+                                {t.label}
+                            </button>
+                        ))}
+                    </div>
                 </div>
-            </div>
+            )}
 
             {/* Size */}
             <div>
@@ -262,6 +377,11 @@ function GenerateTab() {
                     <>
                         <Loader2 size={14} className="animate-spin" />
                         Generating...
+                    </>
+                ) : isImg2Img ? (
+                    <>
+                        <Wand2 size={14} />
+                        Generate Pixel-Art from Image
                     </>
                 ) : (
                     <>

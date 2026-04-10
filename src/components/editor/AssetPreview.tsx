@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useEditorStore } from '@/lib/store';
 import type { Asset } from '@/types/asset';
+import { uploadImageFile } from '@/lib/assets/client-upload';
 import {
     Image as ImageIcon,
     ZoomIn,
@@ -14,9 +15,25 @@ import {
     Film,
     Wand2,
     Loader2,
+    Upload,
 } from 'lucide-react';
 
 const ZOOM_LEVELS = [0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4, 6, 8];
+
+// Clamp dimensions for PixelLab img2img: preserves aspect ratio with the longest side
+// scaled to 256 (a sensible pixel-art ceiling well below PixelLab's 400 hard limit).
+function clampForPixelArt(srcW: number | null, srcH: number | null): { w: number; h: number } {
+    const MAX = 256;
+    const MIN = 16;
+    const w0 = srcW && srcW > 0 ? srcW : 128;
+    const h0 = srcH && srcH > 0 ? srcH : 128;
+    const scale = Math.min(1, MAX / Math.max(w0, h0));
+    let w = Math.round(w0 * scale);
+    let h = Math.round(h0 * scale);
+    if (w < MIN) w = MIN;
+    if (h < MIN) h = MIN;
+    return { w, h };
+}
 
 export default function AssetPreview() {
     const {
@@ -30,6 +47,8 @@ export default function AssetPreview() {
     const [activeAction, setActiveAction] = useState<'animate' | 'img2img' | null>(null);
     const [actionBusy, setActionBusy] = useState(false);
     const [actionError, setActionError] = useState('');
+    const [uploading, setUploading] = useState(false);
+    const fileInputRef = useRef<HTMLInputElement>(null);
 
     // Animate options
     const [animPrompt, setAnimPrompt] = useState('');
@@ -120,6 +139,49 @@ export default function AssetPreview() {
         finally { setActionBusy(false); setAssetGenerating(false); }
     };
 
+    // ── Upload → img2img handler ──
+    // Uploads a file from the user's computer, saves it to the gallery, selects it,
+    // and opens the img2img action panel so the user can immediately turn it into pixel art.
+    const handleUploadClick = () => {
+        setActionError('');
+        fileInputRef.current?.click();
+    };
+
+    const handleFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        e.target.value = '';
+        if (!file || !project?.id) return;
+
+        setUploading(true);
+        setActionError('');
+        addConsoleEntry({ id: crypto.randomUUID(), level: 'log', message: `[Asset Studio] Uploading "${file.name}"...`, timestamp: new Date().toISOString() });
+
+        try {
+            const uploaded = await uploadImageFile(file, project.id);
+            const assetId = crypto.randomUUID();
+            const displayName = file.name.replace(/\.[^.]+$/, '').slice(0, 40) || 'upload';
+            addAsset({
+                id: assetId, project_id: project.id,
+                name: displayName, asset_type: 'sprite',
+                storage_key: uploaded.storageKey, thumbnail_key: null, file_format: uploaded.fileFormat,
+                width: uploaded.width, height: uploaded.height,
+                metadata: { tags: ['upload'] },
+                generation_prompt: null, generation_model: null,
+                size_bytes: uploaded.sizeBytes, created_at: new Date().toISOString(),
+            });
+            setPreviewAssetId(assetId);
+            refreshProjectFiles(project.id);
+            setActiveAction('img2img');
+            addConsoleEntry({ id: crypto.randomUUID(), level: 'log', message: `[Asset Studio] Uploaded → ${uploaded.targetPath} (${uploaded.width}×${uploaded.height})`, timestamp: new Date().toISOString() });
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : 'Upload failed';
+            setActionError(msg);
+            addConsoleEntry({ id: crypto.randomUUID(), level: 'error', message: `[Asset Studio] Upload failed: ${msg}`, timestamp: new Date().toISOString() });
+        } finally {
+            setUploading(false);
+        }
+    };
+
     // ── Img2Img handler ──
     const handleImg2Img = async () => {
         if (!asset?.storage_key || !project?.id || !img2imgPrompt.trim()) return;
@@ -130,8 +192,10 @@ export default function AssetPreview() {
         const sourceUrl = `${window.location.origin}/api/assets/serve?key=${encodeURIComponent(asset.storage_key)}`;
         const baseName = img2imgPrompt.trim().replace(/[^a-zA-Z0-9]/g, '_').slice(0, 30);
         const targetPath = `assets/${baseName}_v${Date.now() % 10000}.png`;
+        // Clamp output to PixelLab's supported range (16-400), preserving aspect ratio with a 256px pixel-art ceiling.
+        const { w: outW, h: outH } = clampForPixelArt(asset.width, asset.height);
 
-        addConsoleEntry({ id: crypto.randomUUID(), level: 'log', message: `[Asset Studio] Img2Img: "${img2imgPrompt}" (strength ${img2imgStrength})...`, timestamp: new Date().toISOString() });
+        addConsoleEntry({ id: crypto.randomUUID(), level: 'log', message: `[Asset Studio] Img2Img: "${img2imgPrompt}" (strength ${img2imgStrength}, ${outW}×${outH})...`, timestamp: new Date().toISOString() });
 
         try {
             const res = await fetch('/api/assets/generate', {
@@ -142,7 +206,7 @@ export default function AssetPreview() {
                     prompt: img2imgPrompt.trim(),
                     asset_type: 'sprite',
                     target_path: targetPath,
-                    options: { source_image_url: sourceUrl, strength: img2imgStrength, width: asset.width || 512, height: asset.height || 512 },
+                    options: { source_image_url: sourceUrl, strength: img2imgStrength, width: outW, height: outH },
                 }),
             });
             const data = await res.json();
@@ -199,7 +263,17 @@ export default function AssetPreview() {
                     </button>
                 </div>
                 <div className="flex items-center gap-1.5">
+                    {/* Hidden file input used by the Upload button */}
+                    <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleFileSelected} />
                     {/* Action buttons */}
+                    <button
+                        onClick={handleUploadClick}
+                        disabled={uploading}
+                        className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors disabled:opacity-40"
+                        title="Upload a picture and turn it into pixel art"
+                    >
+                        {uploading ? <Loader2 size={11} className="animate-spin" /> : <Upload size={11} />} Upload
+                    </button>
                     {canAnimate && (
                         <button
                             onClick={() => setActiveAction(activeAction === 'animate' ? null : 'animate')}
