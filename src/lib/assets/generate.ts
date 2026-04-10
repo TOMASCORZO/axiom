@@ -266,7 +266,7 @@ async function fetchImageAsPixelLabInput(url: string, maxSide = 1024): Promise<{
     const base64 = pngBuffer.toString('base64');
     const pixelImage: PixelLabImage = {
         type: 'base64',
-        base64: `data:image/png;base64,${base64}`,
+        base64,
         format: 'png',
     };
     return { pixelImage, width, height };
