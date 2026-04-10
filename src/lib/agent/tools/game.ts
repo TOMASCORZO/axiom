@@ -327,14 +327,12 @@ registerTool({
         let result: { buffer: ArrayBuffer } | { error: string };
 
         if (sourceImageUrl) {
-            // Image-to-pixel-art: photo → faithful pixel-art render (no prompt, no strength).
-            // Prompt is reused as a hint for PixelLab's background-removal matting.
+            // Single-call photo → pixel art + transparent bg via /create-image-pixflux.
             const i2pResult = await imageToPixelArt({
                 imageUrl: sourceImageUrl,
+                prompt,
                 outputWidth: width,
                 outputHeight: height,
-                removeBackground: true,
-                backgroundHint: prompt || undefined,
             });
             if (i2pResult.success && i2pResult.buffer) {
                 result = { buffer: i2pResult.buffer };
