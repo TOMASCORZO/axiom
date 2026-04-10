@@ -62,7 +62,7 @@ async function uploadBinaryAsset(ctx: ToolContext, path: string, buffer: ArrayBu
 
 // ── Image / 3D Generation (PixelLab for 2D, fal.ai/Replicate for 3D) ──
 
-import { generate2D, generate3D, generateAnimation, img2img, downloadResult, removeBackground, type Model2D, type Provider } from '@/lib/assets/generate';
+import { generate2D, generate3D, generateAnimation, imageToPixelArt, downloadResult, removeBackground, type Model2D, type Provider } from '@/lib/assets/generate';
 
 async function generateImage(params: { prompt: string; width: number; height: number; style?: string; model_2d?: string; provider?: string }): Promise<{ buffer: ArrayBuffer } | { error: string }> {
     const result = await generate2D({
@@ -301,7 +301,7 @@ registerTool({
 
 registerTool({
     name: 'generate_sprite',
-    description: 'AI-generate a pixel art sprite image via PixelLab, or create a variation via img2img when source_image_url is provided.',
+    description: 'AI-generate a pixel art sprite image via PixelLab. When source_image_url is provided, converts the photo into pixel art via PixelLab /image-to-pixelart.',
     parameters: {
         type: 'object',
         properties: {
@@ -310,8 +310,8 @@ registerTool({
             height: { type: 'integer', default: 64 },
             transparent_bg: { type: 'boolean', default: true },
             target_path: { type: 'string' },
-            source_image_url: { type: 'string', description: 'Source image URL for img2img variation' },
-            strength: { type: 'number', description: 'Img2img strength 0.0-1.0 (lower = closer to original)', default: 0.5 },
+            source_image_url: { type: 'string', description: 'Source image URL — when set, photo is faithfully pixelated via /image-to-pixelart (prompt/strength ignored).' },
+            strength: { type: 'number', description: '(Unused when source_image_url is set; /image-to-pixelart has no strength param.)', default: 0.5 },
         },
         required: ['prompt', 'target_path'],
     },
@@ -319,29 +319,27 @@ registerTool({
     execute: async (ctx, input) => {
         const start = Date.now();
         const prompt = input.prompt as string;
-        const width = (input.width as number) || 64;
-        const height = (input.height as number) || 64;
+        const width = Math.min((input.width as number) || 64, 320);
+        const height = Math.min((input.height as number) || 64, 320);
         const targetPath = input.target_path as string;
         const sourceImageUrl = input.source_image_url as string | undefined;
-        const strength = input.strength as number | undefined;
 
         let result: { buffer: ArrayBuffer } | { error: string };
 
         if (sourceImageUrl) {
-            // Img2Img mode — generate variation from source image
-            const i2iResult = await img2img({
+            // Image-to-pixel-art: photo → faithful pixel-art render (no prompt, no strength).
+            const i2pResult = await imageToPixelArt({
                 imageUrl: sourceImageUrl,
-                prompt,
-                strength: strength ?? 0.5,
-                width, height,
+                outputWidth: width,
+                outputHeight: height,
             });
-            if (i2iResult.success && i2iResult.buffer) {
-                result = { buffer: i2iResult.buffer };
-            } else if (i2iResult.success && i2iResult.imageUrl) {
-                try { result = { buffer: await downloadResult(i2iResult.imageUrl) }; }
+            if (i2pResult.success && i2pResult.buffer) {
+                result = { buffer: i2pResult.buffer };
+            } else if (i2pResult.success && i2pResult.imageUrl) {
+                try { result = { buffer: await downloadResult(i2pResult.imageUrl) }; }
                 catch (err) { result = { error: `Download failed: ${err instanceof Error ? err.message : 'unknown'}` }; }
             } else {
-                result = { error: i2iResult.error || 'Img2Img failed' };
+                result = { error: i2pResult.error || 'image-to-pixelart failed' };
             }
         } else {
             // Text-to-image mode (PixelLab generates with transparent bg by default)

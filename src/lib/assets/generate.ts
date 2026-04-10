@@ -223,7 +223,7 @@ async function pollBackgroundJob(jobId: string, maxAttempts = 110): Promise<Pixe
     throw new Error(`PixelLab job ${jobId} timed out after ${maxAttempts * 2}s`);
 }
 
-/** Convert an image URL to PixelLab base64 image input format */
+/** Convert an image URL to PixelLab base64 image input format (raw base64, no data URL prefix). */
 async function imageUrlToBase64(url: string): Promise<PixelLabImage> {
     const res = await fetch(url, { signal: AbortSignal.timeout(30_000) });
     if (!res.ok) throw new Error(`Failed to fetch image: ${res.status}`);
@@ -234,28 +234,76 @@ async function imageUrlToBase64(url: string): Promise<PixelLabImage> {
     return { type: 'base64', base64, format } as PixelLabImage;
 }
 
-/** Extract image buffer from PixelLab response (handles multiple response formats) */
+/**
+ * Fetch an arbitrary image URL, normalize to PNG via Sharp, and return it as a
+ * PixelLab PixelImage payload with a proper `data:image/png;base64,...` data URL.
+ * Also returns the normalized image dimensions (needed by /image-to-pixelart's
+ * `image_size` field). Resizes to `maxSide` if the longest side exceeds it.
+ */
+async function fetchImageAsPixelLabInput(url: string, maxSide = 1024): Promise<{ pixelImage: PixelLabImage; width: number; height: number }> {
+    const res = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+    if (!res.ok) throw new Error(`Failed to fetch image: ${res.status}`);
+    const arrayBuf = await res.arrayBuffer();
+
+    const sharp = (await import('sharp')).default;
+    let pipeline = sharp(Buffer.from(arrayBuf));
+    const meta = await pipeline.metadata();
+    const srcW = meta.width ?? 0;
+    const srcH = meta.height ?? 0;
+    if (!srcW || !srcH) throw new Error('Could not read source image dimensions');
+
+    const longest = Math.max(srcW, srcH);
+    if (longest > maxSide) {
+        const scale = maxSide / longest;
+        pipeline = pipeline.resize(Math.round(srcW * scale), Math.round(srcH * scale));
+    }
+
+    const pngBuffer = await pipeline.png().toBuffer();
+    const finalMeta = await sharp(pngBuffer).metadata();
+    const width = finalMeta.width ?? srcW;
+    const height = finalMeta.height ?? srcH;
+
+    const base64 = pngBuffer.toString('base64');
+    const pixelImage: PixelLabImage = {
+        type: 'base64',
+        base64: `data:image/png;base64,${base64}`,
+        format: 'png',
+    };
+    return { pixelImage, width, height };
+}
+
+/** Decode a PixelLab base64 field, tolerating an optional `data:image/...;base64,` prefix. */
+function decodeBase64Field(b64: string | undefined): Buffer | null {
+    if (!b64) return null;
+    const commaIdx = b64.indexOf(',');
+    const payload = b64.startsWith('data:') && commaIdx >= 0 ? b64.slice(commaIdx + 1) : b64;
+    return Buffer.from(payload, 'base64');
+}
+
+/** Extract image buffer from PixelLab response (handles multiple response formats). */
 function extractImageBuffer(response: PixelLabResponse): Buffer | null {
     // Try: response.image
     const img = response.image ?? (response.data?.image as PixelLabImage | undefined);
-    if (img?.base64) return Buffer.from(img.base64, 'base64');
+    const fromSingle = decodeBase64Field(img?.base64);
+    if (fromSingle) return fromSingle;
 
     // Try: response.images[0]
     const images = response.images ?? (response.data?.images as PixelLabImage[] | undefined);
-    if (images?.[0]?.base64) return Buffer.from(images[0].base64, 'base64');
+    const fromFirst = decodeBase64Field(images?.[0]?.base64);
+    if (fromFirst) return fromFirst;
 
     // Try: response.data.base64 (direct)
-    const directB64 = response.data?.base64 as string | undefined;
-    if (directB64) return Buffer.from(directB64, 'base64');
+    const fromDirect = decodeBase64Field(response.data?.base64 as string | undefined);
+    if (fromDirect) return fromDirect;
 
     return null;
 }
 
-/** Extract multiple image buffers from PixelLab response (for animations) */
+/** Extract multiple image buffers from PixelLab response (for animations). */
 function extractImageBuffers(response: PixelLabResponse): Buffer[] {
     const images = response.images ?? (response.data?.images as PixelLabImage[] | undefined);
     if (images?.length) {
-        return images.filter(img => img.base64).map(img => Buffer.from(img.base64, 'base64'));
+        return images.map(img => decodeBase64Field(img.base64)).filter((b): b is Buffer => b !== null);
     }
 
     // Fallback: try single image
@@ -317,7 +365,73 @@ export async function generate2D(opts: Generate2DOptions): Promise<GenerationRes
 }
 
 // =====================================================================
-// IMG2IMG (PixelLab Pixflux with init_image)
+// IMAGE-TO-PIXELART (PixelLab /image-to-pixelart — photo → pixel art)
+// =====================================================================
+
+/**
+ * Convert an arbitrary photo into pixel art using PixelLab's dedicated
+ * `/image-to-pixelart` endpoint. Unlike `img2img`, this does NOT take a text
+ * prompt — it just faithfully pixelates the source. The caller provides the
+ * desired output dimensions (must be ≤ 320×320 per PixelLab spec).
+ */
+export async function imageToPixelArt(opts: { imageUrl: string; outputWidth?: number; outputHeight?: number }): Promise<GenerationResult> {
+    try {
+        // PixelLab /image-to-pixelart requires image_size ≤ 1280×1280 and output_size ≤ 320×320.
+        const { pixelImage, width: srcW, height: srcH } = await fetchImageAsPixelLabInput(opts.imageUrl, 1280);
+
+        // Determine output size. If the caller gave one, clamp it; otherwise scale
+        // the longest side to 128 (reasonable pixel-art default) preserving aspect ratio.
+        const MAX_OUT = 320;
+        const MIN_OUT = 16;
+        let outW: number;
+        let outH: number;
+        if (opts.outputWidth && opts.outputHeight) {
+            outW = Math.min(Math.max(opts.outputWidth, MIN_OUT), MAX_OUT);
+            outH = Math.min(Math.max(opts.outputHeight, MIN_OUT), MAX_OUT);
+        } else {
+            const longest = Math.max(srcW, srcH);
+            const scale = Math.min(1, 128 / longest);
+            outW = Math.max(MIN_OUT, Math.round(srcW * scale));
+            outH = Math.max(MIN_OUT, Math.round(srcH * scale));
+        }
+
+        const body = {
+            image: pixelImage,
+            image_size: { width: srcW, height: srcH },
+            output_size: { width: outW, height: outH },
+        };
+
+        const response = await pixelLabPost('/image-to-pixelart', body);
+        const buffer = extractImageBuffer(response);
+
+        if (!buffer) {
+            console.error('[pixellab] Unexpected /image-to-pixelart response:', JSON.stringify(response).slice(0, 500));
+            return { success: false, model: 'image-to-pixelart', provider: 'pixellab', cost: 0, error: 'No image in /image-to-pixelart response' };
+        }
+
+        const cost = response.usage?.credits_used ?? 0.01;
+        return {
+            success: true,
+            buffer: buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer,
+            width: outW,
+            height: outH,
+            model: 'image-to-pixelart',
+            provider: 'pixellab',
+            cost,
+        };
+    } catch (err) {
+        return {
+            success: false,
+            model: 'image-to-pixelart',
+            provider: 'pixellab',
+            cost: 0,
+            error: err instanceof Error ? err.message : 'PixelLab /image-to-pixelart failed',
+        };
+    }
+}
+
+// =====================================================================
+// IMG2IMG (PixelLab Pixflux with init_image — text-guided variation)
 // =====================================================================
 
 export async function img2img(opts: Img2ImgOptions): Promise<GenerationResult> {
