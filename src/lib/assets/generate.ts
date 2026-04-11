@@ -185,8 +185,21 @@ async function pixelLabPost(endpoint: string, body: unknown, initialTimeoutMs = 
     }
 
     if (!res.ok) {
-        const errBody = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
-        throw new Error(errBody.error || errBody.detail || `PixelLab API error: ${res.status}`);
+        const raw = await res.text().catch(() => '');
+        let parsed: unknown;
+        try { parsed = JSON.parse(raw); } catch { parsed = raw; }
+        const body = parsed as { error?: string; detail?: unknown; message?: string };
+        console.error(`[pixellab] ${endpoint} ${res.status} →`, raw.slice(0, 1000));
+        let msg: string;
+        if (typeof body === 'object' && body !== null) {
+            msg = body.error || body.message ||
+                (typeof body.detail === 'string' ? body.detail :
+                    body.detail !== undefined ? JSON.stringify(body.detail).slice(0, 400) :
+                        `PixelLab ${endpoint} HTTP ${res.status}`);
+        } else {
+            msg = raw.slice(0, 400) || `PixelLab ${endpoint} HTTP ${res.status}`;
+        }
+        throw new Error(`PixelLab ${endpoint} ${res.status}: ${msg}`);
     }
 
     return res.json();
