@@ -560,12 +560,15 @@ export async function img2img(opts: Img2ImgOptions): Promise<GenerationResult> {
  *
  * PixelLab /animate-with-text-v3 constraints:
  *   - Max source dimension: 256×256 pixels
- *   - Pixel budget: width × height × frame_count ≤ 524,288
+ *   - Documented pixel budget: width × height × frame_count ≤ 524,288
  *   - frame_count: even integer, 4-16
  *
- * The source image is fetched, normalized to PNG via Sharp, resized so the
- * longest side is ≤ 256, then the frame count is further clamped so the
- * budget holds. Any input format (PNG, JPEG, WebP, GIF) is accepted.
+ * In practice, PixelLab's 24GB GPU hits CUDA OOM well below the documented
+ * budget, so we start with a conservative 160×160 resize + budget of 262,144
+ * (half documented), and on OOM we retry twice — first halving frame count,
+ * then shrinking the source another 25%.
+ *
+ * Any input format (PNG, JPEG, WebP, GIF) is accepted.
  */
 export async function generateAnimation(opts: AnimateOptions): Promise<AnimationResult> {
     // Start with the requested frame count, force even, clamp 4-16.
@@ -574,32 +577,68 @@ export async function generateAnimation(opts: AnimateOptions): Promise<Animation
     frameCount = Math.min(Math.max(frameCount, 4), 16);
 
     try {
-        // Normalize + resize source to ≤ 256×256 via Sharp (also handles WebP/GIF).
-        const { pixelImage: firstFrame, width: srcW, height: srcH } =
-            await fetchImageAsPixelLabInput(opts.sourceImageUrl, 256);
+        // Normalize + resize source via Sharp (also handles WebP/GIF).
+        // 160 is conservative: 160×160×16 = 409,600 < 524,288 documented budget.
+        let maxSide = 160;
+        let { pixelImage: firstFrame, width: srcW, height: srcH } =
+            await fetchImageAsPixelLabInput(opts.sourceImageUrl, maxSide);
 
-        // Enforce the pixel budget: w × h × frames ≤ 524,288.
-        const BUDGET = 524_288;
-        const pixelsPerFrame = srcW * srcH;
-        const maxFramesForBudget = Math.floor(BUDGET / pixelsPerFrame);
-        if (frameCount > maxFramesForBudget) {
-            // Drop to the largest even value that fits, with a 4-frame floor.
-            let fit = Math.min(frameCount, maxFramesForBudget);
+        // Conservative budget (half of the 524,288 PixelLab documents, since the
+        // real GPU runs OOM near the documented ceiling).
+        const BUDGET = 262_144;
+        const clampFrames = (desired: number, w: number, h: number): number => {
+            const maxForBudget = Math.floor(BUDGET / (w * h));
+            let fit = Math.min(desired, maxForBudget);
             if (fit % 2 !== 0) fit -= 1;
-            frameCount = Math.max(4, fit);
-        }
-
-        const body: Record<string, unknown> = {
-            first_frame: firstFrame,
-            action: opts.prompt.slice(0, 500),
-            frame_count: frameCount,
-            no_background: opts.noBackground !== false,
+            return Math.max(4, Math.min(16, fit));
         };
+        frameCount = clampFrames(frameCount, srcW, srcH);
 
-        // Use a shorter initial fetch timeout (60s) so that when PixelLab returns 202 + job id,
-        // the polling budget below fits inside the Vercel 300s function limit.
-        const response = await pixelLabPost('/animate-with-text-v3', body, 60_000);
-        const frames = extractImageBuffers(response);
+        const buildBody = (frame: PixelLabImage, fc: number) => ({
+            first_frame: frame,
+            action: opts.prompt.slice(0, 500),
+            frame_count: fc,
+            no_background: opts.noBackground !== false,
+        });
+
+        const isOomError = (msg: string) =>
+            /out of cuda memory|out of memory|cuda.*oom|cuda.*capacity/i.test(msg);
+
+        // Initial request + up to two degradation retries on CUDA OOM.
+        // Retry 1: halve the frame count (min 4).
+        // Retry 2: shrink the source 25% AND halve frames again.
+        let frames: Buffer[] = [];
+        let response: PixelLabResponse | null = null;
+        const attempts = 3;
+        for (let attempt = 0; attempt < attempts; attempt++) {
+            try {
+                response = await pixelLabPost('/animate-with-text-v3', buildBody(firstFrame, frameCount), 60_000);
+                frames = extractImageBuffers(response);
+                break;
+            } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                if (!isOomError(msg) || attempt === attempts - 1) throw err;
+
+                if (attempt === 0) {
+                    // Retry 1: halve frames.
+                    const halved = Math.max(4, Math.floor(frameCount / 2));
+                    frameCount = halved % 2 === 0 ? halved : halved + 1;
+                    console.warn(`[animate] CUDA OOM — retrying with ${frameCount} frames`);
+                } else {
+                    // Retry 2: shrink source by 25% and re-clamp frames.
+                    maxSide = Math.max(64, Math.floor(maxSide * 0.75));
+                    const shrunk = await fetchImageAsPixelLabInput(opts.sourceImageUrl, maxSide);
+                    firstFrame = shrunk.pixelImage;
+                    srcW = shrunk.width;
+                    srcH = shrunk.height;
+                    frameCount = clampFrames(frameCount, srcW, srcH);
+                    console.warn(`[animate] CUDA OOM — retrying at ${srcW}×${srcH} with ${frameCount} frames`);
+                }
+            }
+        }
+        if (!response) {
+            return { success: false, model: 'animate-v3', provider: 'pixellab', cost: 0, error: 'Animation failed after retries' };
+        }
 
         if (frames.length === 0) {
             console.error('[pixellab] No animation frames in response:', JSON.stringify(response).slice(0, 500));
