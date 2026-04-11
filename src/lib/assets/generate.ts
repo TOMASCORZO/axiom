@@ -397,7 +397,8 @@ async function pixelLabRemoveBackground(
             image_size: { width, height },
             background_removal_task: 'remove_complex_background',
         };
-        if (textHint) body.text_hint = textHint;
+        // PixelLab's /remove-background field is `text`, not `text_hint`.
+        if (textHint && textHint.trim()) body.text = textHint.trim().slice(0, 500);
 
         const response = await pixelLabPost('/remove-background', body);
         const out = extractImageBuffer(response);
@@ -461,14 +462,21 @@ export async function imageToPixelArt(opts: {
 
         let cost = response.usage?.credits_used ?? 0.01;
 
-        // Strip background via dedicated matting endpoint.
+        // Strip background via dedicated matting endpoint. Failures here are
+        // surfaced — silently returning an opaque image makes it look like
+        // the bg removal "worked" when it didn't.
         const bgResult = await pixelLabRemoveBackground(buffer, outW, outH, opts.prompt);
         if ('error' in bgResult) {
-            console.warn('[pixellab] /remove-background failed, returning opaque pixel art:', bgResult.error);
-        } else {
-            buffer = bgResult.buffer;
-            cost += bgResult.cost;
+            return {
+                success: false,
+                model: 'image-to-pixelart',
+                provider: 'pixellab',
+                cost,
+                error: `Background removal failed: ${bgResult.error}`,
+            };
         }
+        buffer = bgResult.buffer;
+        cost += bgResult.cost;
 
         return {
             success: true,
