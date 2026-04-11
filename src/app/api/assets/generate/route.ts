@@ -51,6 +51,7 @@ export async function POST(request: NextRequest) {
             texture: 'generate_texture', material: 'generate_texture',
             model_3d: 'generate_3d_model',
             animation: 'generate_animation',
+            map: 'generate_map',
         };
         const toolName = toolMap[asset_type];
         if (!toolName) {

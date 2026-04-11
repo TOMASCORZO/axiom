@@ -6,6 +6,7 @@
 // Import modules to trigger registration (side effects)
 import './coding';
 import './game';
+import './map';
 import './search';
 import './web';
 import './multiedit';

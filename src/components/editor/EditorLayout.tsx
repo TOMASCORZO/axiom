@@ -7,6 +7,8 @@ import AssetPreview from './AssetPreview';
 import CodeEditor from './CodeEditor';
 import ChatPanel from '@/components/chat/ChatPanel';
 import AssetStudio from './AssetStudio';
+import MapStudio from './MapStudio';
+import MapCanvas from './MapCanvas';
 import ConsolePanel from './ConsolePanel';
 import SubsystemsPanel from './SubsystemsPanel';
 import AnimationTimeline from './AnimationTimeline';
@@ -37,9 +39,13 @@ export default function EditorLayout({ projectId }: EditorLayoutProps) {
 
                 {/* Center + Bottom */}
                 <div className="flex-1 flex flex-col overflow-hidden">
-                    {/* Center — Asset Preview (full) or Code Editor + Viewport */}
+                    {/* Center — Asset Preview / Map Canvas / Code Editor + Viewport */}
                     <div className="flex-1 flex flex-col overflow-hidden">
-                        {activeRightPanel === 'assets' ? (
+                        {activeRightPanel === 'maps' ? (
+                            <div className="flex-1 overflow-hidden">
+                                <MapCanvas />
+                            </div>
+                        ) : activeRightPanel === 'assets' ? (
                             <div className="flex-1 overflow-hidden">
                                 <AssetPreview />
                             </div>
@@ -59,16 +65,16 @@ export default function EditorLayout({ projectId }: EditorLayoutProps) {
                         )}
                     </div>
 
-                    {/* Bottom — Console + Subsystems OR Animation Timeline */}
+                    {/* Bottom — Console + Subsystems / Animation Timeline / hidden for maps */}
                     <div
                         className="flex-shrink-0 overflow-hidden flex flex-col"
-                        style={{ height: `${bottomPanelHeight}px` }}
+                        style={{ height: activeRightPanel === 'maps' ? 0 : `${bottomPanelHeight}px` }}
                     >
                         {activeRightPanel === 'assets' ? (
                             <div className="flex-1 overflow-hidden">
                                 <AnimationTimeline />
                             </div>
-                        ) : (
+                        ) : activeRightPanel === 'maps' ? null : (
                             <>
                                 <div className="flex-1 overflow-hidden">
                                     <ConsolePanel />
@@ -88,6 +94,8 @@ export default function EditorLayout({ projectId }: EditorLayoutProps) {
                 >
                     {activeRightPanel === 'assets' ? (
                         <AssetStudio />
+                    ) : activeRightPanel === 'maps' ? (
+                        <MapStudio />
                     ) : (
                         <ChatPanel projectId={projectId} />
                     )}

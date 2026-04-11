@@ -6,7 +6,7 @@ CREATE TABLE public.assets (
   name TEXT NOT NULL,
   asset_type TEXT NOT NULL CHECK (asset_type IN (
     'sprite','sprite_sheet','texture','texture_atlas',
-    'model_3d','material','animation','audio','ui_element','font','particle'
+    'model_3d','material','animation','audio','ui_element','font','particle','map'
   )),
   storage_key TEXT NOT NULL,
   thumbnail_key TEXT,

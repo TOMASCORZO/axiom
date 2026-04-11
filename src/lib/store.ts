@@ -36,7 +36,7 @@ interface EditorState {
     rightPanelWidth: number;
     bottomPanelHeight: number;
     activeBottomTab: 'console' | 'build' | 'errors';
-    activeRightPanel: 'chat' | 'assets';
+    activeRightPanel: 'chat' | 'assets' | 'maps';
 
     // Asset Studio
     assets: Asset[];
@@ -71,7 +71,7 @@ interface EditorState {
     setPanelWidth: (panel: 'left' | 'right', width: number) => void;
     setBottomPanelHeight: (height: number) => void;
     setActiveBottomTab: (tab: 'console' | 'build' | 'errors') => void;
-    setActiveRightPanel: (panel: 'chat' | 'assets') => void;
+    setActiveRightPanel: (panel: 'chat' | 'assets' | 'maps') => void;
     setAssets: (assets: Asset[]) => void;
     addAsset: (asset: Asset) => void;
     removeAsset: (id: string) => void;

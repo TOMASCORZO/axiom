@@ -14,6 +14,7 @@ import {
     Save,
     ArrowLeft,
     ImageIcon,
+    Map as MapIcon,
 } from 'lucide-react';
 
 export default function Toolbar() {
@@ -132,8 +133,8 @@ export default function Toolbar() {
                 <Save size={15} />
             </button>
 
-            {/* Asset Studio */}
-            <div className="ml-2 pl-2 border-l border-white/10">
+            {/* Asset Studio / Map Studio */}
+            <div className="ml-2 pl-2 border-l border-white/10 flex items-center gap-0.5">
                 <button
                     onClick={() => setActiveRightPanel(activeRightPanel === 'assets' ? 'chat' : 'assets')}
                     className={`p-2 rounded-lg transition-all ${
@@ -144,6 +145,17 @@ export default function Toolbar() {
                     title="Asset Studio"
                 >
                     <ImageIcon size={15} />
+                </button>
+                <button
+                    onClick={() => setActiveRightPanel(activeRightPanel === 'maps' ? 'chat' : 'maps')}
+                    className={`p-2 rounded-lg transition-all ${
+                        activeRightPanel === 'maps'
+                            ? 'bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30'
+                            : 'text-zinc-500 hover:text-zinc-300 hover:bg-white/5'
+                    }`}
+                    title="Map Studio"
+                >
+                    <MapIcon size={15} />
                 </button>
             </div>
 
