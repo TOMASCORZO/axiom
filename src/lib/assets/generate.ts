@@ -382,51 +382,94 @@ export async function generate2D(opts: Generate2DOptions): Promise<GenerationRes
 // =====================================================================
 
 /**
- * Convert a photo into a transparent-background pixel art sprite in a single
- * call to PixelLab's `/create-image-pixflux` endpoint, using the photo as
- * `init_image` and enabling `no_background` for built-in matting.
+ * Call PixelLab's `/remove-background` endpoint on an already-pixelated PNG
+ * buffer. Returns a transparent-background PNG. Max 400×400 per PixelLab spec.
+ */
+async function pixelLabRemoveBackground(
+    pngBuffer: Buffer,
+    width: number,
+    height: number,
+    textHint?: string,
+): Promise<{ buffer: Buffer; cost: number } | { error: string }> {
+    try {
+        const body: Record<string, unknown> = {
+            image: { type: 'base64', base64: pngBuffer.toString('base64'), format: 'png' },
+            image_size: { width, height },
+            background_removal_task: 'remove_complex_background',
+        };
+        if (textHint) body.text_hint = textHint;
+
+        const response = await pixelLabPost('/remove-background', body);
+        const out = extractImageBuffer(response);
+        if (!out) {
+            console.error('[pixellab] Unexpected /remove-background response:', JSON.stringify(response).slice(0, 500));
+            return { error: 'No image in /remove-background response' };
+        }
+        return { buffer: out, cost: response.usage?.credits_used ?? 0 };
+    } catch (err) {
+        return { error: err instanceof Error ? err.message : '/remove-background failed' };
+    }
+}
+
+/**
+ * Convert a photo into a transparent-background pixel art sprite using
+ * PixelLab's dedicated `/image-to-pixelart` endpoint (faithful pixelization),
+ * then pipe the result through `/remove-background` for matting. Two calls,
+ * but both endpoints are stable — the single-call `/create-image-pixflux` path
+ * with init_image + no_background returns opaque 500s from PixelLab's side.
  *
- * This is a *creative* img2img pass — pixflux regenerates the subject as pixel
- * art guided by the source image and the text prompt. `initImageStrength`
- * controls fidelity (1-999, default 700 → stays close to the photo).
+ * Prompt is used as a text_hint for /remove-background matting only; the
+ * pixelization itself is prompt-less (faithful to the source).
  */
 export async function imageToPixelArt(opts: {
     imageUrl: string;
     prompt?: string;
     outputWidth?: number;
     outputHeight?: number;
-    initImageStrength?: number;
 }): Promise<GenerationResult> {
     try {
-        // Resize the source to something sane — pixflux outputs ≤400×400, so
-        // 512 is more than enough for the init_image payload.
-        const { pixelImage } = await fetchImageAsPixelLabInput(opts.imageUrl, 512);
+        // /image-to-pixelart input image_size ≤ 1280×1280, output_size ≤ 320×320.
+        const { pixelImage, width: srcW, height: srcH } = await fetchImageAsPixelLabInput(opts.imageUrl, 1280);
 
-        // pixflux image_size IS the output size. Must be 16-400.
-        const MAX = 400;
-        const MIN = 16;
-        const outW = Math.min(Math.max(opts.outputWidth ?? 128, MIN), MAX);
-        const outH = Math.min(Math.max(opts.outputHeight ?? 128, MIN), MAX);
-        const strength = Math.min(Math.max(opts.initImageStrength ?? 700, 1), 999);
-
-        const body = {
-            description: opts.prompt?.trim() || 'pixel art sprite',
-            image_size: { width: outW, height: outH },
-            init_image: pixelImage,
-            init_image_strength: strength,
-            no_background: true,
-            background_removal_task: 'remove_complex_background',
-        };
-
-        const response = await pixelLabPost('/create-image-pixflux', body);
-        const buffer = extractImageBuffer(response);
-
-        if (!buffer) {
-            console.error('[pixellab] Unexpected /create-image-pixflux response:', JSON.stringify(response).slice(0, 500));
-            return { success: false, model: 'image-to-pixelart', provider: 'pixellab', cost: 0, error: 'No image in /create-image-pixflux response' };
+        const MAX_OUT = 320;
+        const MIN_OUT = 16;
+        let outW: number;
+        let outH: number;
+        if (opts.outputWidth && opts.outputHeight) {
+            outW = Math.min(Math.max(opts.outputWidth, MIN_OUT), MAX_OUT);
+            outH = Math.min(Math.max(opts.outputHeight, MIN_OUT), MAX_OUT);
+        } else {
+            const longest = Math.max(srcW, srcH);
+            const scale = Math.min(1, 128 / longest);
+            outW = Math.max(MIN_OUT, Math.round(srcW * scale));
+            outH = Math.max(MIN_OUT, Math.round(srcH * scale));
         }
 
-        const cost = response.usage?.credits_used ?? 0.01;
+        const pixelateBody = {
+            image: pixelImage,
+            image_size: { width: srcW, height: srcH },
+            output_size: { width: outW, height: outH },
+        };
+
+        const response = await pixelLabPost('/image-to-pixelart', pixelateBody);
+        let buffer = extractImageBuffer(response);
+
+        if (!buffer) {
+            console.error('[pixellab] Unexpected /image-to-pixelart response:', JSON.stringify(response).slice(0, 500));
+            return { success: false, model: 'image-to-pixelart', provider: 'pixellab', cost: 0, error: 'No image in /image-to-pixelart response' };
+        }
+
+        let cost = response.usage?.credits_used ?? 0.01;
+
+        // Strip background via dedicated matting endpoint.
+        const bgResult = await pixelLabRemoveBackground(buffer, outW, outH, opts.prompt);
+        if ('error' in bgResult) {
+            console.warn('[pixellab] /remove-background failed, returning opaque pixel art:', bgResult.error);
+        } else {
+            buffer = bgResult.buffer;
+            cost += bgResult.cost;
+        }
+
         return {
             success: true,
             buffer: buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer,
@@ -442,7 +485,7 @@ export async function imageToPixelArt(opts: {
             model: 'image-to-pixelart',
             provider: 'pixellab',
             cost: 0,
-            error: err instanceof Error ? err.message : 'PixelLab /create-image-pixflux failed',
+            error: err instanceof Error ? err.message : 'PixelLab /image-to-pixelart failed',
         };
     }
 }
