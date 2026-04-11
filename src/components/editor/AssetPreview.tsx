@@ -162,7 +162,15 @@ export default function AssetPreview() {
                     options: { source_image_url: sourceUrl, strength: img2imgStrength, width: outW, height: outH },
                 }),
             });
-            const data = await res.json();
+            const raw = await res.text();
+            let data: { success?: boolean; error?: string; storage_key?: string } = {};
+            try { data = JSON.parse(raw); }
+            catch {
+                const snippet = raw.slice(0, 300) || `HTTP ${res.status}`;
+                setActionError(`Server returned non-JSON: ${snippet}`);
+                addConsoleEntry({ id: crypto.randomUUID(), level: 'error', message: `[Asset Studio] Img2Img non-JSON response (${res.status}): ${snippet}`, timestamp: new Date().toISOString() });
+                return;
+            }
             if (res.ok && data.success) {
                 const assetId = crypto.randomUUID();
                 addAsset({
@@ -178,9 +186,15 @@ export default function AssetPreview() {
                 setActiveAction(null);
                 addConsoleEntry({ id: crypto.randomUUID(), level: 'log', message: `[Asset Studio] Img2Img complete → ${targetPath}`, timestamp: new Date().toISOString() });
             } else {
-                setActionError(data.error || 'Img2Img failed');
+                const msg = data.error || `HTTP ${res.status}`;
+                setActionError(msg);
+                addConsoleEntry({ id: crypto.randomUUID(), level: 'error', message: `[Asset Studio] Img2Img failed: ${msg}`, timestamp: new Date().toISOString() });
             }
-        } catch { setActionError('Network error'); }
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : 'Unknown fetch error';
+            setActionError(`Request failed: ${msg}`);
+            addConsoleEntry({ id: crypto.randomUUID(), level: 'error', message: `[Asset Studio] Img2Img request failed: ${msg}`, timestamp: new Date().toISOString() });
+        }
         finally { setActionBusy(false); setAssetGenerating(false); }
     };
 
