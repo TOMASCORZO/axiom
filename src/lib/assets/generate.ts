@@ -583,8 +583,11 @@ export async function generateAnimation(opts: AnimateOptions): Promise<Animation
             no_background: opts.noBackground !== false,
         };
 
-        // Short initial fetch (60s) so the 202 → polling budget fits under Vercel's 300s.
-        const response = await pixelLabPost('/animate-with-text-v3', body, 60_000);
+        // /animate-with-text-v3 is synchronous — PixelLab holds the connection
+        // open while the model runs on their GPU. Give it a long timeout
+        // (270s) so Vercel's 300s serverless cap still leaves headroom for
+        // Sharp compositing + upload.
+        const response = await pixelLabPost('/animate-with-text-v3', body, 270_000);
         const frames = extractImageBuffers(response);
 
         if (frames.length === 0) {
