@@ -557,16 +557,37 @@ export async function img2img(opts: Img2ImgOptions): Promise<GenerationResult> {
 /**
  * Generate animation frames from a source image using PixelLab's text-driven animation.
  * Returns a composed sprite sheet (frames arranged horizontally) ready for game use.
+ *
+ * PixelLab /animate-with-text-v3 constraints:
+ *   - Max source dimension: 256×256 pixels
+ *   - Pixel budget: width × height × frame_count ≤ 524,288
+ *   - frame_count: even integer, 4-16
+ *
+ * The source image is fetched, normalized to PNG via Sharp, resized so the
+ * longest side is ≤ 256, then the frame count is further clamped so the
+ * budget holds. Any input format (PNG, JPEG, WebP, GIF) is accepted.
  */
 export async function generateAnimation(opts: AnimateOptions): Promise<AnimationResult> {
-    // frame_count must be even, 4-16
+    // Start with the requested frame count, force even, clamp 4-16.
     let frameCount = opts.frameCount ?? 6;
     if (frameCount % 2 !== 0) frameCount += 1;
     frameCount = Math.min(Math.max(frameCount, 4), 16);
 
     try {
-        // Fetch source image and convert to base64
-        const firstFrame = await imageUrlToBase64(opts.sourceImageUrl);
+        // Normalize + resize source to ≤ 256×256 via Sharp (also handles WebP/GIF).
+        const { pixelImage: firstFrame, width: srcW, height: srcH } =
+            await fetchImageAsPixelLabInput(opts.sourceImageUrl, 256);
+
+        // Enforce the pixel budget: w × h × frames ≤ 524,288.
+        const BUDGET = 524_288;
+        const pixelsPerFrame = srcW * srcH;
+        const maxFramesForBudget = Math.floor(BUDGET / pixelsPerFrame);
+        if (frameCount > maxFramesForBudget) {
+            // Drop to the largest even value that fits, with a 4-frame floor.
+            let fit = Math.min(frameCount, maxFramesForBudget);
+            if (fit % 2 !== 0) fit -= 1;
+            frameCount = Math.max(4, fit);
+        }
 
         const body: Record<string, unknown> = {
             first_frame: firstFrame,
