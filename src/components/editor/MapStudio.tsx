@@ -63,9 +63,12 @@ function GenerateMapTab() {
         });
 
         try {
+            const abort = new AbortController();
+            const timer = setTimeout(() => abort.abort(), 270_000);
             const res = await fetch('/api/assets/generate', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
+                signal: abort.signal,
                 body: JSON.stringify({
                     project_id: project.id,
                     prompt: prompt.trim(),
@@ -81,6 +84,7 @@ function GenerateMapTab() {
                     },
                 }),
             });
+            clearTimeout(timer);
             const data = await res.json();
             if (!res.ok || !data.success) {
                 setError(data.error || 'Map generation failed');
@@ -276,9 +280,12 @@ function EditTab() {
         setGenError(null);
         try {
             const slug = newTilePrompt.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 20);
+            const abort = new AbortController();
+            const timer = setTimeout(() => abort.abort(), 120_000);
             const res = await fetch('/api/assets/map-action', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
+                signal: abort.signal,
                 body: JSON.stringify({
                     action: 'generate_tile',
                     project_id: project.id,
@@ -287,6 +294,7 @@ function EditTab() {
                     target_path: `assets/maps/tiles/${slug}_${Date.now() % 10000}.png`,
                 }),
             });
+            clearTimeout(timer);
             const data = await res.json();
             if (!res.ok || !data.success) {
                 setGenError(data.error || 'Tile generation failed');
@@ -312,9 +320,12 @@ function EditTab() {
         setGenError(null);
         try {
             const slug = newObjectPrompt.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 20);
+            const abort = new AbortController();
+            const timer = setTimeout(() => abort.abort(), 120_000);
             const res = await fetch('/api/assets/map-action', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
+                signal: abort.signal,
                 body: JSON.stringify({
                     action: 'generate_object',
                     project_id: project.id,
@@ -323,6 +334,7 @@ function EditTab() {
                     target_path: `assets/maps/objects/${slug}_${Date.now() % 10000}.png`,
                 }),
             });
+            clearTimeout(timer);
             const data = await res.json();
             if (!res.ok || !data.success) {
                 setGenError(data.error || 'Object generation failed');
