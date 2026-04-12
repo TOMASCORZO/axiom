@@ -38,7 +38,7 @@ export async function generateSingleTile(opts: SingleTileOptions): Promise<Singl
         width: size,
         height: size,
         noBackground: false, // tiles are solid, not transparent
-        view: 'top-down',
+        view: 'high top-down',
     });
     if (!result.success || !result.buffer) {
         return { success: false, cost: 0, error: result.error || 'Tile generation failed' };
@@ -84,7 +84,7 @@ export async function generateMapObject(opts: MapObjectOptions): Promise<MapObje
         width,
         height,
         noBackground: true,
-        view: 'top-down',
+        view: 'high top-down',
     });
     if (!result.success || !result.buffer) {
         return { success: false, cost: 0, error: result.error || 'Object generation failed' };
