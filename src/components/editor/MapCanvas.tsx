@@ -4,9 +4,9 @@ import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { useEditorStore } from '@/lib/store';
 import { useMapEditorStore } from '@/lib/map-store';
 import { Map as MapIcon, Save, Undo2, Redo2, Loader2 } from 'lucide-react';
-import type { MapMetadataShape } from '@/types/asset';
+import type { MapWangTile, TerrainCorner } from '@/types/asset';
 
-// ── Image cache ──
+// ── Image cache ─────────────────────────────────────────────────────
 // Loads images for the current tile + object libraries. Keyed by storage_key
 // so the cache survives re-renders and remains stable across edits.
 function useImageCache(storageKeys: string[]): Map<string, HTMLImageElement> {
@@ -37,15 +37,49 @@ function useImageCache(storageKeys: string[]): Map<string, HTMLImageElement> {
     return cache;
 }
 
-function placementLookup(meta: MapMetadataShape) {
-    const lib = new Map(meta.objects_library.map(o => [o.id, o]));
-    return lib;
+// ── Wang tile picker (client-side preview; server is authoritative on save) ──
+function pickWangTile(
+    cellCorners: { NW: TerrainCorner; NE: TerrainCorner; SW: TerrainCorner; SE: TerrainCorner },
+    tiles: MapWangTile[],
+): MapWangTile | null {
+    if (tiles.length === 0) return null;
+    const exact = tiles.find(t =>
+        t.corners.NW === cellCorners.NW &&
+        t.corners.NE === cellCorners.NE &&
+        t.corners.SW === cellCorners.SW &&
+        t.corners.SE === cellCorners.SE,
+    );
+    if (exact) return exact;
+    // Majority-corner fallback: find a solid tile for the dominant terrain.
+    const counts: Record<string, number> = {};
+    counts[cellCorners.NW] = (counts[cellCorners.NW] ?? 0) + 1;
+    counts[cellCorners.NE] = (counts[cellCorners.NE] ?? 0) + 1;
+    counts[cellCorners.SW] = (counts[cellCorners.SW] ?? 0) + 1;
+    counts[cellCorners.SE] = (counts[cellCorners.SE] ?? 0) + 1;
+    const majority = Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0] as TerrainCorner;
+    const solid = tiles.find(t =>
+        t.corners.NW === majority &&
+        t.corners.NE === majority &&
+        t.corners.SW === majority &&
+        t.corners.SE === majority,
+    );
+    return solid ?? tiles[0];
 }
+
+// Flat colour for corner preview when no Wang tile matches / is loaded.
+const TERRAIN_FALLBACK: Record<TerrainCorner, string> = {
+    lower: '#3b7a3e',
+    upper: '#7a7066',
+    transition: '#a37538',
+};
+
+// ── Main ────────────────────────────────────────────────────────────
 
 export default function MapCanvas() {
     const {
-        metadata, tool, selectedTileId, selectedObjectId,
-        paintCell, eraseCell, placeObject, removePlacement,
+        metadata, tool,
+        selectedTerrain, selectedIsoTileId, selectedObjectId,
+        paintAt, eraseAt, placeObject, removePlacement,
         undo, redoAction, dirty, saving, saveError,
         assetId, history, redo,
     } = useMapEditorStore();
@@ -60,7 +94,10 @@ export default function MapCanvas() {
 
     const storageKeys = useMemo(() => {
         if (!metadata) return [] as string[];
-        const tileKeys = metadata.tiles.map(t => t.storage_key);
+        const tileKeys =
+            metadata.projection === 'isometric'
+                ? (metadata.iso_tiles ?? []).map(t => t.storage_key)
+                : (metadata.wang_tiles ?? []).map(t => t.storage_key);
         const objectKeys = metadata.objects_library.map(o => o.storage_key);
         return [...tileKeys, ...objectKeys];
     }, [metadata]);
@@ -70,6 +107,22 @@ export default function MapCanvas() {
     const tileSize = metadata?.tile_size ?? 32;
     const gridW = metadata?.grid_w ?? 0;
     const gridH = metadata?.grid_h ?? 0;
+    const isIso = metadata?.projection === 'isometric';
+
+    // Iso render metrics — derived from first iso tile if available.
+    const isoTileRenderW = isIso ? (metadata?.iso_tiles?.[0]?.width ?? tileSize * 2) : 0;
+    const isoTileRenderH = isIso ? (metadata?.iso_tiles?.[0]?.height ?? tileSize * 2) : 0;
+    const halfW = tileSize / 2;
+    const halfH = tileSize / 4;
+    // Shift so the leftmost diamond starts at x = 0.
+    const isoOffsetX = isIso ? gridH * halfW : 0;
+
+    const pxW = isIso
+        ? Math.ceil((gridW + gridH) * halfW + isoTileRenderW)
+        : gridW * tileSize;
+    const pxH = isIso
+        ? Math.ceil((gridW + gridH) * halfH + isoTileRenderH)
+        : gridH * tileSize;
 
     // ── Draw ──
     useEffect(() => {
@@ -78,57 +131,151 @@ export default function MapCanvas() {
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
 
-        const pxW = gridW * tileSize;
-        const pxH = gridH * tileSize;
         canvas.width = pxW;
         canvas.height = pxH;
         ctx.imageSmoothingEnabled = false;
         ctx.clearRect(0, 0, pxW, pxH);
 
-        // Tiles
-        const tileById = new Map(metadata.tiles.map(t => [t.id, t]));
-        for (let y = 0; y < gridH; y++) {
-            for (let x = 0; x < gridW; x++) {
-                const id = metadata.grid[y]?.[x];
-                if (!id) continue;
-                const t = tileById.get(id);
-                if (!t) continue;
-                const img = imageCache.get(t.storage_key);
-                if (img) {
-                    ctx.drawImage(img, x * tileSize, y * tileSize, tileSize, tileSize);
-                } else {
-                    // placeholder while loading
-                    ctx.fillStyle = '#1e1e2a';
-                    ctx.fillRect(x * tileSize, y * tileSize, tileSize, tileSize);
+        if (isIso) {
+            // ── Isometric ──
+            const tiles = metadata.iso_tiles ?? [];
+            const tileById = new Map(tiles.map(t => [t.id, t]));
+            const grid = metadata.iso_grid ?? [];
+
+            // Back-to-front: iterate by diagonals so farther tiles render first.
+            for (let y = 0; y < gridH; y++) {
+                for (let x = 0; x < gridW; x++) {
+                    const id = grid[y]?.[x];
+                    const anchorX = (x - y) * halfW + isoOffsetX;
+                    const anchorY = (x + y) * halfH;
+                    if (!id) {
+                        // Placeholder diamond.
+                        ctx.fillStyle = '#141420';
+                        ctx.beginPath();
+                        ctx.moveTo(anchorX, anchorY);
+                        ctx.lineTo(anchorX + halfW, anchorY + halfH);
+                        ctx.lineTo(anchorX, anchorY + 2 * halfH);
+                        ctx.lineTo(anchorX - halfW, anchorY + halfH);
+                        ctx.closePath();
+                        ctx.fill();
+                        continue;
+                    }
+                    const t = tileById.get(id);
+                    if (!t) continue;
+                    const img = imageCache.get(t.storage_key);
+                    const drawX = anchorX - t.width / 2;
+                    const drawY = anchorY - (t.height - tileSize / 2); // align diamond top
+                    if (img) {
+                        ctx.drawImage(img, drawX, drawY, t.width, t.height);
+                    } else {
+                        ctx.fillStyle = '#1e1e2a';
+                        ctx.fillRect(drawX, drawY, t.width, t.height);
+                    }
                 }
             }
-        }
 
-        // Placements
-        const objLib = placementLookup(metadata);
-        for (const p of metadata.placements) {
-            const obj = objLib.get(p.object_id);
-            if (!obj) continue;
-            const img = imageCache.get(obj.storage_key);
-            if (img) {
-                ctx.drawImage(img, p.grid_x * tileSize, p.grid_y * tileSize, obj.width, obj.height);
+            // Placements in iso: map grid to iso anchor.
+            const objLib = new Map(metadata.objects_library.map(o => [o.id, o]));
+            for (const p of metadata.placements) {
+                const obj = objLib.get(p.object_id);
+                if (!obj) continue;
+                const anchorX = (p.grid_x - p.grid_y) * halfW + isoOffsetX;
+                const anchorY = (p.grid_x + p.grid_y) * halfH;
+                const img = imageCache.get(obj.storage_key);
+                if (img) {
+                    ctx.drawImage(img, anchorX - obj.width / 2, anchorY - (obj.height - tileSize / 2), obj.width, obj.height);
+                }
             }
-        }
 
-        // Grid overlay
-        ctx.strokeStyle = 'rgba(255,255,255,0.06)';
-        ctx.lineWidth = 1;
-        for (let x = 0; x <= gridW; x++) {
-            ctx.beginPath();
-            ctx.moveTo(x * tileSize + 0.5, 0);
-            ctx.lineTo(x * tileSize + 0.5, pxH);
-            ctx.stroke();
-        }
-        for (let y = 0; y <= gridH; y++) {
-            ctx.beginPath();
-            ctx.moveTo(0, y * tileSize + 0.5);
-            ctx.lineTo(pxW, y * tileSize + 0.5);
-            ctx.stroke();
+            // Cell-edge overlay — faint diamond outlines.
+            ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+            ctx.lineWidth = 1;
+            for (let y = 0; y < gridH; y++) {
+                for (let x = 0; x < gridW; x++) {
+                    const ax = (x - y) * halfW + isoOffsetX;
+                    const ay = (x + y) * halfH;
+                    ctx.beginPath();
+                    ctx.moveTo(ax, ay);
+                    ctx.lineTo(ax + halfW, ay + halfH);
+                    ctx.lineTo(ax, ay + 2 * halfH);
+                    ctx.lineTo(ax - halfW, ay + halfH);
+                    ctx.closePath();
+                    ctx.stroke();
+                }
+            }
+        } else {
+            // ── Orthogonal (Wang) ──
+            const wangTiles = metadata.wang_tiles ?? [];
+            const corners = metadata.corners ?? [];
+
+            for (let y = 0; y < gridH; y++) {
+                for (let x = 0; x < gridW; x++) {
+                    const NW = corners[y]?.[x] ?? 'lower';
+                    const NE = corners[y]?.[x + 1] ?? 'lower';
+                    const SW = corners[y + 1]?.[x] ?? 'lower';
+                    const SE = corners[y + 1]?.[x + 1] ?? 'lower';
+                    const tile = pickWangTile({ NW, NE, SW, SE }, wangTiles);
+                    if (tile) {
+                        const img = imageCache.get(tile.storage_key);
+                        if (img) {
+                            ctx.drawImage(img, x * tileSize, y * tileSize, tileSize, tileSize);
+                        } else {
+                            ctx.fillStyle = TERRAIN_FALLBACK[NW];
+                            ctx.fillRect(x * tileSize, y * tileSize, tileSize, tileSize);
+                        }
+                    } else {
+                        // No wang tiles at all — use per-corner fallback quads.
+                        ctx.fillStyle = TERRAIN_FALLBACK[NW];
+                        ctx.fillRect(x * tileSize, y * tileSize, tileSize / 2, tileSize / 2);
+                        ctx.fillStyle = TERRAIN_FALLBACK[NE];
+                        ctx.fillRect(x * tileSize + tileSize / 2, y * tileSize, tileSize / 2, tileSize / 2);
+                        ctx.fillStyle = TERRAIN_FALLBACK[SW];
+                        ctx.fillRect(x * tileSize, y * tileSize + tileSize / 2, tileSize / 2, tileSize / 2);
+                        ctx.fillStyle = TERRAIN_FALLBACK[SE];
+                        ctx.fillRect(x * tileSize + tileSize / 2, y * tileSize + tileSize / 2, tileSize / 2, tileSize / 2);
+                    }
+                }
+            }
+
+            // Placements
+            const objLib = new Map(metadata.objects_library.map(o => [o.id, o]));
+            for (const p of metadata.placements) {
+                const obj = objLib.get(p.object_id);
+                if (!obj) continue;
+                const img = imageCache.get(obj.storage_key);
+                if (img) {
+                    ctx.drawImage(img, p.grid_x * tileSize, p.grid_y * tileSize, obj.width, obj.height);
+                }
+            }
+
+            // Cell grid overlay
+            ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+            ctx.lineWidth = 1;
+            for (let x = 0; x <= gridW; x++) {
+                ctx.beginPath();
+                ctx.moveTo(x * tileSize + 0.5, 0);
+                ctx.lineTo(x * tileSize + 0.5, pxH);
+                ctx.stroke();
+            }
+            for (let y = 0; y <= gridH; y++) {
+                ctx.beginPath();
+                ctx.moveTo(0, y * tileSize + 0.5);
+                ctx.lineTo(pxW, y * tileSize + 0.5);
+                ctx.stroke();
+            }
+
+            // Corner markers — small dots on each corner intersection to remind
+            // the user that "paint" targets corners, not cells.
+            ctx.fillStyle = 'rgba(167,139,250,0.4)';
+            for (let y = 0; y <= gridH; y++) {
+                for (let x = 0; x <= gridW; x++) {
+                    const label = corners[y]?.[x] ?? 'lower';
+                    if (label !== 'lower') {
+                        ctx.fillStyle = label === 'upper' ? 'rgba(250,250,250,0.5)' : 'rgba(250,200,100,0.5)';
+                        ctx.fillRect(x * tileSize - 1, y * tileSize - 1, 3, 3);
+                    }
+                }
+            }
         }
 
         // Looping badge overlay
@@ -139,7 +286,7 @@ export default function MapCanvas() {
             ctx.strokeRect(1, 1, pxW - 2, pxH - 2);
             ctx.setLineDash([]);
         }
-    }, [metadata, imageCache, gridW, gridH, tileSize]);
+    }, [metadata, imageCache, gridW, gridH, tileSize, isIso, pxW, pxH, halfW, halfH, isoOffsetX]);
 
     // Fit-to-view when asset changes
     useEffect(() => {
@@ -147,37 +294,73 @@ export default function MapCanvas() {
         if (!c || !metadata) return;
         const cw = c.clientWidth;
         const ch = c.clientHeight;
-        const pxW = gridW * tileSize;
-        const pxH = gridH * tileSize;
         if (pxW === 0 || pxH === 0) return;
         const fit = Math.min(cw / pxW, ch / pxH) * 0.9;
         setZoom(fit);
         setPan({ x: (cw - pxW * fit) / 2, y: (ch - pxH * fit) / 2 });
-    }, [assetId, gridW, gridH, tileSize, metadata]);
+    }, [assetId, gridW, gridH, tileSize, isIso, metadata, pxW, pxH]);
 
     // ── Input ──
-    const canvasCoordsFromEvent = useCallback((e: React.MouseEvent): { x: number; y: number } | null => {
-        const c = canvasRef.current;
+    // Returns a coordinate in the projection-appropriate space:
+    //   - Ortho paint/erase: corner coords (0..gridW, 0..gridH inclusive)
+    //   - Ortho place_object / Iso all: cell coords (0..gridW-1, 0..gridH-1)
+    const coordsFromEvent = useCallback((
+        e: React.MouseEvent,
+        kind: 'corner' | 'cell',
+    ): { x: number; y: number } | null => {
         const container = containerRef.current;
-        if (!c || !container) return null;
+        if (!container) return null;
         const rect = container.getBoundingClientRect();
-        const relX = e.clientX - rect.left - pan.x;
-        const relY = e.clientY - rect.top - pan.y;
-        const x = Math.floor(relX / (tileSize * zoom));
-        const y = Math.floor(relY / (tileSize * zoom));
+        const relX = (e.clientX - rect.left - pan.x) / zoom;
+        const relY = (e.clientY - rect.top - pan.y) / zoom;
+
+        if (isIso) {
+            // Inverse iso projection: anchor at top of diamond.
+            const lx = relX - isoOffsetX;
+            const ly = relY;
+            const u = lx / halfW;    // x - y
+            const v = ly / halfH;    // x + y
+            const x = Math.floor((u + v) / 2);
+            const y = Math.floor((v - u) / 2);
+            if (x < 0 || y < 0 || x >= gridW || y >= gridH) return null;
+            return { x, y };
+        }
+        if (kind === 'corner') {
+            const x = Math.round(relX / tileSize);
+            const y = Math.round(relY / tileSize);
+            if (x < 0 || y < 0 || x > gridW || y > gridH) return null;
+            return { x, y };
+        }
+        const x = Math.floor(relX / tileSize);
+        const y = Math.floor(relY / tileSize);
         if (x < 0 || y < 0 || x >= gridW || y >= gridH) return null;
         return { x, y };
-    }, [pan.x, pan.y, zoom, tileSize, gridW, gridH]);
+    }, [pan.x, pan.y, zoom, tileSize, gridW, gridH, isIso, halfW, halfH, isoOffsetX]);
 
-    const applyTool = useCallback((cellX: number, cellY: number) => {
-        if (tool === 'paint' && selectedTileId) {
-            paintCell(cellX, cellY, selectedTileId);
+    const applyTool = useCallback((e: React.MouseEvent) => {
+        if (tool === 'paint') {
+            if (isIso) {
+                if (!selectedIsoTileId) return;
+                const c = coordsFromEvent(e, 'cell');
+                if (c) paintAt(c.x, c.y);
+            } else {
+                // Paint a corner.
+                const c = coordsFromEvent(e, 'corner');
+                if (c) paintAt(c.x, c.y);
+            }
         } else if (tool === 'erase') {
-            eraseCell(cellX, cellY);
+            if (isIso) {
+                const c = coordsFromEvent(e, 'cell');
+                if (c) eraseAt(c.x, c.y);
+            } else {
+                const c = coordsFromEvent(e, 'corner');
+                if (c) eraseAt(c.x, c.y);
+            }
         } else if (tool === 'place_object' && selectedObjectId) {
-            placeObject(cellX, cellY, selectedObjectId);
+            const c = coordsFromEvent(e, 'cell');
+            if (c) placeObject(c.x, c.y, selectedObjectId);
         }
-    }, [tool, selectedTileId, selectedObjectId, paintCell, eraseCell, placeObject]);
+    }, [tool, selectedIsoTileId, selectedObjectId, coordsFromEvent, paintAt, eraseAt, placeObject, isIso]);
 
     const handleMouseDown = (e: React.MouseEvent) => {
         if (e.button === 1 || (e.button === 0 && (e.metaKey || e.ctrlKey || tool === 'pan'))) {
@@ -185,21 +368,18 @@ export default function MapCanvas() {
             return;
         }
         if (e.button === 0) {
-            const cell = canvasCoordsFromEvent(e);
-            if (cell) {
-                painting.current = true;
-                applyTool(cell.x, cell.y);
-            }
+            painting.current = true;
+            applyTool(e);
         }
         if (e.button === 2) {
             // right click: remove placement under cursor
-            const cell = canvasCoordsFromEvent(e);
+            const cell = coordsFromEvent(e, 'cell');
             if (!cell || !metadata) return;
             const hit = metadata.placements.find(p => {
                 const obj = metadata.objects_library.find(o => o.id === p.object_id);
                 if (!obj) return false;
-                const wCells = Math.ceil(obj.width / tileSize);
-                const hCells = Math.ceil(obj.height / tileSize);
+                const wCells = Math.max(1, Math.ceil(obj.width / tileSize));
+                const hCells = Math.max(1, Math.ceil(obj.height / tileSize));
                 return cell.x >= p.grid_x && cell.x < p.grid_x + wCells &&
                     cell.y >= p.grid_y && cell.y < p.grid_y + hCells;
             });
@@ -216,8 +396,7 @@ export default function MapCanvas() {
             return;
         }
         if (painting.current) {
-            const cell = canvasCoordsFromEvent(e);
-            if (cell) applyTool(cell.x, cell.y);
+            applyTool(e);
         }
     };
 
@@ -299,6 +478,9 @@ export default function MapCanvas() {
         );
     }
 
+    const tileCount = isIso ? (metadata.iso_tiles?.length ?? 0) : (metadata.wang_tiles?.length ?? 0);
+    const tileLabel = isIso ? 'iso tiles' : 'wang tiles';
+
     return (
         <div className="relative w-full h-full bg-[#0a0a0f] flex flex-col overflow-hidden">
             {/* Top toolbar */}
@@ -322,7 +504,10 @@ export default function MapCanvas() {
                     </button>
                     <div className="w-px h-3 bg-white/10 mx-1" />
                     <span className="text-[10px] text-zinc-500 font-mono">
-                        {gridW}×{gridH} · {tileSize}px · {metadata.mode}
+                        {metadata.projection} · {gridW}×{gridH} · {tileSize}px · {metadata.mode}
+                        {!isIso && tool === 'paint' && (
+                            <> · brush: <span className="text-violet-400">{selectedTerrain}</span></>
+                        )}
                     </span>
                 </div>
                 <div className="flex items-center gap-1.5">
@@ -365,7 +550,7 @@ export default function MapCanvas() {
             {/* Status bar */}
             <div className="flex-shrink-0 px-3 py-1 bg-black/40 border-t border-white/5 flex items-center justify-between">
                 <span className="text-[10px] text-zinc-600 font-mono">
-                    {metadata.tiles.length} tiles · {metadata.objects_library.length} objects · {metadata.placements.length} placed
+                    {tileCount} {tileLabel} · {metadata.objects_library.length} objects · {metadata.placements.length} placed
                 </span>
                 <span className="text-[10px] text-zinc-600 font-mono">{Math.round(zoom * 100)}%</span>
             </div>

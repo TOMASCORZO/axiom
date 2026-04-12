@@ -1,208 +1,465 @@
 /**
- * Map Studio backend — tile/object generation + Sharp composition.
+ * Map Studio backend — tile/object generation + projection-aware compositor.
  *
- * Intentionally does NOT use PixelLab /create-tileset (Wang) or /map-objects.
- * Those endpoints return opaque blobs that are hard to pair with a user-editable
- * grid. We generate individual tile sprites with /create-image-pixflux (same
- * path as generate_sprite) and let the editor paint them onto cells.
+ * Two projections are supported:
+ *   - ORTHOGONAL: Wang tileset from PixelLab /create-tileset. Each cell has
+ *                 four corner terrain labels; the compositor picks the
+ *                 matching Wang tile so edges blend correctly.
+ *   - ISOMETRIC:  A set of diamond tile variants from /create-tiles-pro with
+ *                 tile_type:'isometric', rendered back-to-front in diamond
+ *                 projection. Thin edge strokes are ignored in the compositor
+ *                 (tiles paint into slightly overlapping bounds).
+ *
+ * Objects (trees/rocks/characters) are painted on top in both modes via
+ * /map-objects (optionally with background_image + inpainting for style lock).
  */
 
-import { generate2D } from './generate';
+import {
+    createTileset,
+    createTilesPro,
+    createIsometricTile,
+    createMapObject,
+    extractTilesProBuffers,
+    extractIsoTileBuffer,
+    extractMapObjectBuffer,
+    decodeB64,
+    type CreateTilesetResp,
+    type WangTileResp,
+} from './pixellab-maps';
+import type { TerrainCorner } from '@/types/asset';
 
-export interface SingleTileOptions {
-    prompt: string;
-    tileSize: number;        // 16-64 recommended
-    seamless?: boolean;      // add hint to prompt
+// ── Wang tileset generation ──────────────────────────────────────────
+
+export interface GenerateWangTilesetOptions {
+    lower: string;          // lower terrain description (e.g. "grass")
+    upper: string;          // upper terrain (e.g. "stone path")
+    transition?: string;    // optional blend band
+    tileSize?: 16 | 32;
+    view?: 'low top-down' | 'high top-down';
+    seed?: number;
 }
 
-export interface SingleTileResult {
+export interface GeneratedWangTile {
+    pixellabId: string;
+    buffer: Buffer;
+    corners: { NW: TerrainCorner; NE: TerrainCorner; SW: TerrainCorner; SE: TerrainCorner };
+    name: string;
+}
+
+export interface GenerateWangTilesetResult {
     success: boolean;
-    buffer?: ArrayBuffer;
-    width?: number;
-    height?: number;
-    cost: number;
-    error?: string;
-}
-
-/**
- * Generate a single map tile sprite. Hints PixelLab toward a seamless,
- * top-down pixel-art tile at the requested size.
- */
-export async function generateSingleTile(opts: SingleTileOptions): Promise<SingleTileResult> {
-    const size = Math.max(16, Math.min(opts.tileSize, 64));
-    const seamlessHint = opts.seamless !== false
-        ? ' — seamless tileable top-down pixel-art tile, no border, no shadow'
-        : ' — top-down pixel-art tile';
-    const result = await generate2D({
-        prompt: `${opts.prompt}${seamlessHint}`,
-        width: size,
-        height: size,
-        noBackground: false, // tiles are solid, not transparent
-        view: 'high top-down',
-    });
-    if (!result.success || !result.buffer) {
-        return { success: false, cost: 0, error: result.error || 'Tile generation failed' };
-    }
-    return {
-        success: true,
-        buffer: result.buffer,
-        width: size,
-        height: size,
-        cost: result.cost,
-    };
-}
-
-export interface MapObjectOptions {
-    prompt: string;
+    tiles: GeneratedWangTile[];
     tileSize: number;
-    widthTiles?: number;     // object can span multiple tiles (default 1)
-    heightTiles?: number;
-}
-
-export interface MapObjectResult {
-    success: boolean;
-    buffer?: ArrayBuffer;
-    width?: number;
-    height?: number;
-    cost: number;
     error?: string;
+    cost: number;
 }
 
-/**
- * Generate a map object sprite (tree, rock, chest, character etc.) sized to
- * sit on top of one or more tiles. Always transparent background.
- */
-export async function generateMapObject(opts: MapObjectOptions): Promise<MapObjectResult> {
-    const tileSize = Math.max(16, Math.min(opts.tileSize, 64));
-    const wTiles = Math.max(1, Math.min(opts.widthTiles ?? 1, 4));
-    const hTiles = Math.max(1, Math.min(opts.heightTiles ?? 1, 4));
-    const width = tileSize * wTiles;
-    const height = tileSize * hTiles;
-
-    const result = await generate2D({
-        prompt: `${opts.prompt} — pixel-art top-down map object, centered, transparent background`,
-        width,
-        height,
-        noBackground: true,
-        view: 'high top-down',
-    });
-    if (!result.success || !result.buffer) {
-        return { success: false, cost: 0, error: result.error || 'Object generation failed' };
-    }
+function normalizeCorners(c: WangTileResp['corners']): GeneratedWangTile['corners'] {
+    // Guard against missing/partial corner data — default missing to 'lower'.
     return {
-        success: true,
-        buffer: result.buffer,
-        width,
-        height,
-        cost: result.cost,
+        NW: (c?.NW ?? 'lower') as TerrainCorner,
+        NE: (c?.NE ?? 'lower') as TerrainCorner,
+        SW: (c?.SW ?? 'lower') as TerrainCorner,
+        SE: (c?.SE ?? 'lower') as TerrainCorner,
     };
 }
 
-// ── Compose a map image from a tile grid + object placements ──────────
+export async function generateWangTileset(opts: GenerateWangTilesetOptions): Promise<GenerateWangTilesetResult> {
+    try {
+        const resp: CreateTilesetResp = await createTileset({
+            lowerDescription: opts.lower,
+            upperDescription: opts.upper,
+            transitionDescription: opts.transition,
+            tileSize: opts.tileSize ?? 32,
+            view: opts.view ?? 'high top-down',
+            transitionSize: opts.transition ? 0.5 : 0,
+            seed: opts.seed,
+        });
 
-export interface ComposeTile {
-    id: string;
-    buffer: Buffer;
+        const tsTiles = resp.tileset?.tiles ?? [];
+        if (tsTiles.length === 0) {
+            return { success: false, tiles: [], tileSize: opts.tileSize ?? 32, cost: 0, error: 'Tileset response contained no tiles' };
+        }
+
+        const out: GeneratedWangTile[] = [];
+        for (const t of tsTiles) {
+            const buf = decodeB64(t.image?.base64);
+            if (!buf) continue;
+            out.push({
+                pixellabId: t.id,
+                buffer: buf,
+                corners: normalizeCorners(t.corners),
+                name: t.name ?? t.description ?? '',
+            });
+        }
+        if (out.length === 0) {
+            return { success: false, tiles: [], tileSize: opts.tileSize ?? 32, cost: 0, error: 'No decodable tiles in tileset response' };
+        }
+
+        return {
+            success: true,
+            tiles: out,
+            tileSize: resp.tileset?.tile_size?.width ?? opts.tileSize ?? 32,
+            cost: resp.usage?.usd ?? 0,
+        };
+    } catch (err) {
+        return { success: false, tiles: [], tileSize: opts.tileSize ?? 32, cost: 0, error: err instanceof Error ? err.message : 'Wang tileset generation failed' };
+    }
 }
 
-export interface ComposePlacement {
+// ── Isometric tile generation ────────────────────────────────────────
+
+export interface GenerateIsoTilesOptions {
+    description: string;    // numbered list inside works best, per API docs
+    tileSize?: number;      // 16-256, default 32
+    nTiles?: number;        // how many variants
+    seed?: number;
+}
+
+export interface GeneratedIsoTile {
     buffer: Buffer;
-    gridX: number;
-    gridY: number;
     width: number;
     height: number;
 }
 
-export interface ComposeMapArgs {
+export interface GenerateIsoTilesResult {
+    success: boolean;
+    tiles: GeneratedIsoTile[];
+    error?: string;
+    cost: number;
+}
+
+export async function generateIsoTiles(opts: GenerateIsoTilesOptions): Promise<GenerateIsoTilesResult> {
+    try {
+        const resp = await createTilesPro({
+            description: opts.description,
+            tileType: 'isometric',
+            tileSize: opts.tileSize ?? 32,
+            nTiles: opts.nTiles,
+            tileView: 'low top-down',
+            seed: opts.seed,
+        });
+
+        // Try base64 path first; fall back to storage URLs if that's what the endpoint returned.
+        const b64Bufs = extractTilesProBuffers(resp);
+        const tiles: GeneratedIsoTile[] = [];
+
+        if (b64Bufs.length > 0) {
+            // We don't get per-tile dimensions in the simple response — assume square tile_size.
+            const ts = opts.tileSize ?? 32;
+            for (const b of b64Bufs) tiles.push({ buffer: b, width: ts, height: ts });
+        }
+
+        // No URL fallback yet — tiles-pro typically returns base64 in our usage.
+        if (tiles.length === 0) {
+            return { success: false, tiles: [], cost: 0, error: 'No decodable iso tiles in tiles-pro response' };
+        }
+
+        return { success: true, tiles, cost: resp.usage?.usd ?? 0 };
+    } catch (err) {
+        return { success: false, tiles: [], cost: 0, error: err instanceof Error ? err.message : 'Iso tiles generation failed' };
+    }
+}
+
+// Single iso tile — convenience used by the single-tile generator in MapStudio.
+export interface GenerateSingleIsoTileOptions {
+    prompt: string;
+    tileSize?: 16 | 32;
+    shape?: 'thin tile' | 'thick tile' | 'block';
+    seed?: number;
+}
+
+export async function generateSingleIsoTile(opts: GenerateSingleIsoTileOptions): Promise<{ success: boolean; buffer?: Buffer; width: number; height: number; cost: number; error?: string }> {
+    try {
+        const ts = opts.tileSize ?? 32;
+        const resp = await createIsometricTile({
+            description: opts.prompt,
+            width: ts * 2,       // give the model canvas room for the diamond + height
+            height: ts * 2,
+            isoShape: opts.shape ?? 'block',
+            isoTileSize: ts,
+            seed: opts.seed,
+        });
+        const buf = extractIsoTileBuffer(resp);
+        if (!buf) return { success: false, width: 0, height: 0, cost: 0, error: 'No image in iso tile response' };
+        return { success: true, buffer: buf, width: ts * 2, height: ts * 2, cost: resp.usage?.usd ?? 0 };
+    } catch (err) {
+        return { success: false, width: 0, height: 0, cost: 0, error: err instanceof Error ? err.message : 'Iso tile generation failed' };
+    }
+}
+
+// ── Map object generation ────────────────────────────────────────────
+
+export interface GenerateMapObjectOptions {
+    prompt: string;
     tileSize: number;
-    gridW: number;
-    gridH: number;
-    grid: (string | null)[][];   // grid[y][x] → tile id or null
-    tiles: ComposeTile[];
-    placements: ComposePlacement[];
+    widthTiles?: number;
+    heightTiles?: number;
+    view?: 'low top-down' | 'high top-down' | 'side';
+    /** Optional composed map PNG for style-match via inpainting. */
+    backgroundImageBase64?: string;
+    seed?: number;
+}
+
+export interface GenerateMapObjectResult {
+    success: boolean;
+    buffer?: Buffer;
+    width: number;
+    height: number;
+    cost: number;
+    error?: string;
+}
+
+export async function generateMapObjectV2(opts: GenerateMapObjectOptions): Promise<GenerateMapObjectResult> {
+    try {
+        const wTiles = Math.max(1, Math.min(opts.widthTiles ?? 1, 4));
+        const hTiles = Math.max(1, Math.min(opts.heightTiles ?? 1, 4));
+        // With inpainting, max area is 192×192; without, 400×400. Stay well under both.
+        const maxDim = opts.backgroundImageBase64 ? 192 : 256;
+        let width = Math.min(opts.tileSize * wTiles * 2, maxDim); // 2× upscale for detail
+        let height = Math.min(opts.tileSize * hTiles * 2, maxDim);
+        // Width/height must be at least 32 per API spec.
+        width = Math.max(32, width);
+        height = Math.max(32, height);
+
+        const resp = await createMapObject({
+            description: opts.prompt,
+            width,
+            height,
+            view: opts.view ?? 'high top-down',
+            backgroundImageBase64: opts.backgroundImageBase64,
+            seed: opts.seed,
+        });
+        const buf = extractMapObjectBuffer(resp);
+        if (!buf) {
+            return { success: false, width: 0, height: 0, cost: 0, error: 'No image in map-object response' };
+        }
+        return { success: true, buffer: buf, width, height, cost: resp.usage?.usd ?? 0 };
+    } catch (err) {
+        return { success: false, width: 0, height: 0, cost: 0, error: err instanceof Error ? err.message : 'Map object generation failed' };
+    }
+}
+
+// ── Wang tile lookup ─────────────────────────────────────────────────
+
+export interface WangTileLookup {
+    id: string;
+    buffer: Buffer;
+    corners: { NW: TerrainCorner; NE: TerrainCorner; SW: TerrainCorner; SE: TerrainCorner };
 }
 
 /**
- * Compose a PNG buffer from the tile grid + object placements. The returned
- * image is gridW*tileSize × gridH*tileSize. Empty cells render as transparent.
- * Objects are drawn on top of tiles in placement order.
+ * Given the current corner labels of a cell, pick the Wang tile whose
+ * corners match. Exact match preferred; if none, fall back to the tile
+ * whose dominant corner matches the majority terrain of the cell.
  */
-export async function composeMap(args: ComposeMapArgs): Promise<Buffer> {
-    const sharp = (await import('sharp')).default;
-    const { tileSize, gridW, gridH, grid, tiles, placements } = args;
+export function pickWangTile(
+    cellCorners: { NW: TerrainCorner; NE: TerrainCorner; SW: TerrainCorner; SE: TerrainCorner },
+    tiles: WangTileLookup[],
+): WangTileLookup | null {
+    if (tiles.length === 0) return null;
+    for (const t of tiles) {
+        if (
+            t.corners.NW === cellCorners.NW &&
+            t.corners.NE === cellCorners.NE &&
+            t.corners.SW === cellCorners.SW &&
+            t.corners.SE === cellCorners.SE
+        ) return t;
+    }
+    // Fallback: majority-corner match
+    const counts: Record<string, number> = {};
+    (Object.values(cellCorners) as string[]).forEach(v => { counts[v] = (counts[v] ?? 0) + 1; });
+    const majority = Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0];
+    if (!majority) return tiles[0];
+    const majorityTile = tiles.find(t => Object.values(t.corners).every(c => c === majority));
+    return majorityTile ?? tiles[0];
+}
 
+// ── Orthogonal (Wang) compositor ─────────────────────────────────────
+
+export interface ComposeWangArgs {
+    tileSize: number;
+    gridW: number;              // cell columns
+    gridH: number;              // cell rows
+    corners: TerrainCorner[][]; // (gridH+1) × (gridW+1)
+    wangTiles: WangTileLookup[];
+    /** Object placements in cell coordinates. Rendered on top. */
+    placements?: Array<{ buffer: Buffer; gridX: number; gridY: number; width: number; height: number }>;
+}
+
+export async function composeWangMap(args: ComposeWangArgs): Promise<Buffer> {
+    const sharp = (await import('sharp')).default;
+    const { tileSize, gridW, gridH, corners, wangTiles } = args;
     const canvasW = tileSize * gridW;
     const canvasH = tileSize * gridH;
 
-    const tileMap = new Map<string, Buffer>();
-    for (const t of tiles) tileMap.set(t.id, t.buffer);
-
-    // Normalize every tile buffer to exactly tileSize × tileSize up front so we
-    // can feed a single composite call. Sharp's composite will reject images
-    // that don't match the declared input size.
-    const normalizedTiles = new Map<string, Buffer>();
-    for (const [id, buf] of tileMap.entries()) {
-        const normalized = await sharp(buf)
-            .resize(tileSize, tileSize, { fit: 'fill' })
-            .png()
-            .toBuffer();
-        normalizedTiles.set(id, normalized);
+    // Normalize all wang tiles to tileSize × tileSize up front.
+    const normalized = new Map<string, Buffer>();
+    for (const t of wangTiles) {
+        normalized.set(t.id, await sharp(t.buffer).resize(tileSize, tileSize, { fit: 'fill' }).png().toBuffer());
     }
 
     const composites: Array<{ input: Buffer; left: number; top: number }> = [];
-
     for (let y = 0; y < gridH; y++) {
-        const row = grid[y];
-        if (!row) continue;
         for (let x = 0; x < gridW; x++) {
-            const id = row[x];
-            if (!id) continue;
-            const buf = normalizedTiles.get(id);
+            const cellCorners = {
+                NW: corners[y]?.[x] ?? 'lower',
+                NE: corners[y]?.[x + 1] ?? 'lower',
+                SW: corners[y + 1]?.[x] ?? 'lower',
+                SE: corners[y + 1]?.[x + 1] ?? 'lower',
+            } as const;
+            const picked = pickWangTile(cellCorners, wangTiles);
+            if (!picked) continue;
+            const buf = normalized.get(picked.id);
             if (!buf) continue;
-            composites.push({
-                input: buf,
-                left: x * tileSize,
-                top: y * tileSize,
-            });
+            composites.push({ input: buf, left: x * tileSize, top: y * tileSize });
         }
     }
 
-    for (const p of placements) {
-        const buf = await sharp(p.buffer)
-            .resize(p.width, p.height, { fit: 'fill' })
-            .png()
-            .toBuffer();
-        composites.push({
-            input: buf,
-            left: p.gridX * tileSize,
-            top: p.gridY * tileSize,
-        });
+    for (const p of args.placements ?? []) {
+        const buf = await sharp(p.buffer).resize(p.width, p.height, { fit: 'fill' }).png().toBuffer();
+        composites.push({ input: buf, left: p.gridX * tileSize, top: p.gridY * tileSize });
     }
 
     const base = sharp({
-        create: {
-            width: canvasW,
-            height: canvasH,
-            channels: 4,
-            background: { r: 0, g: 0, b: 0, alpha: 0 },
-        },
+        create: { width: canvasW, height: canvasH, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } },
     });
-
-    const out = composites.length > 0
-        ? await base.composite(composites).png().toBuffer()
-        : await base.png().toBuffer();
-
-    return out;
+    return composites.length > 0 ? base.composite(composites).png().toBuffer() : base.png().toBuffer();
 }
 
-// ── Random-fill helper (used by generate_map orchestrator) ────────────
+// ── Isometric compositor ─────────────────────────────────────────────
+//
+// Diamond projection:
+//   screen_x = (x - y) * (tileSize / 2) + offset_x
+//   screen_y = (x + y) * (tileSize / 4) + offset_y
+//
+// Each iso tile's natural canvas is 2× tileSize square (width = 2·tileSize,
+// height ~= 2·tileSize), but the diamond footprint on the map is tileSize
+// wide × tileSize/2 tall. Tiles are drawn back-to-front: iterate y ascending,
+// x ascending per row.
+
+export interface ComposeIsoArgs {
+    tileSize: number;           // footprint width = tileSize; height = tileSize/2
+    gridW: number;
+    gridH: number;
+    /** grid[y][x] → iso tile buffer (or null for empty). */
+    tileBuffers: (Buffer | null)[][];
+    /** Natural render size of each tile. Should be consistent (e.g. 2×tileSize). */
+    tileRenderWidth: number;
+    tileRenderHeight: number;
+    placements?: Array<{ buffer: Buffer; gridX: number; gridY: number; width: number; height: number }>;
+}
+
+export async function composeIsoMap(args: ComposeIsoArgs): Promise<Buffer> {
+    const sharp = (await import('sharp')).default;
+    const { tileSize, gridW, gridH, tileBuffers, tileRenderWidth, tileRenderHeight } = args;
+
+    // Canvas size: the diamond's extents.
+    //   width  = (gridW + gridH) * tileSize/2 + padding for tile render width
+    //   height = (gridW + gridH) * tileSize/4 + padding for tile render height
+    const diamondW = (gridW + gridH) * (tileSize / 2);
+    const diamondH = (gridW + gridH) * (tileSize / 4);
+    const canvasW = Math.ceil(diamondW + tileRenderWidth);
+    const canvasH = Math.ceil(diamondH + tileRenderHeight);
+
+    // Origin: the (0,0) cell's top-left on screen so nothing clips.
+    //   worldX(x,y) = (x - y) * (tileSize/2)  ranges from -gridH*s/2 to gridW*s/2
+    //   worldY(x,y) = (x + y) * (tileSize/4)  ranges from 0 to (gridW+gridH)*s/4
+    // Shift by the most negative worldX so everything lands inside the canvas.
+    const offsetX = gridH * (tileSize / 2);
+    const offsetY = 0;
+
+    const composites: Array<{ input: Buffer; left: number; top: number }> = [];
+
+    // Pre-normalize each unique buffer by identity reference (same Buffer ===
+    // same tile). Paint cells back-to-front.
+    const normalized = new Map<Buffer, Buffer>();
+    const getNorm = async (b: Buffer): Promise<Buffer> => {
+        const hit = normalized.get(b);
+        if (hit) return hit;
+        const n = await sharp(b).resize(tileRenderWidth, tileRenderHeight, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } }).png().toBuffer();
+        normalized.set(b, n);
+        return n;
+    };
+
+    for (let y = 0; y < gridH; y++) {
+        for (let x = 0; x < gridW; x++) {
+            const buf = tileBuffers[y]?.[x];
+            if (!buf) continue;
+            const worldX = (x - y) * (tileSize / 2);
+            const worldY = (x + y) * (tileSize / 4);
+            // Align the tile's bottom-center with the diamond footprint's bottom-center.
+            const screenX = worldX + offsetX - (tileRenderWidth - tileSize) / 2;
+            const screenY = worldY + offsetY - (tileRenderHeight - tileSize / 2);
+            const norm = await getNorm(buf);
+            composites.push({ input: norm, left: Math.round(screenX), top: Math.round(screenY) });
+        }
+    }
+
+    // Objects: for now, place at iso-projected origin of their grid cell.
+    for (const p of args.placements ?? []) {
+        const worldX = (p.gridX - p.gridY) * (tileSize / 2);
+        const worldY = (p.gridX + p.gridY) * (tileSize / 4);
+        const screenX = worldX + offsetX - p.width / 2 + tileSize / 2;
+        const screenY = worldY + offsetY - p.height + tileSize / 2;
+        const buf = await sharp(p.buffer).resize(p.width, p.height, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } }).png().toBuffer();
+        composites.push({ input: buf, left: Math.round(screenX), top: Math.round(screenY) });
+    }
+
+    const base = sharp({
+        create: { width: canvasW, height: canvasH, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } },
+    });
+    return composites.length > 0 ? base.composite(composites).png().toBuffer() : base.png().toBuffer();
+}
+
+// ── Corner-grid helpers ──────────────────────────────────────────────
 
 /**
- * Fill an empty grid with the given tile ids using a simple weighted random
- * distribution. The first tile is treated as the "ground" (heaviest weight)
- * so that sparse detail tiles don't flood the map.
+ * Build a default corner grid filled with 'lower'. Caller can then paint
+ * patches of 'upper' or 'transition' terrain.
  */
-export function fillGridRandomly(
+export function makeCornerGrid(gridW: number, gridH: number, defaultLabel: TerrainCorner = 'lower'): TerrainCorner[][] {
+    const rows: TerrainCorner[][] = [];
+    for (let y = 0; y <= gridH; y++) {
+        const row: TerrainCorner[] = [];
+        for (let x = 0; x <= gridW; x++) row.push(defaultLabel);
+        rows.push(row);
+    }
+    return rows;
+}
+
+/**
+ * Paint a rectangular island of `label` into the corner grid — so the
+ * generated map isn't all one terrain out of the box. Size is derived from
+ * grid dimensions so the island is always visible.
+ */
+export function paintStarterIsland(
+    corners: TerrainCorner[][],
+    gridW: number,
+    gridH: number,
+    label: TerrainCorner = 'upper',
+): TerrainCorner[][] {
+    const islandW = Math.max(2, Math.floor(gridW / 3));
+    const islandH = Math.max(2, Math.floor(gridH / 3));
+    const originX = Math.floor((gridW - islandW) / 2);
+    const originY = Math.floor((gridH - islandH) / 2);
+    for (let y = originY; y <= originY + islandH; y++) {
+        for (let x = originX; x <= originX + islandW; x++) {
+            if (y >= 0 && y < corners.length && x >= 0 && x < (corners[y]?.length ?? 0)) {
+                corners[y][x] = label;
+            }
+        }
+    }
+    return corners;
+}
+
+// ── Iso grid fill (simple variant rotation) ──────────────────────────
+
+/**
+ * Fill an iso grid with the given tile ids rotating deterministically so
+ * variants are spread out rather than clumped.
+ */
+export function fillIsoGrid(
     gridW: number,
     gridH: number,
     tileIds: string[],
@@ -210,20 +467,13 @@ export function fillGridRandomly(
     if (tileIds.length === 0) {
         return Array.from({ length: gridH }, () => Array(gridW).fill(null));
     }
-    const weights = tileIds.map((_, i) => (i === 0 ? 6 : 1));
-    const total = weights.reduce((a, b) => a + b, 0);
-
     const grid: (string | null)[][] = [];
     for (let y = 0; y < gridH; y++) {
         const row: (string | null)[] = [];
         for (let x = 0; x < gridW; x++) {
-            let r = Math.random() * total;
-            let picked = tileIds[0];
-            for (let i = 0; i < tileIds.length; i++) {
-                r -= weights[i];
-                if (r <= 0) { picked = tileIds[i]; break; }
-            }
-            row.push(picked);
+            // 6× weight on first tile ("ground"), rotate the rest.
+            const r = (x * 7 + y * 13) % (tileIds.length + 5);
+            row.push(r < 5 ? tileIds[0] : tileIds[(r - 5) % Math.max(1, tileIds.length - 1) + 1] ?? tileIds[0]);
         }
         grid.push(row);
     }

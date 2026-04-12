@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import { useEditorStore } from '@/lib/store';
 import { useMapEditorStore, type MapTool } from '@/lib/map-store';
-import type { Asset, MapMetadataShape, MapMode } from '@/types/asset';
+import type { Asset, MapMetadataShape, MapMode, MapProjection, TerrainCorner } from '@/types/asset';
 import {
     Map as MapIcon,
     Wand2,
@@ -18,6 +18,8 @@ import {
     Trees,
     Repeat,
     X,
+    Box,
+    Square,
 } from 'lucide-react';
 
 const GRID_SIZES = [
@@ -30,14 +32,27 @@ const GRID_SIZES = [
 
 const TILE_SIZES = [16, 24, 32, 48];
 
+const TERRAIN_COLORS: Record<TerrainCorner, string> = {
+    lower: 'from-emerald-600 to-green-700',
+    upper: 'from-stone-500 to-stone-700',
+    transition: 'from-amber-600 to-orange-700',
+};
+
 // ── Generate Tab ────────────────────────────────────────────────────
 
 function GenerateMapTab() {
     const { project, assetGenerating, setAssetGenerating, addConsoleEntry, addAsset, refreshProjectFiles } = useEditorStore();
     const open = useMapEditorStore(s => s.open);
+
     const [prompt, setPrompt] = useState('');
-    const [tilePromptsText, setTilePromptsText] = useState('');
-    const [objectPromptsText, setObjectPromptsText] = useState('');
+    const [projection, setProjection] = useState<MapProjection>('orthogonal');
+    // Orthogonal (Wang) inputs
+    const [lowerPrompt, setLowerPrompt] = useState('');
+    const [upperPrompt, setUpperPrompt] = useState('');
+    const [transitionPrompt, setTransitionPrompt] = useState('');
+    // Isometric inputs
+    const [isoVariantsText, setIsoVariantsText] = useState('');
+
     const [tileSize, setTileSize] = useState(32);
     const [gridIdx, setGridIdx] = useState(2);
     const [mode, setMode] = useState<MapMode>('fixed');
@@ -53,18 +68,33 @@ function GenerateMapTab() {
         const slug = prompt.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 30);
         const targetPath = `assets/maps/${slug}.png`;
 
-        const tilePrompts = tilePromptsText.split('\n').map(s => s.trim()).filter(Boolean);
-        const objectPrompts = objectPromptsText.split('\n').map(s => s.trim()).filter(Boolean);
+        const isoVariantPrompts = isoVariantsText.split('\n').map(s => s.trim()).filter(Boolean);
 
         addConsoleEntry({
             id: crypto.randomUUID(), level: 'log',
-            message: `[Map Studio] Generating map "${prompt}" (${grid.w}×${grid.h}, ${tileSize}px)…`,
+            message: `[Map Studio] Generating ${projection} map "${prompt}" (${grid.w}×${grid.h}, ${tileSize}px)…`,
             timestamp: new Date().toISOString(),
         });
 
         try {
             const abort = new AbortController();
             const timer = setTimeout(() => abort.abort(), 270_000);
+
+            const options: Record<string, unknown> = {
+                projection,
+                tile_size: tileSize,
+                grid_w: grid.w,
+                grid_h: grid.h,
+                mode,
+            };
+            if (projection === 'orthogonal') {
+                if (lowerPrompt.trim()) options.lower = lowerPrompt.trim();
+                if (upperPrompt.trim()) options.upper = upperPrompt.trim();
+                if (transitionPrompt.trim()) options.transition = transitionPrompt.trim();
+            } else {
+                if (isoVariantPrompts.length) options.iso_variant_prompts = isoVariantPrompts;
+            }
+
             const res = await fetch('/api/assets/generate', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -74,14 +104,7 @@ function GenerateMapTab() {
                     prompt: prompt.trim(),
                     asset_type: 'map',
                     target_path: targetPath,
-                    options: {
-                        tile_prompts: tilePrompts.length ? tilePrompts : undefined,
-                        object_prompts: objectPrompts.length ? objectPrompts : undefined,
-                        tile_size: tileSize,
-                        grid_w: grid.w,
-                        grid_h: grid.h,
-                        mode,
-                    },
+                    options,
                 }),
             });
             clearTimeout(timer);
@@ -143,27 +166,75 @@ function GenerateMapTab() {
             </div>
 
             <div>
-                <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">Tile prompts (optional, one per line)</label>
-                <textarea
-                    value={tilePromptsText}
-                    onChange={e => setTilePromptsText(e.target.value)}
-                    rows={3}
-                    placeholder={'grass ground\ndirt path\nwater pond'}
-                    className="w-full bg-zinc-900 border border-white/10 rounded-lg px-3 py-2 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 resize-none focus:outline-none focus:border-violet-500/50 transition-colors"
-                />
-                <p className="text-[9px] text-zinc-600 mt-1">Leave blank to auto-derive 3 tiles from theme.</p>
+                <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">Projection</label>
+                <div className="flex gap-1">
+                    <button
+                        onClick={() => setProjection('orthogonal')}
+                        className={`flex-1 py-1.5 rounded text-xs flex items-center justify-center gap-1 transition-colors ${
+                            projection === 'orthogonal' ? 'bg-violet-500/20 text-violet-300 border border-violet-500/30' : 'bg-zinc-900 text-zinc-500 border border-white/5 hover:text-zinc-300'
+                        }`}
+                    >
+                        <Square size={11} /> Orthogonal (Wang)
+                    </button>
+                    <button
+                        onClick={() => setProjection('isometric')}
+                        className={`flex-1 py-1.5 rounded text-xs flex items-center justify-center gap-1 transition-colors ${
+                            projection === 'isometric' ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30' : 'bg-zinc-900 text-zinc-500 border border-white/5 hover:text-zinc-300'
+                        }`}
+                    >
+                        <Box size={11} /> Isometric
+                    </button>
+                </div>
+                <p className="text-[9px] text-zinc-600 mt-1">
+                    {projection === 'orthogonal'
+                        ? 'Top-down Wang tileset — 16 auto-tiling variants blend two terrains by corner pattern.'
+                        : 'Diamond-projected tile variants — paint any variant onto each cell.'}
+                </p>
             </div>
 
-            <div>
-                <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">Object prompts (optional)</label>
-                <textarea
-                    value={objectPromptsText}
-                    onChange={e => setObjectPromptsText(e.target.value)}
-                    rows={2}
-                    placeholder={'oak tree\nsmall rock'}
-                    className="w-full bg-zinc-900 border border-white/10 rounded-lg px-3 py-2 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 resize-none focus:outline-none focus:border-violet-500/50 transition-colors"
-                />
-            </div>
+            {projection === 'orthogonal' ? (
+                <>
+                    <div>
+                        <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">Lower terrain</label>
+                        <input
+                            value={lowerPrompt}
+                            onChange={e => setLowerPrompt(e.target.value)}
+                            placeholder="grass"
+                            className="w-full bg-zinc-900 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-violet-500/50 transition-colors"
+                        />
+                    </div>
+                    <div>
+                        <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">Upper terrain</label>
+                        <input
+                            value={upperPrompt}
+                            onChange={e => setUpperPrompt(e.target.value)}
+                            placeholder="stone path"
+                            className="w-full bg-zinc-900 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-violet-500/50 transition-colors"
+                        />
+                    </div>
+                    <div>
+                        <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">Transition band (optional)</label>
+                        <input
+                            value={transitionPrompt}
+                            onChange={e => setTransitionPrompt(e.target.value)}
+                            placeholder="mossy edge"
+                            className="w-full bg-zinc-900 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-violet-500/50 transition-colors"
+                        />
+                    </div>
+                </>
+            ) : (
+                <div>
+                    <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">Iso tile variants (one per line)</label>
+                    <textarea
+                        value={isoVariantsText}
+                        onChange={e => setIsoVariantsText(e.target.value)}
+                        rows={4}
+                        placeholder={'grass\ndirt path\nstone block\nwater'}
+                        className="w-full bg-zinc-900 border border-white/10 rounded-lg px-3 py-2 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 resize-none focus:outline-none focus:border-cyan-500/50 transition-colors"
+                    />
+                    <p className="text-[9px] text-zinc-600 mt-1">Up to 6. Leave blank to auto-derive 3 variants from theme.</p>
+                </div>
+            )}
 
             <div>
                 <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">Grid size</label>
@@ -197,6 +268,9 @@ function GenerateMapTab() {
                         </button>
                     ))}
                 </div>
+                {projection === 'orthogonal' && (
+                    <p className="text-[9px] text-zinc-600 mt-1">Wang tilesets are constrained to 16 or 32 px by PixelLab.</p>
+                )}
             </div>
 
             <div>
@@ -231,30 +305,31 @@ function GenerateMapTab() {
             >
                 {assetGenerating ? <><Loader2 size={14} className="animate-spin" />Generating map…</> : <><Sparkles size={14} />Generate Map</>}
             </button>
-            <p className="text-[9px] text-zinc-600 text-center">Generates N tile sprites + composes a random-filled grid. Edit after in the Edit tab.</p>
         </div>
     );
 }
 
-// ── Edit Tab (tool palette + tile library + object library) ────────
+// ── Edit Tab ────────────────────────────────────────────────────────
 
 function EditTab() {
     const meta = useMapEditorStore(s => s.metadata);
     const tool = useMapEditorStore(s => s.tool);
-    const selectedTileId = useMapEditorStore(s => s.selectedTileId);
+    const selectedTerrain = useMapEditorStore(s => s.selectedTerrain);
+    const selectedIsoTileId = useMapEditorStore(s => s.selectedIsoTileId);
     const selectedObjectId = useMapEditorStore(s => s.selectedObjectId);
     const setTool = useMapEditorStore(s => s.setTool);
-    const selectTile = useMapEditorStore(s => s.selectTile);
+    const selectTerrain = useMapEditorStore(s => s.selectTerrain);
+    const selectIsoTile = useMapEditorStore(s => s.selectIsoTile);
     const selectObject = useMapEditorStore(s => s.selectObject);
     const extendGrid = useMapEditorStore(s => s.extendGrid);
     const setMode = useMapEditorStore(s => s.setMode);
-    const addTileToLibrary = useMapEditorStore(s => s.addTileToLibrary);
+    const addIsoTileToLibrary = useMapEditorStore(s => s.addIsoTileToLibrary);
     const addObjectToLibrary = useMapEditorStore(s => s.addObjectToLibrary);
 
     const { project, addConsoleEntry } = useEditorStore();
-    const [newTilePrompt, setNewTilePrompt] = useState('');
+    const [newIsoPrompt, setNewIsoPrompt] = useState('');
     const [newObjectPrompt, setNewObjectPrompt] = useState('');
-    const [generating, setGenerating] = useState<'tile' | 'object' | null>(null);
+    const [generating, setGenerating] = useState<'iso' | 'object' | null>(null);
     const [genError, setGenError] = useState<string | null>(null);
 
     if (!meta) {
@@ -267,19 +342,25 @@ function EditTab() {
         );
     }
 
+    const isIso = meta.projection === 'isometric';
+
     const tools: { id: MapTool; icon: typeof Paintbrush; label: string }[] = [
-        { id: 'paint', icon: Paintbrush, label: 'Paint' },
+        { id: 'paint', icon: Paintbrush, label: isIso ? 'Paint' : 'Paint Corner' },
         { id: 'erase', icon: Eraser, label: 'Erase' },
         { id: 'place_object', icon: Trees, label: 'Place Object' },
         { id: 'pan', icon: Move, label: 'Pan' },
     ];
 
-    const runGenerateTile = async () => {
-        if (!newTilePrompt.trim() || !project?.id) return;
-        setGenerating('tile');
+    const terrainOptions: TerrainCorner[] = ['lower', 'upper'];
+    if (meta.terrain_prompts?.transition) terrainOptions.push('transition');
+
+    const runGenerateIsoTile = async () => {
+        if (!newIsoPrompt.trim() || !project?.id) return;
+        setGenerating('iso');
         setGenError(null);
         try {
-            const slug = newTilePrompt.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 20);
+            const slug = newIsoPrompt.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 20);
+            const ts = meta.tile_size === 16 ? 16 : 32;
             const abort = new AbortController();
             const timer = setTimeout(() => abort.abort(), 120_000);
             const res = await fetch('/api/assets/map-action', {
@@ -287,24 +368,25 @@ function EditTab() {
                 headers: { 'Content-Type': 'application/json' },
                 signal: abort.signal,
                 body: JSON.stringify({
-                    action: 'generate_tile',
+                    action: 'generate_iso_tile',
                     project_id: project.id,
-                    prompt: newTilePrompt.trim(),
-                    tile_size: meta.tile_size,
-                    target_path: `assets/maps/tiles/${slug}_${Date.now() % 10000}.png`,
+                    prompt: newIsoPrompt.trim(),
+                    tile_size: ts,
+                    shape: 'block',
+                    target_path: `assets/maps/iso_tiles/${slug}_${Date.now() % 10000}.png`,
                 }),
             });
             clearTimeout(timer);
             const data = await res.json();
             if (!res.ok || !data.success) {
-                setGenError(data.error || 'Tile generation failed');
+                setGenError(data.error || 'Iso tile generation failed');
                 return;
             }
-            addTileToLibrary(data.tile);
-            setNewTilePrompt('');
+            addIsoTileToLibrary(data.tile);
+            setNewIsoPrompt('');
             addConsoleEntry({
                 id: crypto.randomUUID(), level: 'log',
-                message: `[Map Studio] Tile added: ${data.tile.name}`,
+                message: `[Map Studio] Iso tile added: ${data.tile.name}`,
                 timestamp: new Date().toISOString(),
             });
         } catch (err) {
@@ -331,6 +413,7 @@ function EditTab() {
                     project_id: project.id,
                     prompt: newObjectPrompt.trim(),
                     tile_size: meta.tile_size,
+                    view: isIso ? 'side' : 'high top-down',
                     target_path: `assets/maps/objects/${slug}_${Date.now() % 10000}.png`,
                 }),
             });
@@ -374,9 +457,11 @@ function EditTab() {
                 </div>
             </div>
 
-            {/* Mode */}
+            {/* Projection + Mode badge */}
             <div>
-                <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">Render mode</label>
+                <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">
+                    Map · <span className="text-zinc-400">{meta.projection}</span>
+                </label>
                 <div className="flex gap-1">
                     <button
                         onClick={() => setMode('fixed')}
@@ -400,45 +485,76 @@ function EditTab() {
                 </div>
             </div>
 
-            {/* Tile library */}
-            <div>
-                <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">Tile palette · {meta.tiles.length}</label>
-                <div className="grid grid-cols-4 gap-1">
-                    {meta.tiles.map(t => (
+            {/* Palette — terrain (ortho) OR iso tile library (iso) */}
+            {isIso ? (
+                <div>
+                    <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">Iso tiles · {meta.iso_tiles?.length ?? 0}</label>
+                    <div className="grid grid-cols-4 gap-1">
+                        {(meta.iso_tiles ?? []).map(t => (
+                            <button
+                                key={t.id}
+                                onClick={() => { selectIsoTile(t.id); setTool('paint'); }}
+                                className={`aspect-square rounded border overflow-hidden relative bg-zinc-900 ${
+                                    selectedIsoTileId === t.id ? 'border-cyan-500 ring-1 ring-cyan-500/30' : 'border-white/5 hover:border-white/10'
+                                }`}
+                                title={t.name}
+                            >
+                                {/* eslint-disable-next-line @next/next/no-img-element */}
+                                <img
+                                    src={`/api/assets/serve?key=${encodeURIComponent(t.storage_key)}`}
+                                    alt={t.name}
+                                    className="absolute inset-0 w-full h-full object-contain p-0.5"
+                                    style={{ imageRendering: 'pixelated' }}
+                                />
+                            </button>
+                        ))}
+                    </div>
+                    <div className="flex gap-1 mt-2">
+                        <input
+                            value={newIsoPrompt}
+                            onChange={e => setNewIsoPrompt(e.target.value)}
+                            placeholder="New iso tile prompt"
+                            className="flex-1 bg-zinc-900 border border-white/10 rounded px-2 py-1 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-cyan-500/50"
+                        />
                         <button
-                            key={t.id}
-                            onClick={() => { selectTile(t.id); setTool('paint'); }}
-                            className={`aspect-square rounded border overflow-hidden relative ${
-                                selectedTileId === t.id ? 'border-violet-500 ring-1 ring-violet-500/30' : 'border-white/5 hover:border-white/10'
-                            }`}
-                            title={t.name}
+                            onClick={runGenerateIsoTile}
+                            disabled={!newIsoPrompt.trim() || generating === 'iso'}
+                            className="px-2 py-1 rounded bg-cyan-500/20 text-cyan-300 text-xs hover:bg-cyan-500/30 disabled:opacity-30 transition-colors flex items-center gap-1"
                         >
-                            {/* eslint-disable-next-line @next/next/no-img-element */}
-                            <img
-                                src={`/api/assets/serve?key=${encodeURIComponent(t.storage_key)}`}
-                                alt={t.name}
-                                className="absolute inset-0 w-full h-full object-cover"
-                                style={{ imageRendering: 'pixelated' }}
-                            />
+                            {generating === 'iso' ? <Loader2 size={11} className="animate-spin" /> : <Plus size={11} />}
                         </button>
-                    ))}
+                    </div>
                 </div>
-                <div className="flex gap-1 mt-2">
-                    <input
-                        value={newTilePrompt}
-                        onChange={e => setNewTilePrompt(e.target.value)}
-                        placeholder="New tile prompt"
-                        className="flex-1 bg-zinc-900 border border-white/10 rounded px-2 py-1 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-violet-500/50"
-                    />
-                    <button
-                        onClick={runGenerateTile}
-                        disabled={!newTilePrompt.trim() || generating === 'tile'}
-                        className="px-2 py-1 rounded bg-violet-500/20 text-violet-300 text-xs hover:bg-violet-500/30 disabled:opacity-30 transition-colors flex items-center gap-1"
-                    >
-                        {generating === 'tile' ? <Loader2 size={11} className="animate-spin" /> : <Plus size={11} />}
-                    </button>
+            ) : (
+                <div>
+                    <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">
+                        Terrain brush · {meta.wang_tiles?.length ?? 0} wang tiles
+                    </label>
+                    <div className="grid grid-cols-3 gap-1">
+                        {terrainOptions.map(label => (
+                            <button
+                                key={label}
+                                onClick={() => { selectTerrain(label); setTool('paint'); }}
+                                className={`py-4 rounded border text-[10px] font-medium capitalize transition-colors bg-gradient-to-br ${TERRAIN_COLORS[label]} ${
+                                    selectedTerrain === label
+                                        ? 'border-white ring-1 ring-white/40 text-white'
+                                        : 'border-white/10 opacity-70 hover:opacity-100 text-white'
+                                }`}
+                                title={meta.terrain_prompts?.[label] ?? label}
+                            >
+                                {label}
+                            </button>
+                        ))}
+                    </div>
+                    {meta.terrain_prompts && (
+                        <div className="mt-1.5 text-[9px] text-zinc-600 space-y-0.5">
+                            <div>lower: <span className="text-zinc-500">{meta.terrain_prompts.lower}</span></div>
+                            <div>upper: <span className="text-zinc-500">{meta.terrain_prompts.upper}</span></div>
+                            {meta.terrain_prompts.transition && <div>transition: <span className="text-zinc-500">{meta.terrain_prompts.transition}</span></div>}
+                        </div>
+                    )}
                 </div>
-            </div>
+            )}
 
             {/* Object library */}
             <div>
@@ -483,13 +599,15 @@ function EditTab() {
             {genError && <div className="px-3 py-1.5 rounded bg-red-500/10 border border-red-500/20 text-red-400 text-xs">{genError}</div>}
 
             <p className="text-[9px] text-zinc-600 leading-relaxed mt-1">
-                Left-click: apply tool · Right-click: delete object · Middle-drag or Cmd/Ctrl+drag: pan · Wheel: zoom · Cmd/Ctrl+Z: undo
+                {isIso
+                    ? 'Left-click: apply tool to cell · Right-click: delete object · Middle-drag / Cmd+drag: pan · Wheel: zoom · Cmd/Ctrl+Z: undo'
+                    : 'Left-click: paint corner (Wang auto-tiling) · Right-click: delete object · Middle-drag / Cmd+drag: pan · Wheel: zoom · Cmd/Ctrl+Z: undo'}
             </p>
         </div>
     );
 }
 
-// ── Gallery Tab (list of existing maps) ────────────────────────────
+// ── Gallery Tab ─────────────────────────────────────────────────────
 
 function MapsGalleryTab() {
     const assets = useEditorStore(s => s.assets);
@@ -531,7 +649,7 @@ function MapsGalleryTab() {
                         <div className="flex-1 min-w-0 text-left">
                             <div className="text-xs text-zinc-200 truncate">{m.name}</div>
                             <div className="text-[10px] text-zinc-500 font-mono">
-                                {mapMeta ? `${mapMeta.grid_w}×${mapMeta.grid_h} · ${mapMeta.tile_size}px · ${mapMeta.mode}` : 'legacy'}
+                                {mapMeta ? `${mapMeta.projection} · ${mapMeta.grid_w}×${mapMeta.grid_h} · ${mapMeta.tile_size}px · ${mapMeta.mode}` : 'legacy'}
                             </div>
                         </div>
                     </button>
@@ -557,8 +675,7 @@ export default function MapStudio() {
     const closeMap = useMapEditorStore(s => s.close);
     const [tab, setTab] = useState<Tab>('generate');
 
-    // When a newly-opened map arrives, auto-switch to Edit. This is the
-    // "adjust state while rendering" pattern (react.dev/learn/you-might-not-need-an-effect).
+    // Auto-switch to Edit when a new map is opened.
     const [lastOpenAssetId, setLastOpenAssetId] = useState<string | null>(null);
     if (openAssetId !== lastOpenAssetId) {
         setLastOpenAssetId(openAssetId);

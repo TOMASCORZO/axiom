@@ -15,44 +15,81 @@ export type AssetType =
     | 'map';
 
 // ── Map asset shape ────────────────────────────────────────────────
-// A map asset stores a tile library, a grid of tile IDs, and any objects
-// placed on top. The composed PNG in storage_key is a rendered snapshot;
-// editing the map re-composes it from this metadata.
+// A map stores either:
+//   - ORTHOGONAL (Wang): a per-corner terrain label grid + a 16-tile Wang
+//     palette from PixelLab /create-tileset. Auto-tiling looks up the right
+//     sprite by corner pattern so edges blend.
+//   - ISOMETRIC: a list of iso tile variants + a grid of which variant lives
+//     in each cell. Rendered in diamond projection.
+// Objects are a library + placements layer on top, shared by both modes.
 
 export type MapMode = 'fixed' | 'looping';
+export type MapProjection = 'orthogonal' | 'isometric';
+export type TerrainCorner = 'lower' | 'upper' | 'transition';
 
-export interface MapTileEntry {
-    id: string;               // stable client-generated id
-    storage_key: string;      // PNG of the tile sprite
-    name: string;             // short label shown in the palette
-    prompt?: string;          // what the tile was generated from
+/** One of the 16 (or 23 with transition) Wang tiles from /create-tileset. */
+export interface MapWangTile {
+    id: string;                 // uuid from PixelLab
+    storage_key: string;
+    corners: { NW: TerrainCorner; NE: TerrainCorner; SW: TerrainCorner; SE: TerrainCorner };
+    name?: string;
 }
 
-export interface MapObjectEntry {
-    id: string;               // stable library id (reusable)
-    storage_key: string;      // PNG of the object sprite
+/** An isometric (or tiles-pro) tile variant paintable onto cells. */
+export interface MapIsoTile {
+    id: string;
+    storage_key: string;
     name: string;
-    width: number;            // natural width in px (usually == tile_size, may be larger)
+    width: number;              // natural px
+    height: number;
+}
+
+/** Reusable object sprite (tree, rock, chest, character, …). */
+export interface MapObjectEntry {
+    id: string;
+    storage_key: string;
+    name: string;
+    width: number;              // natural width in px
     height: number;
     prompt?: string;
 }
 
 export interface MapObjectPlacement {
-    id: string;               // unique placement id
-    object_id: string;        // refers to MapObjectEntry.id
-    grid_x: number;           // top-left cell, 0-indexed
+    id: string;
+    object_id: string;
+    grid_x: number;             // top-left cell, 0-indexed
     grid_y: number;
 }
 
+export interface TerrainPrompts {
+    lower: string;              // e.g. "grass"
+    upper: string;              // e.g. "stone path"
+    transition?: string;        // optional blend band, e.g. "mossy edge"
+}
+
 export interface MapMetadataShape {
-    tile_size: number;        // px per cell
-    grid_w: number;           // columns
-    grid_h: number;           // rows
-    mode: MapMode;            // 'fixed' or 'looping' (wraps visually)
-    tiles: MapTileEntry[];    // tile library (palette)
-    objects_library: MapObjectEntry[]; // object palette
-    grid: (string | null)[][]; // grid[y][x] → tile id or null
-    placements: MapObjectPlacement[]; // objects placed on the grid
+    projection: MapProjection;
+    tile_size: number;          // per-cell px
+    grid_w: number;             // cell columns
+    grid_h: number;             // cell rows
+    mode: MapMode;
+
+    // ── Orthogonal (Wang auto-tiling) ──
+    // Corner grid has (grid_h + 1) rows × (grid_w + 1) cols of terrain labels.
+    // For each cell (y,x) the four corners are corners[y][x], [y][x+1],
+    // [y+1][x], [y+1][x+1]. The compositor picks the wang_tile with matching
+    // corners.
+    corners?: TerrainCorner[][];
+    wang_tiles?: MapWangTile[];
+    terrain_prompts?: TerrainPrompts;
+
+    // ── Isometric ──
+    iso_tiles?: MapIsoTile[];
+    iso_grid?: (string | null)[][]; // grid[y][x] → MapIsoTile.id or null
+
+    // ── Objects (both modes) ──
+    objects_library: MapObjectEntry[];
+    placements: MapObjectPlacement[];
 }
 
 export type AssetStyle =

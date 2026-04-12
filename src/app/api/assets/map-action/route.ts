@@ -2,24 +2,21 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { getAdminClient } from '@/lib/supabase/admin';
 import {
-    generateSingleTile,
-    generateMapObject,
-    composeMap,
-    type ComposeTile,
-    type ComposePlacement,
+    generateMapObjectV2,
+    generateSingleIsoTile,
+    composeWangMap,
+    composeIsoMap,
 } from '@/lib/assets/map-generate';
-import type { MapMetadataShape, MapObjectEntry, MapObjectPlacement } from '@/types/asset';
+import type {
+    MapMetadataShape,
+    MapObjectEntry,
+    MapObjectPlacement,
+    MapIsoTile,
+} from '@/types/asset';
 
-// Longest action (generate_tile) goes to PixelLab — match /generate route.
+// Longest actions (generate_object, generate_iso_tile, recompose with many
+// buffers to download) can take a while — match /generate route's cap.
 export const maxDuration = 300;
-
-interface GenerateTileBody {
-    action: 'generate_tile';
-    project_id: string;
-    prompt: string;
-    tile_size: number;
-    target_path: string;
-}
 
 interface GenerateObjectBody {
     action: 'generate_object';
@@ -28,6 +25,18 @@ interface GenerateObjectBody {
     tile_size: number;
     width_tiles?: number;
     height_tiles?: number;
+    view?: 'low top-down' | 'high top-down' | 'side';
+    target_path: string;
+    /** Optional: storage_key of a composed map PNG for style-match via inpainting. */
+    background_storage_key?: string;
+}
+
+interface GenerateIsoTileBody {
+    action: 'generate_iso_tile';
+    project_id: string;
+    prompt: string;
+    tile_size: 16 | 32;
+    shape?: 'thin tile' | 'thick tile' | 'block';
     target_path: string;
 }
 
@@ -39,7 +48,7 @@ interface RecomposeBody {
     metadata: MapMetadataShape;
 }
 
-type Body = GenerateTileBody | GenerateObjectBody | RecomposeBody;
+type Body = GenerateObjectBody | GenerateIsoTileBody | RecomposeBody;
 
 async function resolveUser(projectId: string): Promise<string | null> {
     const supabase = await createServerSupabaseClient();
@@ -58,7 +67,7 @@ async function uploadAssetBuffer(
     userId: string,
     projectId: string,
     path: string,
-    buffer: ArrayBuffer,
+    buffer: Buffer,
 ): Promise<string> {
     const storageKey = `projects/${userId}/${projectId}/${path}`;
     const admin = getAdminClient();
@@ -84,10 +93,6 @@ async function downloadStorageKey(storageKey: string): Promise<Buffer> {
     return Buffer.from(ab);
 }
 
-function toArrayBuffer(buf: Buffer): ArrayBuffer {
-    return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer;
-}
-
 export async function POST(request: NextRequest) {
     try {
         const body = (await request.json()) as Body;
@@ -96,104 +101,166 @@ export async function POST(request: NextRequest) {
             return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
         }
 
-        // ── generate_tile ────────────────────────────────────────
-        if (body.action === 'generate_tile') {
-            const result = await generateSingleTile({
-                prompt: body.prompt,
-                tileSize: body.tile_size,
-                seamless: true,
-            });
-            if (!result.success || !result.buffer) {
-                return NextResponse.json({ success: false, error: result.error || 'Tile generation failed' }, { status: 500 });
-            }
-            const sk = await uploadAssetBuffer(userId, body.project_id, body.target_path, result.buffer);
-            return NextResponse.json({
-                success: true,
-                tile: {
-                    id: crypto.randomUUID(),
-                    storage_key: sk,
-                    name: body.prompt.slice(0, 30),
-                    prompt: body.prompt,
-                },
-                cost: result.cost,
-            });
-        }
-
         // ── generate_object ──────────────────────────────────────
         if (body.action === 'generate_object') {
-            const result = await generateMapObject({
+            let backgroundImageBase64: string | undefined;
+            if (body.background_storage_key) {
+                try {
+                    const bg = await downloadStorageKey(body.background_storage_key);
+                    backgroundImageBase64 = bg.toString('base64');
+                } catch {
+                    // Style-match is optional — failure shouldn't block object gen.
+                    backgroundImageBase64 = undefined;
+                }
+            }
+
+            const result = await generateMapObjectV2({
                 prompt: body.prompt,
                 tileSize: body.tile_size,
                 widthTiles: body.width_tiles,
                 heightTiles: body.height_tiles,
+                view: body.view,
+                backgroundImageBase64,
             });
             if (!result.success || !result.buffer) {
                 return NextResponse.json({ success: false, error: result.error || 'Object generation failed' }, { status: 500 });
             }
             const sk = await uploadAssetBuffer(userId, body.project_id, body.target_path, result.buffer);
             const entry: MapObjectEntry = {
-                id: crypto.randomUUID(),
+                id: `obj_${crypto.randomUUID().slice(0, 8)}`,
                 storage_key: sk,
                 name: body.prompt.slice(0, 30),
-                width: result.width ?? body.tile_size,
-                height: result.height ?? body.tile_size,
+                width: result.width,
+                height: result.height,
                 prompt: body.prompt,
             };
             return NextResponse.json({ success: true, object: entry, cost: result.cost });
         }
 
+        // ── generate_iso_tile ────────────────────────────────────
+        if (body.action === 'generate_iso_tile') {
+            const result = await generateSingleIsoTile({
+                prompt: body.prompt,
+                tileSize: body.tile_size,
+                shape: body.shape,
+            });
+            if (!result.success || !result.buffer) {
+                return NextResponse.json({ success: false, error: result.error || 'Iso tile generation failed' }, { status: 500 });
+            }
+            const sk = await uploadAssetBuffer(userId, body.project_id, body.target_path, result.buffer);
+            const tile: MapIsoTile = {
+                id: `iso_${crypto.randomUUID().slice(0, 8)}`,
+                storage_key: sk,
+                name: body.prompt.slice(0, 30),
+                width: result.width,
+                height: result.height,
+            };
+            return NextResponse.json({ success: true, tile, cost: result.cost });
+        }
+
         // ── recompose ────────────────────────────────────────────
         if (body.action === 'recompose') {
             const meta = body.metadata;
-            const tileBuffers: ComposeTile[] = [];
-            for (const t of meta.tiles) {
-                const buf = await downloadStorageKey(t.storage_key);
-                tileBuffers.push({ id: t.id, buffer: buf });
-            }
 
+            // Object buffers (shared across projections).
             const objectBufferMap = new Map<string, { buffer: Buffer; w: number; h: number }>();
             for (const o of meta.objects_library) {
-                const buf = await downloadStorageKey(o.storage_key);
-                objectBufferMap.set(o.id, { buffer: buf, w: o.width, h: o.height });
+                try {
+                    const buf = await downloadStorageKey(o.storage_key);
+                    objectBufferMap.set(o.id, { buffer: buf, w: o.width, h: o.height });
+                } catch {
+                    // Missing object in library — skip rather than fail the whole recompose.
+                }
             }
+            const placements = (meta.placements as MapObjectPlacement[])
+                .map(p => {
+                    const obj = objectBufferMap.get(p.object_id);
+                    if (!obj) return null;
+                    return {
+                        buffer: obj.buffer,
+                        gridX: p.grid_x,
+                        gridY: p.grid_y,
+                        width: obj.w,
+                        height: obj.h,
+                    };
+                })
+                .filter((x): x is NonNullable<typeof x> => x !== null);
 
-            const placements: ComposePlacement[] = [];
-            for (const p of meta.placements as MapObjectPlacement[]) {
-                const obj = objectBufferMap.get(p.object_id);
-                if (!obj) continue;
-                placements.push({
-                    buffer: obj.buffer,
-                    gridX: p.grid_x,
-                    gridY: p.grid_y,
-                    width: obj.w,
-                    height: obj.h,
+            let composed: Buffer;
+            let outW: number;
+            let outH: number;
+
+            if (meta.projection === 'isometric') {
+                const tiles = meta.iso_tiles ?? [];
+                const grid = meta.iso_grid ?? [];
+                const tileBufById = new Map<string, Buffer>();
+                for (const t of tiles) {
+                    try {
+                        tileBufById.set(t.id, await downloadStorageKey(t.storage_key));
+                    } catch {
+                        // Missing tile — cells using it render as gaps.
+                    }
+                }
+                const tileBuffers: (Buffer | null)[][] = grid.map(row =>
+                    row.map(id => (id ? tileBufById.get(id) ?? null : null)),
+                );
+                const firstTile = tiles[0];
+                const tileRenderWidth = firstTile?.width ?? meta.tile_size * 2;
+                const tileRenderHeight = firstTile?.height ?? meta.tile_size * 2;
+
+                composed = await composeIsoMap({
+                    tileSize: meta.tile_size,
+                    gridW: meta.grid_w,
+                    gridH: meta.grid_h,
+                    tileBuffers,
+                    tileRenderWidth,
+                    tileRenderHeight,
+                    placements,
                 });
-            }
+                outW = Math.ceil((meta.grid_w + meta.grid_h) * (meta.tile_size / 2) + tileRenderWidth);
+                outH = Math.ceil((meta.grid_w + meta.grid_h) * (meta.tile_size / 4) + tileRenderHeight);
+            } else {
+                // Orthogonal (Wang)
+                const wangTiles = meta.wang_tiles ?? [];
+                const corners = meta.corners ?? [];
+                const wangLookup: Array<{ id: string; buffer: Buffer; corners: (typeof wangTiles)[number]['corners'] }> = [];
+                for (const t of wangTiles) {
+                    try {
+                        wangLookup.push({
+                            id: t.id,
+                            buffer: await downloadStorageKey(t.storage_key),
+                            corners: t.corners,
+                        });
+                    } catch {
+                        // Skip missing tile.
+                    }
+                }
 
-            const composed = await composeMap({
-                tileSize: meta.tile_size,
-                gridW: meta.grid_w,
-                gridH: meta.grid_h,
-                grid: meta.grid,
-                tiles: tileBuffers,
-                placements,
-            });
+                composed = await composeWangMap({
+                    tileSize: meta.tile_size,
+                    gridW: meta.grid_w,
+                    gridH: meta.grid_h,
+                    corners,
+                    wangTiles: wangLookup,
+                    placements,
+                });
+                outW = meta.grid_w * meta.tile_size;
+                outH = meta.grid_h * meta.tile_size;
+            }
 
             const sk = await uploadAssetBuffer(
                 userId,
                 body.project_id,
                 body.target_path,
-                toArrayBuffer(composed),
+                composed,
             );
 
-            // Update the asset row's metadata + storage_key so the gallery
-            // reflects the latest snapshot.
             const admin = getAdminClient();
             await admin.from('assets')
                 .update({
                     storage_key: sk,
-                    width: meta.grid_w * meta.tile_size,
-                    height: meta.grid_h * meta.tile_size,
+                    width: outW,
+                    height: outH,
                     metadata: { map: meta, tags: ['map'] },
                 })
                 .eq('id', body.asset_id);
@@ -201,8 +268,8 @@ export async function POST(request: NextRequest) {
             return NextResponse.json({
                 success: true,
                 storage_key: sk,
-                width: meta.grid_w * meta.tile_size,
-                height: meta.grid_h * meta.tile_size,
+                width: outW,
+                height: outH,
             });
         }
 
