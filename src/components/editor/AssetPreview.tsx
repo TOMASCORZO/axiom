@@ -506,9 +506,20 @@ function SpriteSheetPreview({ asset }: PreviewProps) {
     const imgRef = useRef<HTMLImageElement>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
 
-    const frameCount = (asset as { metadata?: { frames?: unknown[] } }).metadata?.frames?.length || 4;
     const [loaded, setLoaded] = useState(false);
     const [imgSize, setImgSize] = useState({ w: 0, h: 0 });
+
+    // Frame count priority:
+    //   1. Stored metadata.frames — authoritative when present.
+    //   2. Natural image aspect ratio — PixelLab animations use square frames,
+    //      so width / height gives the frame count. Covers older animations
+    //      where metadata.frames wasn't persisted.
+    //   3. Fallback to 4 (legacy default).
+    const storedFrames = (asset as { metadata?: { frames?: unknown[] } }).metadata?.frames?.length;
+    const ratioFrames = imgSize.w > 0 && imgSize.h > 0
+        ? Math.max(1, Math.round(imgSize.w / imgSize.h))
+        : 0;
+    const frameCount = storedFrames || ratioFrames || 4;
 
     const imgSrc = `/api/assets/serve?key=${encodeURIComponent(asset.storage_key)}`;
 

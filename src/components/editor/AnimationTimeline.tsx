@@ -22,7 +22,14 @@ export default function AnimationTimeline() {
 
     const asset = assets.find(a => a.id === previewAssetId) ?? null;
     const isSpriteSheet = asset?.asset_type === 'sprite_sheet';
-    const frameCount = (asset?.metadata?.frames?.length) || 4;
+    // Frame count priority: stored metadata.frames > width/height ratio (square-frame
+    // assumption for PixelLab animations) > legacy fallback of 4. Covers older
+    // animations that were persisted before metadata.frames was populated.
+    const storedFrames = asset?.metadata?.frames?.length;
+    const ratioFrames = asset?.width && asset?.height && asset.height > 0
+        ? Math.max(1, Math.round(asset.width / asset.height))
+        : 0;
+    const frameCount = storedFrames || ratioFrames || 4;
 
     // Animation loop
     useEffect(() => {
