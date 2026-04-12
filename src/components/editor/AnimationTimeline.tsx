@@ -21,14 +21,19 @@ export default function AnimationTimeline() {
     const lastFrameTime = useRef(0);
 
     const asset = assets.find(a => a.id === previewAssetId) ?? null;
-    const isSpriteSheet = asset?.asset_type === 'sprite_sheet';
+    // Treat sprite_sheet and animation types as sprite sheets; also detect
+    // strip-like images so legacy animations render frame-by-frame.
+    const imageFormats = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg'];
+    const isImage = asset ? imageFormats.includes(asset.file_format) : false;
+    const explicitlySheet = asset?.asset_type === 'sprite_sheet' || asset?.asset_type === 'animation';
+    const ratio = asset?.width && asset?.height && asset.height > 0 ? asset.width / asset.height : 0;
+    const aspectSuggestsSheet = ratio >= 1.8 && Math.abs(ratio - Math.round(ratio)) < 0.15;
+    const isSpriteSheet = isImage && (explicitlySheet || aspectSuggestsSheet);
     // Frame count priority: stored metadata.frames > width/height ratio (square-frame
     // assumption for PixelLab animations) > legacy fallback of 4. Covers older
     // animations that were persisted before metadata.frames was populated.
     const storedFrames = asset?.metadata?.frames?.length;
-    const ratioFrames = asset?.width && asset?.height && asset.height > 0
-        ? Math.max(1, Math.round(asset.width / asset.height))
-        : 0;
+    const ratioFrames = ratio > 0 ? Math.max(1, Math.round(ratio)) : 0;
     const frameCount = storedFrames || ratioFrames || 4;
 
     // Animation loop

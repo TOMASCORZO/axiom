@@ -212,7 +212,13 @@ export default function AssetPreview() {
     }
 
     const isImage = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg'].includes(asset.file_format);
-    const isSpriteSheet = asset.asset_type === 'sprite_sheet';
+    // Treat explicit sprite_sheet AND animation types as sprite sheets; also
+    // detect strip-like images (width ≥ ~2× height with near-integer ratio)
+    // so legacy animations without the right asset_type still animate.
+    const explicitlySheet = asset.asset_type === 'sprite_sheet' || asset.asset_type === 'animation';
+    const ratio = asset.width && asset.height && asset.height > 0 ? asset.width / asset.height : 0;
+    const aspectSuggestsSheet = ratio >= 1.8 && Math.abs(ratio - Math.round(ratio)) < 0.15;
+    const isSpriteSheet = isImage && (explicitlySheet || aspectSuggestsSheet);
     const canAnimate = isImage && !isSpriteSheet;
     const canImg2Img = isImage;
 
