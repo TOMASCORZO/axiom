@@ -250,7 +250,7 @@ registerTool({
                 name: p.slice(0, 30),
                 prompt: p,
             });
-            tileBuffers.push({ id: tileId, buffer: Buffer.from(r.buffer) });
+            tileBuffers.push({ id: tileId, buffer: Buffer.from(new Uint8Array(r.buffer!)) });
         }
 
         // Generate optional objects into the library (not auto-placed).

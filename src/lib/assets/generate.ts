@@ -359,7 +359,7 @@ export async function generate2D(opts: Generate2DOptions): Promise<GenerationRes
         const cost = response.usage?.credits_used ?? PRICING.pixellab[model]?.cost ?? 0.01;
         return {
             success: true,
-            buffer: buffer.buffer as ArrayBuffer,
+            buffer: buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer,
             width: w,
             height: h,
             model,
@@ -532,7 +532,7 @@ export async function img2img(opts: Img2ImgOptions): Promise<GenerationResult> {
         const cost = response.usage?.credits_used ?? 0.01;
         return {
             success: true,
-            buffer: buffer.buffer as ArrayBuffer,
+            buffer: buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer,
             width: w,
             height: h,
             model: 'pixflux',
@@ -628,7 +628,7 @@ export async function generateAnimation(opts: AnimateOptions): Promise<Animation
         const cost = response.usage?.credits_used ?? PRICING.pixellab.animate.cost;
         return {
             success: true,
-            spriteSheetBuffer: spriteSheet.buffer as ArrayBuffer,
+            spriteSheetBuffer: spriteSheet.buffer.slice(spriteSheet.byteOffset, spriteSheet.byteOffset + spriteSheet.byteLength) as ArrayBuffer,
             frameWidth: fw,
             frameHeight: fh,
             frameCount: normalizedFrames.length,
