@@ -211,12 +211,15 @@ export async function createTileset(opts: CreateTilesetOptions): Promise<CreateT
 export type TilesProShape = 'isometric' | 'hex' | 'hex_pointy' | 'octagon' | 'square_topdown';
 
 export interface CreateTilesProOptions {
-    description: string;
+    description: string;       // Count is inferred from numbered prompts, e.g. "1). grass 2). dirt".
     tileType: TilesProShape;
-    tileSize?: number;
-    nTiles?: number;
-    tileView?: 'top-down' | 'high top-down' | 'low top-down' | 'side';
+    tileSize?: number;         // 16-128
     seed?: number;
+    negativeDescription?: string;
+    textGuidanceScale?: number;
+    outline?: string;
+    shading?: string;
+    detail?: string;
 }
 
 export async function createTilesPro(opts: CreateTilesProOptions): Promise<CreateTilesProResp> {
@@ -225,9 +228,12 @@ export async function createTilesPro(opts: CreateTilesProOptions): Promise<Creat
         tile_type: opts.tileType,
     };
     if (opts.tileSize !== undefined) body.tile_size = opts.tileSize;
-    if (opts.nTiles !== undefined) body.n_tiles = opts.nTiles;
-    if (opts.tileView) body.tile_view = opts.tileView;
     if (opts.seed !== undefined) body.seed = opts.seed;
+    if (opts.negativeDescription) body.negative_description = opts.negativeDescription;
+    if (opts.textGuidanceScale !== undefined) body.text_guidance_scale = opts.textGuidanceScale;
+    if (opts.outline) body.outline = opts.outline;
+    if (opts.shading) body.shading = opts.shading;
+    if (opts.detail) body.detail = opts.detail;
 
     return submitAndPoll<CreateTilesProResp>(
         '/create-tiles-pro',

@@ -331,7 +331,6 @@ registerTool({
         const iso = await generateIsoTiles({
             description,
             tileSize,
-            nTiles: variantPrompts.length,
         });
         if (!iso.success) {
             return {

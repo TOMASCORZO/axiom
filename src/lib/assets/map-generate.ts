@@ -110,9 +110,9 @@ export async function generateWangTileset(opts: GenerateWangTilesetOptions): Pro
 // ── Isometric tile generation ────────────────────────────────────────
 
 export interface GenerateIsoTilesOptions {
-    description: string;    // numbered list inside works best, per API docs
-    tileSize?: number;      // 16-256, default 32
-    nTiles?: number;        // how many variants
+    /** Numbered prompts carry the tile count — e.g. "1). grass 2). dirt 3). stone". */
+    description: string;
+    tileSize?: number;      // 16-128, default 32
     seed?: number;
 }
 
@@ -135,8 +135,6 @@ export async function generateIsoTiles(opts: GenerateIsoTilesOptions): Promise<G
             description: opts.description,
             tileType: 'isometric',
             tileSize: opts.tileSize ?? 32,
-            nTiles: opts.nTiles,
-            tileView: 'low top-down',
             seed: opts.seed,
         });
 
