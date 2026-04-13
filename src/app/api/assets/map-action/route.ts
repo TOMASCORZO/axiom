@@ -162,7 +162,7 @@ export async function POST(request: NextRequest) {
         if (body.action === 'recompose') {
             const meta = body.metadata;
 
-            // Object buffers (shared across projections).
+            // 1. Library object buffers (shared across projections).
             const objectBufferMap = new Map<string, { buffer: Buffer; w: number; h: number }>();
             for (const o of meta.objects_library) {
                 try {
@@ -172,16 +172,62 @@ export async function POST(request: NextRequest) {
                     // Missing object in library — skip rather than fail the whole recompose.
                 }
             }
+
+            // 2. Project-asset buffers for placements that reference assets dragged from Gallery.
+            //    Look up storage_key + dimensions via the assets table; animations
+            //    bake the first frame into the composed PNG (export is static).
+            const assetBufferMap = new Map<string, { buffer: Buffer; w: number; h: number }>();
+            const placementAssetIds = Array.from(new Set(
+                (meta.placements as MapObjectPlacement[])
+                    .map(p => p.asset_id)
+                    .filter((id): id is string => typeof id === 'string'),
+            ));
+            if (placementAssetIds.length > 0) {
+                const admin = getAdminClient();
+                const { data: rows } = await admin
+                    .from('assets')
+                    .select('id, storage_key, width, height, metadata')
+                    .in('id', placementAssetIds);
+                for (const row of rows ?? []) {
+                    try {
+                        const fullBuf = await downloadStorageKey(row.storage_key);
+                        // For sprite sheets/animations, crop the first frame only so
+                        // the map doesn't bake the entire strip onto one cell.
+                        const frames = (row.metadata as { frames?: Array<{ x: number; y: number; width: number; height: number }> } | null)?.frames;
+                        if (frames && frames.length > 0) {
+                            const f0 = frames[0];
+                            const sharp = (await import('sharp')).default;
+                            const cropped = await sharp(fullBuf)
+                                .extract({ left: f0.x, top: f0.y, width: f0.width, height: f0.height })
+                                .png()
+                                .toBuffer();
+                            assetBufferMap.set(row.id, { buffer: cropped, w: f0.width, h: f0.height });
+                        } else {
+                            assetBufferMap.set(row.id, {
+                                buffer: fullBuf,
+                                w: row.width ?? meta.tile_size,
+                                h: row.height ?? meta.tile_size,
+                            });
+                        }
+                    } catch {
+                        // Missing asset — skip the placement rather than failing.
+                    }
+                }
+            }
+
             const placements = (meta.placements as MapObjectPlacement[])
                 .map(p => {
-                    const obj = objectBufferMap.get(p.object_id);
-                    if (!obj) return null;
+                    let buf: { buffer: Buffer; w: number; h: number } | undefined;
+                    if (p.asset_id) buf = assetBufferMap.get(p.asset_id);
+                    else if (p.object_id) buf = objectBufferMap.get(p.object_id);
+                    if (!buf) return null;
                     return {
-                        buffer: obj.buffer,
+                        buffer: buf.buffer,
                         gridX: p.grid_x,
                         gridY: p.grid_y,
-                        width: obj.w,
-                        height: obj.h,
+                        width: buf.w,
+                        height: buf.h,
+                        zLevel: p.z_level,
                     };
                 })
                 .filter((x): x is NonNullable<typeof x> => x !== null);
@@ -192,7 +238,6 @@ export async function POST(request: NextRequest) {
 
             if (meta.projection === 'isometric') {
                 const tiles = meta.iso_tiles ?? [];
-                const grid = meta.iso_grid ?? [];
                 const tileBufById = new Map<string, Buffer>();
                 for (const t of tiles) {
                     try {
@@ -201,8 +246,10 @@ export async function POST(request: NextRequest) {
                         // Missing tile — cells using it render as gaps.
                     }
                 }
-                const tileBuffers: (Buffer | null)[][] = grid.map(row =>
-                    row.map(id => (id ? tileBufById.get(id) ?? null : null)),
+                // Prefer iso_stack; fall back to flat iso_grid for legacy maps.
+                const stack = meta.iso_stack ?? (meta.iso_grid ?? []).map(row => row.map(id => (id ? [id] : [])));
+                const tileStack: (Buffer | null)[][][] = stack.map(row =>
+                    row.map(cell => cell.map(id => tileBufById.get(id) ?? null)),
                 );
                 const firstTile = tiles[0];
                 const tileRenderWidth = firstTile?.width ?? meta.tile_size * 2;
@@ -212,13 +259,18 @@ export async function POST(request: NextRequest) {
                     tileSize: meta.tile_size,
                     gridW: meta.grid_w,
                     gridH: meta.grid_h,
-                    tileBuffers,
+                    tileStack,
                     tileRenderWidth,
                     tileRenderHeight,
                     placements,
                 });
+                // Output dims include stack headroom so the shell dimensions match
+                // what composeIsoMap actually produces.
+                let maxDepth = 0;
+                for (const row of stack) for (const cell of row) if (cell.length > maxDepth) maxDepth = cell.length;
+                const stackHeadroom = Math.max(0, maxDepth - 1) * meta.tile_size * 0.5;
                 outW = Math.ceil((meta.grid_w + meta.grid_h) * (meta.tile_size / 2) + tileRenderWidth);
-                outH = Math.ceil((meta.grid_w + meta.grid_h) * (meta.tile_size / 4) + tileRenderHeight);
+                outH = Math.ceil((meta.grid_w + meta.grid_h) * (meta.tile_size / 4) + tileRenderHeight + stackHeadroom);
             } else {
                 // Orthogonal (Wang)
                 const wangTiles = meta.wang_tiles ?? [];

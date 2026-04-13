@@ -370,14 +370,19 @@ registerTool({
         }
 
         const isoGrid = fillIsoGrid(gridW, gridH, isoEntries.map(e => e.id));
-        const tileBuffers: (Buffer | null)[][] = isoGrid.map(row =>
-            row.map(id => (id ? isoBufById.get(id) ?? null : null)),
+        // Build the initial iso_stack from the single-layer fill — one tile per
+        // cell, ground level only. The user can stack more layers in MapStudio.
+        const isoStack: string[][][] = isoGrid.map(row =>
+            row.map(id => (id ? [id] : [])),
+        );
+        const tileStack: (Buffer | null)[][][] = isoStack.map(row =>
+            row.map(ids => ids.map(id => isoBufById.get(id) ?? null)),
         );
 
         const composedBuf = await composeIsoMap({
             tileSize,
             gridW, gridH,
-            tileBuffers,
+            tileStack,
             tileRenderWidth: isoEntries[0]?.width ?? tileSize * 2,
             tileRenderHeight: isoEntries[0]?.height ?? tileSize * 2,
         });
@@ -390,7 +395,7 @@ registerTool({
             grid_h: gridH,
             mode,
             iso_tiles: isoEntries,
-            iso_grid: isoGrid,
+            iso_stack: isoStack,
             objects_library: [],
             placements: [],
         };

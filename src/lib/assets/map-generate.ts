@@ -382,43 +382,61 @@ export async function composeWangMap(args: ComposeWangArgs): Promise<Buffer> {
 // Each iso tile's natural canvas is 2× tileSize square (width = 2·tileSize,
 // height ~= 2·tileSize), but the diamond footprint on the map is tileSize
 // wide × tileSize/2 tall. Tiles are drawn back-to-front: iterate y ascending,
-// x ascending per row.
+// x ascending per row, and within each cell bottom-of-stack → top-of-stack
+// with a vertical offset per level (STACK_STEP_RATIO × tile_size).
+
+/** Fraction of tile_size that each stack level rises on screen. Keep in sync
+ *  with the client-side constant in map-store.ts. */
+export const STACK_STEP_RATIO = 0.5;
 
 export interface ComposeIsoArgs {
     tileSize: number;           // footprint width = tileSize; height = tileSize/2
     gridW: number;
     gridH: number;
-    /** grid[y][x] → iso tile buffer (or null for empty). */
-    tileBuffers: (Buffer | null)[][];
+    /** grid[y][x] = array of tile buffers bottom → top. Each cell may stack
+     *  multiple tiles; empty array = empty cell. */
+    tileStack: (Buffer | null)[][][];
     /** Natural render size of each tile. Should be consistent (e.g. 2×tileSize). */
     tileRenderWidth: number;
     tileRenderHeight: number;
-    placements?: Array<{ buffer: Buffer; gridX: number; gridY: number; width: number; height: number }>;
+    placements?: Array<{
+        buffer: Buffer;
+        gridX: number;
+        gridY: number;
+        width: number;
+        height: number;
+        /** Stack level the placement sits on top of (default 0 = ground). */
+        zLevel?: number;
+    }>;
 }
 
 export async function composeIsoMap(args: ComposeIsoArgs): Promise<Buffer> {
     const sharp = (await import('sharp')).default;
-    const { tileSize, gridW, gridH, tileBuffers, tileRenderWidth, tileRenderHeight } = args;
+    const { tileSize, gridW, gridH, tileStack, tileRenderWidth, tileRenderHeight } = args;
 
-    // Canvas size: the diamond's extents.
-    //   width  = (gridW + gridH) * tileSize/2 + padding for tile render width
-    //   height = (gridW + gridH) * tileSize/4 + padding for tile render height
+    // Max stack depth across all cells — we grow the canvas upward to fit.
+    let maxStack = 0;
+    for (let y = 0; y < gridH; y++) {
+        for (let x = 0; x < gridW; x++) {
+            const depth = tileStack[y]?.[x]?.length ?? 0;
+            if (depth > maxStack) maxStack = depth;
+        }
+    }
+    const stackStep = tileSize * STACK_STEP_RATIO;
+    const stackHeadroom = Math.max(0, maxStack - 1) * stackStep;
+
+    // Canvas size: the diamond's extents plus headroom for stack levels.
     const diamondW = (gridW + gridH) * (tileSize / 2);
     const diamondH = (gridW + gridH) * (tileSize / 4);
     const canvasW = Math.ceil(diamondW + tileRenderWidth);
-    const canvasH = Math.ceil(diamondH + tileRenderHeight);
+    const canvasH = Math.ceil(diamondH + tileRenderHeight + stackHeadroom);
 
-    // Origin: the (0,0) cell's top-left on screen so nothing clips.
-    //   worldX(x,y) = (x - y) * (tileSize/2)  ranges from -gridH*s/2 to gridW*s/2
-    //   worldY(x,y) = (x + y) * (tileSize/4)  ranges from 0 to (gridW+gridH)*s/4
-    // Shift by the most negative worldX so everything lands inside the canvas.
+    // Origin: (0,0) cell's top-left on screen so nothing clips.
     const offsetX = gridH * (tileSize / 2);
-    const offsetY = 0;
+    const offsetY = stackHeadroom; // shift down so stacked cells don't clip off the top.
 
     const composites: Array<{ input: Buffer; left: number; top: number }> = [];
 
-    // Pre-normalize each unique buffer by identity reference (same Buffer ===
-    // same tile). Paint cells back-to-front.
     const normalized = new Map<Buffer, Buffer>();
     const getNorm = async (b: Buffer): Promise<Buffer> => {
         const hit = normalized.get(b);
@@ -428,26 +446,30 @@ export async function composeIsoMap(args: ComposeIsoArgs): Promise<Buffer> {
         return n;
     };
 
+    // Paint back-to-front by cell, then bottom-to-top within each cell's stack.
     for (let y = 0; y < gridH; y++) {
         for (let x = 0; x < gridW; x++) {
-            const buf = tileBuffers[y]?.[x];
-            if (!buf) continue;
-            const worldX = (x - y) * (tileSize / 2);
-            const worldY = (x + y) * (tileSize / 4);
-            // Align the tile's bottom-center with the diamond footprint's bottom-center.
-            const screenX = worldX + offsetX - (tileRenderWidth - tileSize) / 2;
-            const screenY = worldY + offsetY - (tileRenderHeight - tileSize / 2);
-            const norm = await getNorm(buf);
-            composites.push({ input: norm, left: Math.round(screenX), top: Math.round(screenY) });
+            const stack = tileStack[y]?.[x] ?? [];
+            for (let level = 0; level < stack.length; level++) {
+                const buf = stack[level];
+                if (!buf) continue;
+                const worldX = (x - y) * (tileSize / 2);
+                const worldY = (x + y) * (tileSize / 4);
+                const screenX = worldX + offsetX - (tileRenderWidth - tileSize) / 2;
+                const screenY = worldY + offsetY - (tileRenderHeight - tileSize / 2) - level * stackStep;
+                const norm = await getNorm(buf);
+                composites.push({ input: norm, left: Math.round(screenX), top: Math.round(screenY) });
+            }
         }
     }
 
-    // Objects: for now, place at iso-projected origin of their grid cell.
+    // Objects: sit at cell origin + optional z_level offset.
     for (const p of args.placements ?? []) {
         const worldX = (p.gridX - p.gridY) * (tileSize / 2);
         const worldY = (p.gridX + p.gridY) * (tileSize / 4);
+        const z = p.zLevel ?? 0;
         const screenX = worldX + offsetX - p.width / 2 + tileSize / 2;
-        const screenY = worldY + offsetY - p.height + tileSize / 2;
+        const screenY = worldY + offsetY - p.height + tileSize / 2 - z * stackStep;
         const buf = await sharp(p.buffer).resize(p.width, p.height, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } }).png().toBuffer();
         composites.push({ input: buf, left: Math.round(screenX), top: Math.round(screenY) });
     }

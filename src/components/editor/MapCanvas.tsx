@@ -2,9 +2,12 @@
 
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { useEditorStore } from '@/lib/store';
-import { useMapEditorStore } from '@/lib/map-store';
+import { useMapEditorStore, STACK_STEP_RATIO } from '@/lib/map-store';
 import { Map as MapIcon, Save, Undo2, Redo2, Loader2 } from 'lucide-react';
 import type { MapWangTile, TerrainCorner } from '@/types/asset';
+
+/** MIME type identifying an asset drag from the Gallery. Data is the asset id. */
+export const MAP_ASSET_DRAG_MIME = 'application/x-axiom-asset';
 
 // ── Image cache ─────────────────────────────────────────────────────
 // Loads images for the current tile + object libraries. Keyed by storage_key
@@ -79,11 +82,12 @@ export default function MapCanvas() {
     const {
         metadata, tool,
         selectedTerrain, selectedIsoTileId, selectedObjectId,
-        paintAt, eraseAt, placeObject, removePlacement,
+        paintAt, eraseAt, placeObject, placeAsset, removePlacement,
+        stackAdd, stackPop,
         undo, redoAction, dirty, saving, saveError,
         assetId, history, redo,
     } = useMapEditorStore();
-    const { project, addConsoleEntry } = useEditorStore();
+    const { project, addConsoleEntry, assets } = useEditorStore();
 
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
@@ -92,6 +96,9 @@ export default function MapCanvas() {
     const dragRef = useRef<{ active: boolean; startX: number; startY: number; ox: number; oy: number; panning: boolean } | null>(null);
     const painting = useRef(false);
 
+    // Asset-id → asset lookup for placements that came from Gallery drags.
+    const assetById = useMemo(() => new Map(assets.map(a => [a.id, a])), [assets]);
+
     const storageKeys = useMemo(() => {
         if (!metadata) return [] as string[];
         const tileKeys =
@@ -99,8 +106,12 @@ export default function MapCanvas() {
                 ? (metadata.iso_tiles ?? []).map(t => t.storage_key)
                 : (metadata.wang_tiles ?? []).map(t => t.storage_key);
         const objectKeys = metadata.objects_library.map(o => o.storage_key);
-        return [...tileKeys, ...objectKeys];
-    }, [metadata]);
+        // Project assets referenced by placements (drag-dropped sprites / animations).
+        const assetKeys = metadata.placements
+            .map(p => p.asset_id ? assetById.get(p.asset_id)?.storage_key : null)
+            .filter((k): k is string => !!k);
+        return [...tileKeys, ...objectKeys, ...assetKeys];
+    }, [metadata, assetById]);
 
     const imageCache = useImageCache(storageKeys);
 
@@ -114,14 +125,26 @@ export default function MapCanvas() {
     const isoTileRenderH = isIso ? (metadata?.iso_tiles?.[0]?.height ?? tileSize * 2) : 0;
     const halfW = tileSize / 2;
     const halfH = tileSize / 4;
+    const stackStep = tileSize * STACK_STEP_RATIO;
+
+    // Deepest stack anywhere on the grid — drives vertical headroom.
+    const maxStackDepth = useMemo(() => {
+        if (!isIso || !metadata?.iso_stack) return 0;
+        let max = 0;
+        for (const row of metadata.iso_stack) for (const cell of row) if (cell.length > max) max = cell.length;
+        return max;
+    }, [isIso, metadata?.iso_stack]);
+    const stackHeadroom = isIso ? Math.max(0, maxStackDepth - 1) * stackStep : 0;
+
     // Shift so the leftmost diamond starts at x = 0.
     const isoOffsetX = isIso ? gridH * halfW : 0;
+    const isoOffsetY = stackHeadroom; // leave room above for stacked levels.
 
     const pxW = isIso
         ? Math.ceil((gridW + gridH) * halfW + isoTileRenderW)
         : gridW * tileSize;
     const pxH = isIso
-        ? Math.ceil((gridW + gridH) * halfH + isoTileRenderH)
+        ? Math.ceil((gridW + gridH) * halfH + isoTileRenderH + stackHeadroom)
         : gridH * tileSize;
 
     // ── Draw ──
@@ -137,19 +160,21 @@ export default function MapCanvas() {
         ctx.clearRect(0, 0, pxW, pxH);
 
         if (isIso) {
-            // ── Isometric ──
+            // ── Isometric (stacked) ──
             const tiles = metadata.iso_tiles ?? [];
             const tileById = new Map(tiles.map(t => [t.id, t]));
-            const grid = metadata.iso_grid ?? [];
+            const stack = metadata.iso_stack
+                ?? (metadata.iso_grid ?? []).map(row => row.map(id => (id ? [id] : [])));
 
             // Back-to-front: iterate by diagonals so farther tiles render first.
+            // Within a cell, paint bottom (level 0) up so higher tiles occlude.
             for (let y = 0; y < gridH; y++) {
                 for (let x = 0; x < gridW; x++) {
-                    const id = grid[y]?.[x];
+                    const cellStack = stack[y]?.[x] ?? [];
                     const anchorX = (x - y) * halfW + isoOffsetX;
-                    const anchorY = (x + y) * halfH;
-                    if (!id) {
-                        // Placeholder diamond.
+                    const anchorY = (x + y) * halfH + isoOffsetY;
+                    if (cellStack.length === 0) {
+                        // Placeholder diamond at ground level.
                         ctx.fillStyle = '#141420';
                         ctx.beginPath();
                         ctx.moveTo(anchorX, anchorY);
@@ -160,40 +185,64 @@ export default function MapCanvas() {
                         ctx.fill();
                         continue;
                     }
-                    const t = tileById.get(id);
-                    if (!t) continue;
-                    const img = imageCache.get(t.storage_key);
-                    const drawX = anchorX - t.width / 2;
-                    const drawY = anchorY - (t.height - tileSize / 2); // align diamond top
-                    if (img) {
-                        ctx.drawImage(img, drawX, drawY, t.width, t.height);
-                    } else {
-                        ctx.fillStyle = '#1e1e2a';
-                        ctx.fillRect(drawX, drawY, t.width, t.height);
+                    for (let level = 0; level < cellStack.length; level++) {
+                        const t = tileById.get(cellStack[level]);
+                        if (!t) continue;
+                        const img = imageCache.get(t.storage_key);
+                        const drawX = anchorX - t.width / 2;
+                        const drawY = anchorY - (t.height - tileSize / 2) - level * stackStep;
+                        if (img) {
+                            ctx.drawImage(img, drawX, drawY, t.width, t.height);
+                        } else {
+                            ctx.fillStyle = '#1e1e2a';
+                            ctx.fillRect(drawX, drawY, t.width, t.height);
+                        }
                     }
                 }
             }
 
-            // Placements in iso: map grid to iso anchor.
+            // Placements in iso: support both object_id (library) and asset_id (Gallery drag).
             const objLib = new Map(metadata.objects_library.map(o => [o.id, o]));
-            for (const p of metadata.placements) {
-                const obj = objLib.get(p.object_id);
-                if (!obj) continue;
+            // Back-to-front placement order matches cell order.
+            const sortedPlacements = [...metadata.placements].sort((a, b) => {
+                const da = a.grid_x + a.grid_y;
+                const db = b.grid_x + b.grid_y;
+                if (da !== db) return da - db;
+                return (a.z_level ?? 0) - (b.z_level ?? 0);
+            });
+            for (const p of sortedPlacements) {
+                let storageKey: string | null = null;
+                let w = tileSize;
+                let h = tileSize;
+                if (p.asset_id) {
+                    const a = assetById.get(p.asset_id);
+                    if (!a) continue;
+                    storageKey = a.storage_key;
+                    w = a.width ?? tileSize;
+                    h = a.height ?? tileSize;
+                } else if (p.object_id) {
+                    const obj = objLib.get(p.object_id);
+                    if (!obj) continue;
+                    storageKey = obj.storage_key;
+                    w = obj.width;
+                    h = obj.height;
+                }
+                if (!storageKey) continue;
                 const anchorX = (p.grid_x - p.grid_y) * halfW + isoOffsetX;
-                const anchorY = (p.grid_x + p.grid_y) * halfH;
-                const img = imageCache.get(obj.storage_key);
+                const anchorY = (p.grid_x + p.grid_y) * halfH + isoOffsetY - (p.z_level ?? 0) * stackStep;
+                const img = imageCache.get(storageKey);
                 if (img) {
-                    ctx.drawImage(img, anchorX - obj.width / 2, anchorY - (obj.height - tileSize / 2), obj.width, obj.height);
+                    ctx.drawImage(img, anchorX - w / 2, anchorY - (h - tileSize / 2), w, h);
                 }
             }
 
-            // Cell-edge overlay — faint diamond outlines.
+            // Cell-edge overlay — faint diamond outlines at ground level.
             ctx.strokeStyle = 'rgba(255,255,255,0.05)';
             ctx.lineWidth = 1;
             for (let y = 0; y < gridH; y++) {
                 for (let x = 0; x < gridW; x++) {
                     const ax = (x - y) * halfW + isoOffsetX;
-                    const ay = (x + y) * halfH;
+                    const ay = (x + y) * halfH + isoOffsetY;
                     ctx.beginPath();
                     ctx.moveTo(ax, ay);
                     ctx.lineTo(ax + halfW, ay + halfH);
@@ -237,14 +286,29 @@ export default function MapCanvas() {
                 }
             }
 
-            // Placements
+            // Placements — support both object_id (library) and asset_id (Gallery drag).
             const objLib = new Map(metadata.objects_library.map(o => [o.id, o]));
             for (const p of metadata.placements) {
-                const obj = objLib.get(p.object_id);
-                if (!obj) continue;
-                const img = imageCache.get(obj.storage_key);
+                let storageKey: string | null = null;
+                let w = tileSize;
+                let h = tileSize;
+                if (p.asset_id) {
+                    const a = assetById.get(p.asset_id);
+                    if (!a) continue;
+                    storageKey = a.storage_key;
+                    w = a.width ?? tileSize;
+                    h = a.height ?? tileSize;
+                } else if (p.object_id) {
+                    const obj = objLib.get(p.object_id);
+                    if (!obj) continue;
+                    storageKey = obj.storage_key;
+                    w = obj.width;
+                    h = obj.height;
+                }
+                if (!storageKey) continue;
+                const img = imageCache.get(storageKey);
                 if (img) {
-                    ctx.drawImage(img, p.grid_x * tileSize, p.grid_y * tileSize, obj.width, obj.height);
+                    ctx.drawImage(img, p.grid_x * tileSize, p.grid_y * tileSize, w, h);
                 }
             }
 
@@ -286,7 +350,7 @@ export default function MapCanvas() {
             ctx.strokeRect(1, 1, pxW - 2, pxH - 2);
             ctx.setLineDash([]);
         }
-    }, [metadata, imageCache, gridW, gridH, tileSize, isIso, pxW, pxH, halfW, halfH, isoOffsetX]);
+    }, [metadata, imageCache, gridW, gridH, tileSize, isIso, pxW, pxH, halfW, halfH, isoOffsetX, isoOffsetY, stackStep, assetById]);
 
     // Fit-to-view when asset changes
     useEffect(() => {
@@ -315,9 +379,9 @@ export default function MapCanvas() {
         const relY = (e.clientY - rect.top - pan.y) / zoom;
 
         if (isIso) {
-            // Inverse iso projection: anchor at top of diamond.
+            // Inverse iso projection: anchor at top of diamond (ground level).
             const lx = relX - isoOffsetX;
-            const ly = relY;
+            const ly = relY - isoOffsetY;
             const u = lx / halfW;    // x - y
             const v = ly / halfH;    // x + y
             const x = Math.floor((u + v) / 2);
@@ -335,7 +399,7 @@ export default function MapCanvas() {
         const y = Math.floor(relY / tileSize);
         if (x < 0 || y < 0 || x >= gridW || y >= gridH) return null;
         return { x, y };
-    }, [pan.x, pan.y, zoom, tileSize, gridW, gridH, isIso, halfW, halfH, isoOffsetX]);
+    }, [pan.x, pan.y, zoom, tileSize, gridW, gridH, isIso, halfW, halfH, isoOffsetX, isoOffsetY]);
 
     const applyTool = useCallback((e: React.MouseEvent) => {
         if (tool === 'paint') {
@@ -359,8 +423,14 @@ export default function MapCanvas() {
         } else if (tool === 'place_object' && selectedObjectId) {
             const c = coordsFromEvent(e, 'cell');
             if (c) placeObject(c.x, c.y, selectedObjectId);
+        } else if (tool === 'stack_add') {
+            const c = coordsFromEvent(e, 'cell');
+            if (c) stackAdd(c.x, c.y);
+        } else if (tool === 'stack_pop') {
+            const c = coordsFromEvent(e, 'cell');
+            if (c) stackPop(c.x, c.y);
         }
-    }, [tool, selectedIsoTileId, selectedObjectId, coordsFromEvent, paintAt, eraseAt, placeObject, isIso]);
+    }, [tool, selectedIsoTileId, selectedObjectId, coordsFromEvent, paintAt, eraseAt, placeObject, stackAdd, stackPop, isIso]);
 
     const handleMouseDown = (e: React.MouseEvent) => {
         if (e.button === 1 || (e.button === 0 && (e.metaKey || e.ctrlKey || tool === 'pan'))) {
@@ -372,18 +442,34 @@ export default function MapCanvas() {
             applyTool(e);
         }
         if (e.button === 2) {
-            // right click: remove placement under cursor
+            // right click: remove topmost placement under cursor.
             const cell = coordsFromEvent(e, 'cell');
             if (!cell || !metadata) return;
-            const hit = metadata.placements.find(p => {
-                const obj = metadata.objects_library.find(o => o.id === p.object_id);
-                if (!obj) return false;
-                const wCells = Math.max(1, Math.ceil(obj.width / tileSize));
-                const hCells = Math.max(1, Math.ceil(obj.height / tileSize));
+            // Iterate in reverse (and highest z first) so we hit the visually topmost placement.
+            const candidates = [...metadata.placements]
+                .map((p, i) => ({ p, i }))
+                .sort((a, b) => ((b.p.z_level ?? 0) - (a.p.z_level ?? 0)) || (b.i - a.i));
+            const hit = candidates.find(({ p }) => {
+                let w = tileSize, h = tileSize;
+                if (p.asset_id) {
+                    const a = assetById.get(p.asset_id);
+                    if (!a) return false;
+                    w = a.width ?? tileSize;
+                    h = a.height ?? tileSize;
+                } else if (p.object_id) {
+                    const obj = metadata.objects_library.find(o => o.id === p.object_id);
+                    if (!obj) return false;
+                    w = obj.width;
+                    h = obj.height;
+                } else {
+                    return false;
+                }
+                const wCells = Math.max(1, Math.ceil(w / tileSize));
+                const hCells = Math.max(1, Math.ceil(h / tileSize));
                 return cell.x >= p.grid_x && cell.x < p.grid_x + wCells &&
                     cell.y >= p.grid_y && cell.y < p.grid_y + hCells;
             });
-            if (hit) removePlacement(hit.id);
+            if (hit) removePlacement(hit.p.id);
         }
     };
 
@@ -410,6 +496,26 @@ export default function MapCanvas() {
         const dir = e.deltaY < 0 ? 1.1 : 0.9;
         const next = Math.max(0.1, Math.min(zoom * dir, 8));
         setZoom(next);
+    };
+
+    const handleDragOver = (e: React.DragEvent) => {
+        if (e.dataTransfer.types.includes(MAP_ASSET_DRAG_MIME)) {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'copy';
+        }
+    };
+
+    const handleDrop = (e: React.DragEvent) => {
+        const assetDragId = e.dataTransfer.getData(MAP_ASSET_DRAG_MIME);
+        if (!assetDragId) return;
+        e.preventDefault();
+        // Synthesize a minimal MouseEvent-like shape for coordsFromEvent.
+        const c = coordsFromEvent(
+            { clientX: e.clientX, clientY: e.clientY } as React.MouseEvent,
+            'cell',
+        );
+        if (!c) return;
+        placeAsset(c.x, c.y, assetDragId);
     };
 
     // Keyboard shortcuts
@@ -533,6 +639,8 @@ export default function MapCanvas() {
                 onMouseUp={endDrag}
                 onMouseLeave={endDrag}
                 onWheel={handleWheel}
+                onDragOver={handleDragOver}
+                onDrop={handleDrop}
                 onContextMenu={(e) => e.preventDefault()}
                 style={{ cursor: tool === 'pan' ? 'grab' : 'crosshair' }}
             >

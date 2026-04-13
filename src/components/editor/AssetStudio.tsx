@@ -5,6 +5,7 @@ import { useEditorStore } from '@/lib/store';
 import type { AssetType } from '@/types/asset';
 import type { FreeAssetResult } from '@/lib/assets/search';
 import { uploadImageFile } from '@/lib/assets/client-upload';
+import { MAP_ASSET_DRAG_MIME } from './MapCanvas';
 import {
     Sparkles,
     Image as ImageIcon,
@@ -803,7 +804,15 @@ function GalleryTab() {
                         <button
                             key={asset.id}
                             onClick={() => { setPreviewAssetId(asset.id === previewAssetId ? null : asset.id); setShowAnimPanel(false); }}
+                            // Maps can't be placed onto maps — skip drag for map assets.
+                            draggable={asset.asset_type !== 'map'}
+                            onDragStart={asset.asset_type !== 'map' ? (e) => {
+                                e.dataTransfer.setData(MAP_ASSET_DRAG_MIME, asset.id);
+                                e.dataTransfer.effectAllowed = 'copy';
+                            } : undefined}
                             className={`relative aspect-square rounded-lg overflow-hidden border transition-all ${
+                                asset.asset_type === 'map' ? '' : 'cursor-grab active:cursor-grabbing'
+                            } ${
                                 previewAssetId === asset.id
                                     ? 'border-violet-500 ring-1 ring-violet-500/30'
                                     : 'border-white/5 hover:border-white/10'

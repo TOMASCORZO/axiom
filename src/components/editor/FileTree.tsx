@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { useEditorStore } from '@/lib/store';
 import type { FileNode } from '@/types/project';
+import { MAP_ASSET_DRAG_MIME } from './MapCanvas';
 import {
     ChevronRight,
     ChevronDown,
@@ -111,9 +112,52 @@ function FileTreeNode({ node, depth = 0 }: { node: FileNode; depth?: number }) {
 
     const isPreviewed = isAssetMode && isImage && assets.some(a => a.id === previewAssetId && a.storage_key.endsWith(node.path));
 
+    // Find the asset record for this file (if any) so we know whether to allow
+    // dragging onto the Map canvas. Maps can't be placed onto maps, so we skip
+    // drag for asset_type === 'map'.
+    const matchedAsset = isImage
+        ? assets.find(a =>
+            a.storage_key === node.path ||
+            a.storage_key.endsWith('/' + node.path) ||
+            a.name === node.name,
+        )
+        : undefined;
+    const canDrag = isImage && (!matchedAsset || matchedAsset.asset_type !== 'map');
+
+    const handleDragStart = (e: React.DragEvent<HTMLButtonElement>) => {
+        if (!canDrag) return;
+        let assetId = matchedAsset?.id;
+        if (!assetId) {
+            // Register the file as an asset on the fly (mirrors handleClick).
+            const pf = files.find(f => f.path === node.path);
+            const storageKey = pf?.storage_key || node.path;
+            assetId = crypto.randomUUID();
+            addAsset({
+                id: assetId,
+                project_id: project?.id ?? '',
+                name: node.name,
+                asset_type: 'sprite',
+                storage_key: storageKey,
+                thumbnail_key: null,
+                file_format: ext,
+                width: null,
+                height: null,
+                metadata: { tags: ['file-tree'] },
+                generation_prompt: null,
+                generation_model: null,
+                size_bytes: pf?.size_bytes ?? node.size ?? 0,
+                created_at: new Date().toISOString(),
+            });
+        }
+        e.dataTransfer.setData(MAP_ASSET_DRAG_MIME, assetId);
+        e.dataTransfer.effectAllowed = 'copy';
+    };
+
     return (
         <button
             onClick={handleClick}
+            draggable={canDrag}
+            onDragStart={canDrag ? handleDragStart : undefined}
             className={`
         flex items-center w-full px-2 py-1 text-sm gap-1.5
         transition-colors rounded-md truncate

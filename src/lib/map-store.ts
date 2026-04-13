@@ -10,12 +10,18 @@ import type {
 
 // Tools available to the user. Brush meaning depends on projection:
 //   orthogonal → paint a CORNER with the selected terrain label (Wang)
-//   isometric  → paint a CELL with the selected iso tile id
-export type MapTool = 'paint' | 'erase' | 'place_object' | 'pan';
+//   isometric  → paint the BASE tile (index 0) of the cell's iso_stack
+// Iso-only tools:
+//   stack_add  → push the selected iso tile on top of the cell's stack
+//   stack_pop  → pop the top tile from the cell's stack
+export type MapTool = 'paint' | 'erase' | 'place_object' | 'pan' | 'stack_add' | 'stack_pop';
+
+/** Uniform vertical step per stack level, expressed as a fraction of tile_size. */
+export const STACK_STEP_RATIO = 0.5;
 
 interface HistoryEntry {
     corners?: TerrainCorner[][];           // ortho
-    isoGrid?: (string | null)[][];         // iso
+    isoStack?: string[][][];               // iso (stacked)
     placements: MapObjectPlacement[];
 }
 
@@ -49,7 +55,13 @@ interface MapEditorState {
     eraseAt: (x: number, y: number) => void;
 
     placeObject: (x: number, y: number, objectId: string) => void;
+    /** Place a project asset (sprite / animation / sprite sheet) onto the map via drag-drop. */
+    placeAsset: (x: number, y: number, assetId: string, zLevel?: number) => void;
     removePlacement: (placementId: string) => void;
+    /** Iso only: push the selected iso tile onto the stack at (x,y). */
+    stackAdd: (x: number, y: number) => void;
+    /** Iso only: pop the top tile of the stack at (x,y). */
+    stackPop: (x: number, y: number) => void;
     extendGrid: (addCols: number, addRows: number) => void;
     setMode: (mode: MapMode) => void;
     addIsoTileToLibrary: (tile: MapIsoTile) => void;
@@ -65,10 +77,33 @@ function cloneGrid2D<T>(grid: T[][]): T[][] {
     return grid.map(row => row.slice());
 }
 
+function cloneStack(stack: string[][][]): string[][][] {
+    return stack.map(row => row.map(cell => cell.slice()));
+}
+
+/** Build an empty iso stack of the given size. */
+function emptyStack(w: number, h: number): string[][][] {
+    return Array.from({ length: h }, () => Array.from({ length: w }, () => [] as string[]));
+}
+
+/** Migrate legacy iso_grid (single tile per cell) to iso_stack (array per cell). */
+function migrateIsoGridToStack(meta: MapMetadataShape): string[][][] {
+    if (meta.iso_stack && meta.iso_stack.length > 0) return meta.iso_stack;
+    const stack = emptyStack(meta.grid_w, meta.grid_h);
+    const grid = meta.iso_grid ?? [];
+    for (let y = 0; y < meta.grid_h; y++) {
+        for (let x = 0; x < meta.grid_w; x++) {
+            const id = grid[y]?.[x];
+            if (id) stack[y][x] = [id];
+        }
+    }
+    return stack;
+}
+
 function snapshot(meta: MapMetadataShape): HistoryEntry {
     return {
         corners: meta.corners ? cloneGrid2D(meta.corners) : undefined,
-        isoGrid: meta.iso_grid ? cloneGrid2D(meta.iso_grid) : undefined,
+        isoStack: meta.iso_stack ? cloneStack(meta.iso_stack) : undefined,
         placements: meta.placements.map(p => ({ ...p })),
     };
 }
@@ -88,6 +123,10 @@ export const useMapEditorStore = create<MapEditorState>((set, get) => ({
 
     open: (assetId, metadata) => {
         const clone = JSON.parse(JSON.stringify(metadata)) as MapMetadataShape;
+        // Ensure iso_stack is populated — migrate from legacy iso_grid on first open.
+        if (clone.projection === 'isometric') {
+            clone.iso_stack = migrateIsoGridToStack(clone);
+        }
         set({
             assetId,
             metadata: clone,
@@ -125,12 +164,14 @@ export const useMapEditorStore = create<MapEditorState>((set, get) => ({
         if (meta.projection === 'isometric') {
             if (!s.selectedIsoTileId) return;
             if (x < 0 || y < 0 || x >= meta.grid_w || y >= meta.grid_h) return;
-            const grid = cloneGrid2D(meta.iso_grid ?? []);
-            if (grid[y]?.[x] === s.selectedIsoTileId) return;
-            if (!grid[y]) grid[y] = [];
-            grid[y][x] = s.selectedIsoTileId;
+            const stack = cloneStack(meta.iso_stack ?? migrateIsoGridToStack(meta));
+            const cell = stack[y]?.[x] ?? [];
+            // Paint sets the BASE tile (index 0). Preserves any higher levels.
+            if (cell[0] === s.selectedIsoTileId) return;
+            if (cell.length === 0) stack[y][x] = [s.selectedIsoTileId];
+            else stack[y][x] = [s.selectedIsoTileId, ...cell.slice(1)];
             set({
-                metadata: { ...meta, iso_grid: grid },
+                metadata: { ...meta, iso_stack: stack },
                 history: [...s.history, before].slice(-100),
                 redo: [],
                 dirty: true,
@@ -160,11 +201,12 @@ export const useMapEditorStore = create<MapEditorState>((set, get) => ({
 
         if (meta.projection === 'isometric') {
             if (x < 0 || y < 0 || x >= meta.grid_w || y >= meta.grid_h) return;
-            const grid = cloneGrid2D(meta.iso_grid ?? []);
-            if (grid[y]?.[x] == null) return;
-            grid[y][x] = null;
+            const stack = cloneStack(meta.iso_stack ?? migrateIsoGridToStack(meta));
+            if ((stack[y]?.[x]?.length ?? 0) === 0) return;
+            // Erase clears the entire stack for this cell.
+            stack[y][x] = [];
             set({
-                metadata: { ...meta, iso_grid: grid },
+                metadata: { ...meta, iso_stack: stack },
                 history: [...s.history, before].slice(-100),
                 redo: [],
                 dirty: true,
@@ -186,16 +228,78 @@ export const useMapEditorStore = create<MapEditorState>((set, get) => ({
         });
     },
 
+    stackAdd: (x, y) => {
+        const s = get();
+        const meta = s.metadata;
+        if (!meta || meta.projection !== 'isometric') return;
+        if (!s.selectedIsoTileId) return;
+        if (x < 0 || y < 0 || x >= meta.grid_w || y >= meta.grid_h) return;
+        const before = snapshot(meta);
+        const stack = cloneStack(meta.iso_stack ?? migrateIsoGridToStack(meta));
+        stack[y][x] = [...(stack[y][x] ?? []), s.selectedIsoTileId];
+        set({
+            metadata: { ...meta, iso_stack: stack },
+            history: [...s.history, before].slice(-100),
+            redo: [],
+            dirty: true,
+        });
+    },
+
+    stackPop: (x, y) => {
+        const s = get();
+        const meta = s.metadata;
+        if (!meta || meta.projection !== 'isometric') return;
+        if (x < 0 || y < 0 || x >= meta.grid_w || y >= meta.grid_h) return;
+        const before = snapshot(meta);
+        const stack = cloneStack(meta.iso_stack ?? migrateIsoGridToStack(meta));
+        const cell = stack[y]?.[x] ?? [];
+        if (cell.length === 0) return;
+        stack[y][x] = cell.slice(0, -1);
+        set({
+            metadata: { ...meta, iso_stack: stack },
+            history: [...s.history, before].slice(-100),
+            redo: [],
+            dirty: true,
+        });
+    },
+
     placeObject: (x, y, objectId) => {
         const s = get();
-        if (!s.metadata) return;
-        const before = snapshot(s.metadata);
+        const meta = s.metadata;
+        if (!meta) return;
+        const before = snapshot(meta);
+        // Default iso z_level: sit on top of whatever stack is at (x,y).
+        const zLevel = meta.projection === 'isometric'
+            ? (meta.iso_stack?.[y]?.[x]?.length ?? 0)
+            : undefined;
         const placements = [
-            ...s.metadata.placements,
-            { id: crypto.randomUUID(), object_id: objectId, grid_x: x, grid_y: y },
+            ...meta.placements,
+            { id: crypto.randomUUID(), object_id: objectId, grid_x: x, grid_y: y, z_level: zLevel },
         ];
         set({
-            metadata: { ...s.metadata, placements },
+            metadata: { ...meta, placements },
+            history: [...s.history, before].slice(-100),
+            redo: [],
+            dirty: true,
+        });
+    },
+
+    placeAsset: (x, y, assetId, zLevel) => {
+        const s = get();
+        const meta = s.metadata;
+        if (!meta) return;
+        if (x < 0 || y < 0 || x >= meta.grid_w || y >= meta.grid_h) return;
+        const before = snapshot(meta);
+        // Default iso z_level: sit on top of the cell's current stack.
+        const effectiveZ = zLevel ?? (meta.projection === 'isometric'
+            ? (meta.iso_stack?.[y]?.[x]?.length ?? 0)
+            : undefined);
+        const placements = [
+            ...meta.placements,
+            { id: crypto.randomUUID(), asset_id: assetId, grid_x: x, grid_y: y, z_level: effectiveZ },
+        ];
+        set({
+            metadata: { ...meta, placements },
             history: [...s.history, before].slice(-100),
             redo: [],
             dirty: true,
@@ -225,14 +329,14 @@ export const useMapEditorStore = create<MapEditorState>((set, get) => ({
 
         let patch: Partial<MapMetadataShape>;
         if (meta.projection === 'isometric') {
-            const old = meta.iso_grid ?? [];
-            const grid: (string | null)[][] = [];
+            const old = meta.iso_stack ?? migrateIsoGridToStack(meta);
+            const stack: string[][][] = [];
             for (let y = 0; y < newH; y++) {
-                const row: (string | null)[] = [];
-                for (let x = 0; x < newW; x++) row.push(old[y]?.[x] ?? null);
-                grid.push(row);
+                const row: string[][] = [];
+                for (let x = 0; x < newW; x++) row.push((old[y]?.[x] ?? []).slice());
+                stack.push(row);
             }
-            patch = { iso_grid: grid };
+            patch = { iso_stack: stack };
         } else {
             const old = meta.corners ?? [];
             const corners: TerrainCorner[][] = [];
@@ -292,7 +396,7 @@ export const useMapEditorStore = create<MapEditorState>((set, get) => ({
             placements: last.placements,
         };
         if (last.corners) patch.corners = last.corners;
-        if (last.isoGrid) patch.iso_grid = last.isoGrid;
+        if (last.isoStack) patch.iso_stack = last.isoStack;
         set({
             metadata: { ...s.metadata, ...patch },
             history: s.history.slice(0, -1),
@@ -310,7 +414,7 @@ export const useMapEditorStore = create<MapEditorState>((set, get) => ({
             placements: next.placements,
         };
         if (next.corners) patch.corners = next.corners;
-        if (next.isoGrid) patch.iso_grid = next.isoGrid;
+        if (next.isoStack) patch.iso_stack = next.isoStack;
         set({
             metadata: { ...s.metadata, ...patch },
             history: [...s.history, current],

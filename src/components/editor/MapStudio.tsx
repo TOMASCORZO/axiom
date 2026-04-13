@@ -20,6 +20,8 @@ import {
     X,
     Box,
     Square,
+    Layers,
+    Minus,
 } from 'lucide-react';
 
 const GRID_SIZES = [
@@ -410,6 +412,10 @@ function EditTab() {
     const tools: { id: MapTool; icon: typeof Paintbrush; label: string }[] = [
         { id: 'paint', icon: Paintbrush, label: isIso ? 'Paint' : 'Paint Corner' },
         { id: 'erase', icon: Eraser, label: 'Erase' },
+        ...(isIso ? [
+            { id: 'stack_add' as MapTool, icon: Layers, label: 'Stack +' },
+            { id: 'stack_pop' as MapTool, icon: Minus, label: 'Stack −' },
+        ] : []),
         { id: 'place_object', icon: Trees, label: 'Place Object' },
         { id: 'pan', icon: Move, label: 'Pan' },
     ];

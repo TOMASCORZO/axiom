@@ -56,9 +56,15 @@ export interface MapObjectEntry {
 
 export interface MapObjectPlacement {
     id: string;
-    object_id: string;
+    /** Reference a map-library object (from /map-objects). Mutually exclusive with asset_id. */
+    object_id?: string;
+    /** Reference a project asset (sprite/sprite_sheet/animation) dragged onto the map.
+     *  Mutually exclusive with object_id. Server resolves this to a storage_key via the assets table. */
+    asset_id?: string;
     grid_x: number;             // top-left cell, 0-indexed
     grid_y: number;
+    /** Isometric only: stack level the placement sits on top of (0 = ground, 1 = on top of 1 block, …). */
+    z_level?: number;
 }
 
 export interface TerrainPrompts {
@@ -85,7 +91,12 @@ export interface MapMetadataShape {
 
     // ── Isometric ──
     iso_tiles?: MapIsoTile[];
-    iso_grid?: (string | null)[][]; // grid[y][x] → MapIsoTile.id or null
+    /** Legacy single-layer grid. Maps generated before stacking live here.
+     *  New writes prefer iso_stack — when migrating, each non-null cell becomes a [tileId] stack. */
+    iso_grid?: (string | null)[][];
+    /** Stacked cells: iso_stack[y][x] = tile ids bottom → top. Empty array = empty cell.
+     *  Each level renders offset by tile_size * STACK_STEP_RATIO on Y for a stepped look. */
+    iso_stack?: string[][][];
 
     // ── Objects (both modes) ──
     objects_library: MapObjectEntry[];
