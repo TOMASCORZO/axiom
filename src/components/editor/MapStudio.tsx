@@ -54,6 +54,7 @@ function GenerateMapTab() {
     const [isoVariantsText, setIsoVariantsText] = useState('');
     const [isoView, setIsoView] = useState<'top-down' | 'high top-down' | 'low top-down' | 'side'>('low top-down');
     const [isoDepthRatio, setIsoDepthRatio] = useState<number>(0.5); // 0 flat → 1 full block
+    const [isoTileHeight, setIsoTileHeight] = useState<string>(''); // empty = auto (PixelLab decides)
 
     const [tileSize, setTileSize] = useState(32);
     const [gridIdx, setGridIdx] = useState(2);
@@ -97,6 +98,10 @@ function GenerateMapTab() {
                 if (isoVariantPrompts.length) options.iso_variant_prompts = isoVariantPrompts;
                 options.iso_tile_view = isoView;
                 options.iso_depth_ratio = isoDepthRatio;
+                const parsedHeight = parseInt(isoTileHeight, 10);
+                if (Number.isFinite(parsedHeight) && parsedHeight >= 16 && parsedHeight <= 256) {
+                    options.iso_tile_height = parsedHeight;
+                }
             }
 
             const res = await fetch('/api/assets/generate', {
@@ -272,6 +277,23 @@ function GenerateMapTab() {
                         />
                         <p className="text-[9px] text-zinc-600 mt-1">
                             0% = flat tile, 100% = tall block. Depth ratio is sent directly to PixelLab.
+                        </p>
+                    </div>
+                    <div>
+                        <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">
+                            Tile height (px) — <span className="normal-case text-zinc-600">{isoTileHeight.trim() ? `${isoTileHeight}px` : 'auto'}</span>
+                        </label>
+                        <input
+                            type="number"
+                            min={16}
+                            max={256}
+                            value={isoTileHeight}
+                            onChange={e => setIsoTileHeight(e.target.value)}
+                            placeholder={`auto (≈ ${tileSize}–${tileSize * 2}px)`}
+                            className="w-full bg-zinc-900 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-cyan-500/50 transition-colors"
+                        />
+                        <p className="text-[9px] text-zinc-600 mt-1">
+                            Explicit PNG height (16–256). Leave blank for PixelLab default. Try {tileSize * 2}px for cube blocks, {tileSize * 3}px+ for columns/towers.
                         </p>
                     </div>
                 </>
