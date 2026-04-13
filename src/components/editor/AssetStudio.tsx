@@ -6,6 +6,7 @@ import type { AssetType } from '@/types/asset';
 import type { FreeAssetResult } from '@/lib/assets/search';
 import { uploadImageFile } from '@/lib/assets/client-upload';
 import { MAP_ASSET_DRAG_MIME } from './MapCanvas';
+import { useMapEditorStore as useMapEditorStoreGlobal } from '@/lib/map-store';
 import {
     Sparkles,
     Image as ImageIcon,
@@ -693,7 +694,7 @@ function FreeAssetSearch() {
 
 
 function GalleryTab() {
-    const { assets, project, previewAssetId, setPreviewAssetId, addAsset, removeAsset, addConsoleEntry, refreshProjectFiles, setAssetGenerating, assetGenerating } = useEditorStore();
+    const { assets, project, previewAssetId, setPreviewAssetId, addAsset, removeAsset, addConsoleEntry, refreshProjectFiles, setAssetGenerating, assetGenerating, setActiveRightPanel } = useEditorStore();
     const [animating, setAnimating] = useState(false);
     const [animFrames, setAnimFrames] = useState(6);
     const [animPrompt, setAnimPrompt] = useState('');
@@ -803,7 +804,19 @@ function GalleryTab() {
                     {assets.map((asset) => (
                         <button
                             key={asset.id}
-                            onClick={() => { setPreviewAssetId(asset.id === previewAssetId ? null : asset.id); setShowAnimPanel(false); }}
+                            onClick={() => {
+                                // Maps have a dedicated editor (MapStudio) — route there instead of the flat preview.
+                                if (asset.asset_type === 'map') {
+                                    const mapMeta = (asset.metadata as { map?: import('@/types/asset').MapMetadataShape } | null)?.map;
+                                    if (mapMeta) {
+                                        useMapEditorStoreGlobal.getState().open(asset.id, mapMeta);
+                                    }
+                                    setActiveRightPanel('maps');
+                                    return;
+                                }
+                                setPreviewAssetId(asset.id === previewAssetId ? null : asset.id);
+                                setShowAnimPanel(false);
+                            }}
                             // Maps can't be placed onto maps — skip drag for map assets.
                             draggable={asset.asset_type !== 'map'}
                             onDragStart={asset.asset_type !== 'map' ? (e) => {

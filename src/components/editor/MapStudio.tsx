@@ -680,9 +680,23 @@ function EditTab() {
 
 function MapsGalleryTab() {
     const assets = useEditorStore(s => s.assets);
+    const addConsoleEntry = useEditorStore(s => s.addConsoleEntry);
     const open = useMapEditorStore(s => s.open);
     const openAssetId = useMapEditorStore(s => s.assetId);
     const maps = assets.filter(a => a.asset_type === 'map');
+
+    const handleOpen = (assetId: string, meta: MapMetadataShape | undefined) => {
+        if (!meta) {
+            addConsoleEntry({
+                id: crypto.randomUUID(),
+                level: 'error',
+                message: `[Map Studio] Cannot edit map — missing metadata.map. Re-generate from the Generate tab.`,
+                timestamp: new Date().toISOString(),
+            });
+            return;
+        }
+        open(assetId, meta);
+    };
 
     if (maps.length === 0) {
         return (
@@ -701,7 +715,7 @@ function MapsGalleryTab() {
                 return (
                     <button
                         key={m.id}
-                        onClick={() => mapMeta && open(m.id, mapMeta)}
+                        onClick={() => handleOpen(m.id, mapMeta)}
                         className={`flex items-center gap-2 p-2 rounded border transition-colors ${
                             isOpen ? 'border-violet-500 bg-violet-500/5' : 'border-white/5 bg-zinc-900/50 hover:border-white/10'
                         }`}
