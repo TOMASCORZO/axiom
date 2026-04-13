@@ -39,6 +39,7 @@ export interface CreateTilesetResp {
 
 export interface TilesProTile {
     id?: string;
+    index?: number;
     image?: { type: 'base64'; base64: string };
     base64?: string; // some shapes expose it flat
     storage_url?: string;
@@ -47,7 +48,10 @@ export interface TilesProTile {
 export interface CreateTilesProResp {
     tiles?: TilesProTile[];
     storage_urls?: Record<string, string>;
-    images?: Array<{ base64: string }>;
+    images?: Array<{ base64?: string; image?: { base64: string } }>;
+    // Some variants wrap the payload — tolerate both.
+    result?: CreateTilesProResp;
+    data?: CreateTilesProResp;
     usage?: { type: string; usd?: number };
 }
 
@@ -126,11 +130,20 @@ async function submitAndPoll<T>(
 
     const jobEnvelope = await submitRes.json().catch(() => ({} as Record<string, unknown>));
     // Id may live at top level, under .data, or under .result depending on endpoint.
+    // Some endpoints also expose a generic `background_job_id` alongside the
+    // resource-specific id, so accept that as a fallback.
     const pickId = (obj: Record<string, unknown>): string | undefined => {
-        const direct = obj[idField];
-        if (typeof direct === 'string') return direct;
+        const candidates = [idField, 'background_job_id', 'job_id', 'id'];
+        for (const key of candidates) {
+            const direct = obj[key];
+            if (typeof direct === 'string') return direct;
+        }
         const nested = obj.data as Record<string, unknown> | undefined;
-        if (nested && typeof nested[idField] === 'string') return nested[idField] as string;
+        if (nested) {
+            for (const key of candidates) {
+                if (typeof nested[key] === 'string') return nested[key] as string;
+            }
+        }
         return undefined;
     };
     const resourceId = pickId(jobEnvelope as Record<string, unknown>);
@@ -245,20 +258,24 @@ export async function createTilesPro(opts: CreateTilesProOptions): Promise<Creat
 
 /**
  * Normalize the tiles-pro response into a list of PNG buffers. The API
- * has several shapes across versions — try each in order.
+ * has several shapes across versions — try each in order. Also unwraps
+ * common envelopes (`result`, `data`) before extracting.
  */
 export function extractTilesProBuffers(resp: CreateTilesProResp): Buffer[] {
+    const source = resp.result ?? resp.data ?? resp;
     const out: Buffer[] = [];
-    if (resp.tiles && resp.tiles.length) {
-        for (const t of resp.tiles) {
+    if (source.tiles && source.tiles.length) {
+        // Sort by `index` if present so variants stay in the expected order.
+        const sorted = [...source.tiles].sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+        for (const t of sorted) {
             const b = decodeB64(t.image?.base64 ?? t.base64 ?? null);
             if (b) out.push(b);
         }
         if (out.length > 0) return out;
     }
-    if (resp.images && resp.images.length) {
-        for (const im of resp.images) {
-            const b = decodeB64(im.base64);
+    if (source.images && source.images.length) {
+        for (const im of source.images) {
+            const b = decodeB64(im.base64 ?? im.image?.base64 ?? null);
             if (b) out.push(b);
         }
         if (out.length > 0) return out;
@@ -270,14 +287,15 @@ export function extractTilesProBuffers(resp: CreateTilesProResp): Buffer[] {
 
 /** Remote URLs variant (only when tiles-pro returns storage_urls). */
 export function extractTilesProUrls(resp: CreateTilesProResp): string[] {
+    const source = resp.result ?? resp.data ?? resp;
     const urls: string[] = [];
-    if (resp.storage_urls) {
-        for (const key of Object.keys(resp.storage_urls).sort()) {
-            urls.push(resp.storage_urls[key]);
+    if (source.storage_urls) {
+        for (const key of Object.keys(source.storage_urls).sort()) {
+            urls.push(source.storage_urls[key]);
         }
     }
-    if (resp.tiles && resp.tiles.length && urls.length === 0) {
-        for (const t of resp.tiles) if (t.storage_url) urls.push(t.storage_url);
+    if (source.tiles && source.tiles.length && urls.length === 0) {
+        for (const t of source.tiles) if (t.storage_url) urls.push(t.storage_url);
     }
     return urls;
 }

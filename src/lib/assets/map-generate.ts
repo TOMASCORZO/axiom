@@ -20,6 +20,7 @@ import {
     createIsometricTile,
     createMapObject,
     extractTilesProBuffers,
+    extractTilesProUrls,
     extractIsoTileBuffer,
     extractMapObjectBuffer,
     decodeB64,
@@ -138,18 +139,35 @@ export async function generateIsoTiles(opts: GenerateIsoTilesOptions): Promise<G
             seed: opts.seed,
         });
 
-        // Try base64 path first; fall back to storage URLs if that's what the endpoint returned.
-        const b64Bufs = extractTilesProBuffers(resp);
+        // Try base64 path first; fall back to storage URLs when the endpoint
+        // returned remote URLs instead of inline base64.
+        const ts = opts.tileSize ?? 32;
         const tiles: GeneratedIsoTile[] = [];
 
+        const b64Bufs = extractTilesProBuffers(resp);
         if (b64Bufs.length > 0) {
-            // We don't get per-tile dimensions in the simple response — assume square tile_size.
-            const ts = opts.tileSize ?? 32;
             for (const b of b64Bufs) tiles.push({ buffer: b, width: ts, height: ts });
+        } else {
+            const urls = extractTilesProUrls(resp);
+            for (const url of urls) {
+                try {
+                    const fetched = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+                    if (!fetched.ok) continue;
+                    const ab = await fetched.arrayBuffer();
+                    tiles.push({ buffer: Buffer.from(ab), width: ts, height: ts });
+                } catch (err) {
+                    console.warn(`[map-generate] iso tile URL fetch failed: ${url}`, err);
+                }
+            }
         }
 
-        // No URL fallback yet — tiles-pro typically returns base64 in our usage.
         if (tiles.length === 0) {
+            // Log the actual response so we can diagnose schema drift. Strip
+            // heavy base64 payloads before logging to keep the output readable.
+            const redacted = JSON.parse(JSON.stringify(resp), (_k, v) =>
+                typeof v === 'string' && v.length > 200 ? `<str:${v.length} chars>` : v,
+            );
+            console.error('[map-generate] tiles-pro response (redacted):', JSON.stringify(redacted).slice(0, 1500));
             return { success: false, tiles: [], cost: 0, error: 'No decodable iso tiles in tiles-pro response' };
         }
 
