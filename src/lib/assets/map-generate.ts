@@ -110,10 +110,19 @@ export async function generateWangTileset(opts: GenerateWangTilesetOptions): Pro
 
 // ── Isometric tile generation ────────────────────────────────────────
 
+export type IsoView = 'top-down' | 'high top-down' | 'low top-down' | 'side';
+
 export interface GenerateIsoTilesOptions {
     /** Numbered prompts carry the tile count — e.g. "1). grass 2). dirt 3). stone". */
     description: string;
-    tileSize?: number;      // 16-128, default 32
+    tileSize?: number;      // 16-256, default 32 (footprint width)
+    /** Explicit tile pixel height. Makes iso tiles render as taller blocks.
+     *  When omitted, PixelLab computes from tileView + tile_type geometry. */
+    tileHeight?: number;
+    /** View preset — controls implicit depth. */
+    tileView?: IsoView;
+    /** 0.0 flat → 1.0 tall block. Overrides tileView's implicit depth. */
+    tileDepthRatio?: number;
     seed?: number;
 }
 
@@ -136,17 +145,36 @@ export async function generateIsoTiles(opts: GenerateIsoTilesOptions): Promise<G
             description: opts.description,
             tileType: 'isometric',
             tileSize: opts.tileSize ?? 32,
+            tileHeight: opts.tileHeight,
+            tileView: opts.tileView,
+            tileDepthRatio: opts.tileDepthRatio,
             seed: opts.seed,
         });
 
         // Try base64 path first; fall back to storage URLs when the endpoint
         // returned remote URLs instead of inline base64.
         const ts = opts.tileSize ?? 32;
+        // When caller passed an explicit height we trust it; otherwise we'll
+        // measure the actual PNG dimensions after fetch.
+        const fallbackH = opts.tileHeight ?? ts;
         const tiles: GeneratedIsoTile[] = [];
+        const sharp = (await import('sharp')).default;
+
+        const measure = async (buf: Buffer): Promise<{ w: number; h: number }> => {
+            try {
+                const meta = await sharp(buf).metadata();
+                return { w: meta.width ?? ts, h: meta.height ?? fallbackH };
+            } catch {
+                return { w: ts, h: fallbackH };
+            }
+        };
 
         const b64Bufs = extractTilesProBuffers(resp);
         if (b64Bufs.length > 0) {
-            for (const b of b64Bufs) tiles.push({ buffer: b, width: ts, height: ts });
+            for (const b of b64Bufs) {
+                const { w, h } = await measure(b);
+                tiles.push({ buffer: b, width: w, height: h });
+            }
         } else {
             const urls = extractTilesProUrls(resp);
             for (const url of urls) {
@@ -154,7 +182,9 @@ export async function generateIsoTiles(opts: GenerateIsoTilesOptions): Promise<G
                     const fetched = await fetch(url, { signal: AbortSignal.timeout(30_000) });
                     if (!fetched.ok) continue;
                     const ab = await fetched.arrayBuffer();
-                    tiles.push({ buffer: Buffer.from(ab), width: ts, height: ts });
+                    const buf = Buffer.from(ab);
+                    const { w, h } = await measure(buf);
+                    tiles.push({ buffer: buf, width: w, height: h });
                 } catch (err) {
                     console.warn(`[map-generate] iso tile URL fetch failed: ${url}`, err);
                 }

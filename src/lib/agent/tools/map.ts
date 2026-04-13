@@ -197,6 +197,9 @@ interface GenerateMapInput {
     transition?: string;
     // Isometric inputs
     iso_variant_prompts?: string[];   // e.g. ["grass","dirt path","stone block"]
+    iso_tile_height?: number;         // explicit pixel height (16-256) — makes taller blocks
+    iso_tile_view?: 'top-down' | 'high top-down' | 'low top-down' | 'side';
+    iso_depth_ratio?: number;         // 0.0 flat → 1.0 full block height
     // Shared
     tile_size?: number;
     grid_w?: number;
@@ -217,6 +220,9 @@ registerTool({
             upper: { type: 'string', description: 'Orthogonal: upper/elevated terrain (e.g. "stone path").' },
             transition: { type: 'string', description: 'Orthogonal: optional blend band description.' },
             iso_variant_prompts: { type: 'array', items: { type: 'string' }, description: 'Isometric: tile variant prompts (will be joined into one numbered description).' },
+            iso_tile_height: { type: 'integer', description: 'Isometric: explicit tile pixel height (16-256). Makes tiles render as tall blocks — e.g. 2× tile_size for a proper cube.' },
+            iso_tile_view: { type: 'string', enum: ['top-down', 'high top-down', 'low top-down', 'side'], description: 'Isometric: view preset controlling implicit depth. top-down=flat, side=~50% depth.' },
+            iso_depth_ratio: { type: 'number', description: 'Isometric: 0.0 (flat) → 1.0 (full block). Overrides iso_tile_view\'s default depth.' },
             tile_size: { type: 'integer', default: 32 },
             grid_w: { type: 'integer', default: 16 },
             grid_h: { type: 'integer', default: 12 },
@@ -331,6 +337,9 @@ registerTool({
         const iso = await generateIsoTiles({
             description,
             tileSize,
+            tileHeight: data.iso_tile_height,
+            tileView: data.iso_tile_view,
+            tileDepthRatio: data.iso_depth_ratio,
         });
         if (!iso.success) {
             return {

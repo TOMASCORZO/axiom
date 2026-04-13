@@ -52,6 +52,8 @@ function GenerateMapTab() {
     const [transitionPrompt, setTransitionPrompt] = useState('');
     // Isometric inputs
     const [isoVariantsText, setIsoVariantsText] = useState('');
+    const [isoView, setIsoView] = useState<'top-down' | 'high top-down' | 'low top-down' | 'side'>('low top-down');
+    const [isoDepthRatio, setIsoDepthRatio] = useState<number>(0.5); // 0 flat → 1 full block
 
     const [tileSize, setTileSize] = useState(32);
     const [gridIdx, setGridIdx] = useState(2);
@@ -93,6 +95,8 @@ function GenerateMapTab() {
                 if (transitionPrompt.trim()) options.transition = transitionPrompt.trim();
             } else {
                 if (isoVariantPrompts.length) options.iso_variant_prompts = isoVariantPrompts;
+                options.iso_tile_view = isoView;
+                options.iso_depth_ratio = isoDepthRatio;
             }
 
             const res = await fetch('/api/assets/generate', {
@@ -223,17 +227,54 @@ function GenerateMapTab() {
                     </div>
                 </>
             ) : (
-                <div>
-                    <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">Iso tile variants (one per line)</label>
-                    <textarea
-                        value={isoVariantsText}
-                        onChange={e => setIsoVariantsText(e.target.value)}
-                        rows={4}
-                        placeholder={'grass\ndirt path\nstone block\nwater'}
-                        className="w-full bg-zinc-900 border border-white/10 rounded-lg px-3 py-2 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 resize-none focus:outline-none focus:border-cyan-500/50 transition-colors"
-                    />
-                    <p className="text-[9px] text-zinc-600 mt-1">Up to 6. Leave blank to auto-derive 3 variants from theme.</p>
-                </div>
+                <>
+                    <div>
+                        <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">Iso tile variants (one per line)</label>
+                        <textarea
+                            value={isoVariantsText}
+                            onChange={e => setIsoVariantsText(e.target.value)}
+                            rows={4}
+                            placeholder={'grass\ndirt path\nstone block\nwater'}
+                            className="w-full bg-zinc-900 border border-white/10 rounded-lg px-3 py-2 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 resize-none focus:outline-none focus:border-cyan-500/50 transition-colors"
+                        />
+                        <p className="text-[9px] text-zinc-600 mt-1">Up to 6. Leave blank to auto-derive 3 variants from theme.</p>
+                    </div>
+                    <div>
+                        <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">View angle</label>
+                        <div className="flex gap-1">
+                            {(['top-down', 'high top-down', 'low top-down', 'side'] as const).map(v => (
+                                <button
+                                    key={v}
+                                    onClick={() => setIsoView(v)}
+                                    className={`flex-1 px-1.5 py-1 rounded text-[10px] transition-colors ${
+                                        isoView === v
+                                            ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30'
+                                            : 'bg-zinc-900 text-zinc-500 border border-white/5 hover:text-zinc-300'
+                                    }`}
+                                >
+                                    {v === 'top-down' ? 'Flat' : v === 'high top-down' ? 'High' : v === 'low top-down' ? 'Low' : 'Side'}
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+                    <div>
+                        <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">
+                            Block height — {Math.round(isoDepthRatio * 100)}%
+                        </label>
+                        <input
+                            type="range"
+                            min={0}
+                            max={1}
+                            step={0.05}
+                            value={isoDepthRatio}
+                            onChange={e => setIsoDepthRatio(Number(e.target.value))}
+                            className="w-full accent-cyan-500"
+                        />
+                        <p className="text-[9px] text-zinc-600 mt-1">
+                            0% = flat tile, 100% = tall block. Depth ratio is sent directly to PixelLab.
+                        </p>
+                    </div>
+                </>
             )}
 
             <div>

@@ -222,17 +222,23 @@ export async function createTileset(opts: CreateTilesetOptions): Promise<CreateT
 // ── /create-tiles-pro (iso / hex / square variants) ───────────────────
 
 export type TilesProShape = 'isometric' | 'hex' | 'hex_pointy' | 'octagon' | 'square_topdown';
+export type TilesProView = 'top-down' | 'high top-down' | 'low top-down' | 'side';
 
 export interface CreateTilesProOptions {
     description: string;       // Count is inferred from numbered prompts, e.g. "1). grass 2). dirt".
     tileType: TilesProShape;
-    tileSize?: number;         // 16-128
+    tileSize?: number;         // 16-256
+    /** Explicit tile height in pixels (16-256). When omitted, height is
+     *  computed from tile_type geometry + view. Use to make iso tiles taller
+     *  than their footprint (true blocks). */
+    tileHeight?: number;
+    /** Discrete view preset controlling vertical depth. */
+    tileView?: TilesProView;
+    /** Continuous view angle 0-90 deg (overrides tileView when set). */
+    tileViewAngle?: number;
+    /** 0.0-1.0, overrides the default depth computed from tileView. */
+    tileDepthRatio?: number;
     seed?: number;
-    negativeDescription?: string;
-    textGuidanceScale?: number;
-    outline?: string;
-    shading?: string;
-    detail?: string;
 }
 
 export async function createTilesPro(opts: CreateTilesProOptions): Promise<CreateTilesProResp> {
@@ -241,12 +247,11 @@ export async function createTilesPro(opts: CreateTilesProOptions): Promise<Creat
         tile_type: opts.tileType,
     };
     if (opts.tileSize !== undefined) body.tile_size = opts.tileSize;
+    if (opts.tileHeight !== undefined) body.tile_height = opts.tileHeight;
+    if (opts.tileView) body.tile_view = opts.tileView;
+    if (opts.tileViewAngle !== undefined) body.tile_view_angle = opts.tileViewAngle;
+    if (opts.tileDepthRatio !== undefined) body.tile_depth_ratio = opts.tileDepthRatio;
     if (opts.seed !== undefined) body.seed = opts.seed;
-    if (opts.negativeDescription) body.negative_description = opts.negativeDescription;
-    if (opts.textGuidanceScale !== undefined) body.text_guidance_scale = opts.textGuidanceScale;
-    if (opts.outline) body.outline = opts.outline;
-    if (opts.shading) body.shading = opts.shading;
-    if (opts.detail) body.detail = opts.detail;
 
     return submitAndPoll<CreateTilesProResp>(
         '/create-tiles-pro',
