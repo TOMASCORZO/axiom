@@ -40,6 +40,20 @@ const TERRAIN_COLORS: Record<TerrainCorner, string> = {
     transition: 'from-amber-600 to-orange-700',
 };
 
+// Server errors can arrive as a string, a Supabase PostgrestError
+// ({ code, message, details, hint }), or a Vercel platform envelope
+// ({ code, id, message }) when a serverless function times out. Rendering
+// any of those objects as a React child throws React error #31, so this
+// coerces every shape down to a string for safe display.
+function errorMessage(raw: unknown, fallback: string): string {
+    if (typeof raw === 'string' && raw.length > 0) return raw;
+    if (raw && typeof raw === 'object' && 'message' in raw) {
+        const m = (raw as { message: unknown }).message;
+        if (typeof m === 'string' && m.length > 0) return m;
+    }
+    return fallback;
+}
+
 // ── Generate Tab ────────────────────────────────────────────────────
 
 function GenerateMapTab() {
@@ -121,8 +135,9 @@ function GenerateMapTab() {
             clearTimeout(timer);
             const data = await res.json();
             if (!res.ok || !data.success) {
-                setError(data.error || 'Map generation failed');
-                addConsoleEntry({ id: crypto.randomUUID(), level: 'error', message: `[Map Studio] Failed: ${data.error}`, timestamp: new Date().toISOString() });
+                const errMsg = errorMessage(data.error, `Map generation failed (HTTP ${res.status})`);
+                setError(errMsg);
+                addConsoleEntry({ id: crypto.randomUUID(), level: 'error', message: `[Map Studio] Failed: ${errMsg}`, timestamp: new Date().toISOString() });
                 return;
             }
             const out = data.output as Record<string, unknown>;
@@ -452,7 +467,7 @@ function EditTab() {
             clearTimeout(timer);
             const data = await res.json();
             if (!res.ok || !data.success) {
-                setGenError(data.error || 'Iso tile generation failed');
+                setGenError(errorMessage(data.error, `Iso tile generation failed (HTTP ${res.status})`));
                 return;
             }
             addIsoTileToLibrary(data.tile);
@@ -493,7 +508,7 @@ function EditTab() {
             clearTimeout(timer);
             const data = await res.json();
             if (!res.ok || !data.success) {
-                setGenError(data.error || 'Object generation failed');
+                setGenError(errorMessage(data.error, `Object generation failed (HTTP ${res.status})`));
                 return;
             }
             addObjectToLibrary(data.object);
