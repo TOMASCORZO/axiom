@@ -16,8 +16,18 @@ import type {
 //   stack_pop  → pop the top tile from the cell's stack
 export type MapTool = 'paint' | 'erase' | 'place_object' | 'pan' | 'stack_add' | 'stack_pop';
 
-/** Uniform vertical step per stack level, expressed as a fraction of tile_size. */
+/** Legacy vertical step per stack level as a fraction of tile_size.
+ *  Only meaningful for flat tiles (tile_height ≈ tile_size). For taller
+ *  blocks use `computeStackStep` so the upper block sits on the lower
+ *  block's top face instead of overlapping its body. */
 export const STACK_STEP_RATIO = 0.5;
+
+/** Vertical pixel offset per stack level. For flat iso tiles this collapses
+ *  to tile_size/2 (matching the diamond inset). For tall blocks the offset
+ *  grows with tile_render_height so stacked cubes don't cover each other. */
+export function computeStackStep(tileSize: number, tileRenderHeight: number): number {
+    return Math.max(tileSize / 2, tileRenderHeight - tileSize / 2);
+}
 
 interface HistoryEntry {
     corners?: TerrainCorner[][];           // ortho

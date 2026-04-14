@@ -251,9 +251,13 @@ export async function POST(request: NextRequest) {
                 const tileStack: (Buffer | null)[][][] = stack.map(row =>
                     row.map(cell => cell.map(id => tileBufById.get(id) ?? null)),
                 );
+                // Use the TALLEST tile so the canvas has enough room no matter
+                // which variant lands on the top row. Width stays from tile[0]
+                // (horizontal centering happens per-tile inside composeIsoMap).
                 const firstTile = tiles[0];
                 const tileRenderWidth = firstTile?.width ?? meta.tile_size * 2;
-                const tileRenderHeight = firstTile?.height ?? meta.tile_size * 2;
+                const tileRenderHeight = tiles.reduce((m, t) => Math.max(m, t.height), 0)
+                    || meta.tile_size * 2;
 
                 composed = await composeIsoMap({
                     tileSize: meta.tile_size,
@@ -264,13 +268,20 @@ export async function POST(request: NextRequest) {
                     tileRenderHeight,
                     placements,
                 });
-                // Output dims include stack headroom so the shell dimensions match
-                // what composeIsoMap actually produces.
+                // Output dims must match what composeIsoMap actually produces,
+                // including top overhang for tall blocks + per-level stack headroom.
                 let maxDepth = 0;
                 for (const row of stack) for (const cell of row) if (cell.length > maxDepth) maxDepth = cell.length;
-                const stackHeadroom = Math.max(0, maxDepth - 1) * meta.tile_size * 0.5;
+                const stackStep = Math.max(meta.tile_size / 2, tileRenderHeight - meta.tile_size / 2);
+                const stackHeadroom = Math.max(0, maxDepth - 1) * stackStep;
+                const topOverhang = Math.max(0, tileRenderHeight - meta.tile_size / 2);
                 outW = Math.ceil((meta.grid_w + meta.grid_h) * (meta.tile_size / 2) + tileRenderWidth);
-                outH = Math.ceil((meta.grid_w + meta.grid_h) * (meta.tile_size / 4) + tileRenderHeight + stackHeadroom);
+                outH = Math.ceil(
+                    (meta.grid_w + meta.grid_h) * (meta.tile_size / 4)
+                    + meta.tile_size / 2
+                    + topOverhang
+                    + stackHeadroom,
+                );
             } else {
                 // Orthogonal (Wang)
                 const wangTiles = meta.wang_tiles ?? [];

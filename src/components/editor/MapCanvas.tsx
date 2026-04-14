@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { useEditorStore } from '@/lib/store';
-import { useMapEditorStore, STACK_STEP_RATIO } from '@/lib/map-store';
+import { useMapEditorStore, computeStackStep } from '@/lib/map-store';
 import { Map as MapIcon, Save, Undo2, Redo2, Loader2 } from 'lucide-react';
 import type { MapWangTile, TerrainCorner } from '@/types/asset';
 
@@ -120,12 +120,16 @@ export default function MapCanvas() {
     const gridH = metadata?.grid_h ?? 0;
     const isIso = metadata?.projection === 'isometric';
 
-    // Iso render metrics — derived from first iso tile if available.
+    // Iso render metrics — prefer the tallest tile so top-row blocks never
+    // clip regardless of which variant landed there. Width is informational
+    // only (horizontal centering happens per-tile on draw).
     const isoTileRenderW = isIso ? (metadata?.iso_tiles?.[0]?.width ?? tileSize * 2) : 0;
-    const isoTileRenderH = isIso ? (metadata?.iso_tiles?.[0]?.height ?? tileSize * 2) : 0;
+    const isoTileRenderH = isIso
+        ? ((metadata?.iso_tiles ?? []).reduce((m, t) => Math.max(m, t.height), 0) || tileSize * 2)
+        : 0;
     const halfW = tileSize / 2;
     const halfH = tileSize / 4;
-    const stackStep = tileSize * STACK_STEP_RATIO;
+    const stackStep = computeStackStep(tileSize, isoTileRenderH || tileSize);
 
     // Deepest stack anywhere on the grid — drives vertical headroom.
     const maxStackDepth = useMemo(() => {
@@ -135,16 +139,20 @@ export default function MapCanvas() {
         return max;
     }, [isIso, metadata?.iso_stack]);
     const stackHeadroom = isIso ? Math.max(0, maxStackDepth - 1) * stackStep : 0;
+    // Extra room above the (0,0) diamond for tall blocks — a tile image is
+    // `isoTileRenderH` tall but the diamond footprint only occupies the
+    // bottom `tileSize/2`. Without this the top row of cubes clips off.
+    const isoTopOverhang = isIso ? Math.max(0, isoTileRenderH - tileSize / 2) : 0;
 
     // Shift so the leftmost diamond starts at x = 0.
     const isoOffsetX = isIso ? gridH * halfW : 0;
-    const isoOffsetY = stackHeadroom; // leave room above for stacked levels.
+    const isoOffsetY = isoTopOverhang + stackHeadroom;
 
     const pxW = isIso
         ? Math.ceil((gridW + gridH) * halfW + isoTileRenderW)
         : gridW * tileSize;
     const pxH = isIso
-        ? Math.ceil((gridW + gridH) * halfH + isoTileRenderH + stackHeadroom)
+        ? Math.ceil((gridW + gridH) * halfH + tileSize / 2 + isoTopOverhang + stackHeadroom)
         : gridH * tileSize;
 
     // ── Draw ──
@@ -350,7 +358,7 @@ export default function MapCanvas() {
             ctx.strokeRect(1, 1, pxW - 2, pxH - 2);
             ctx.setLineDash([]);
         }
-    }, [metadata, imageCache, gridW, gridH, tileSize, isIso, pxW, pxH, halfW, halfH, isoOffsetX, isoOffsetY, stackStep, assetById]);
+    }, [metadata, imageCache, gridW, gridH, tileSize, isIso, pxW, pxH, halfW, halfH, isoOffsetX, isoOffsetY, stackStep, assetById, isoTopOverhang]);
 
     // Fit-to-view when asset changes
     useEffect(() => {

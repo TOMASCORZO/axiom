@@ -435,12 +435,16 @@ registerTool({
             row.map(ids => ids.map(id => isoBufById.get(id) ?? null)),
         );
 
+        // Uniform render size: tallest variant drives height so none clip;
+        // width from tile[0] (per-tile horizontal centering in the compositor).
+        const renderW = isoEntries[0]?.width ?? tileSize * 2;
+        const renderH = isoEntries.reduce((m, e) => Math.max(m, e.height), 0) || tileSize * 2;
         const composedBuf = await composeIsoMap({
             tileSize,
             gridW, gridH,
             tileStack,
-            tileRenderWidth: isoEntries[0]?.width ?? tileSize * 2,
-            tileRenderHeight: isoEntries[0]?.height ?? tileSize * 2,
+            tileRenderWidth: renderW,
+            tileRenderHeight: renderH,
         });
         const composedSk = await uploadBinaryAsset(ctx, targetPath, composedBuf, 'image/png');
 
@@ -456,8 +460,12 @@ registerTool({
             placements: [],
         };
 
-        const outW = (gridW + gridH) * (tileSize / 2);
-        const outH = (gridW + gridH) * (tileSize / 4) + (isoEntries[0]?.height ?? tileSize * 2);
+        // Match composeIsoMap's canvas: diamond extents + tile_size/2 bottom
+        // margin + top overhang for tall blocks. Initial generation is a
+        // single stack level so stackHeadroom = 0.
+        const topOverhang = Math.max(0, renderH - tileSize / 2);
+        const outW = Math.ceil((gridW + gridH) * (tileSize / 2) + renderW);
+        const outH = Math.ceil((gridW + gridH) * (tileSize / 4) + tileSize / 2 + topOverhang);
         const assetId = await registerMapAsset(ctx, {
             storageKey: composedSk,
             name: data.prompt.slice(0, 40),

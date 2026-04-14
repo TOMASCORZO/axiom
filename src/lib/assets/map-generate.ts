@@ -385,8 +385,10 @@ export async function composeWangMap(args: ComposeWangArgs): Promise<Buffer> {
 // x ascending per row, and within each cell bottom-of-stack → top-of-stack
 // with a vertical offset per level (STACK_STEP_RATIO × tile_size).
 
-/** Fraction of tile_size that each stack level rises on screen. Keep in sync
- *  with the client-side constant in map-store.ts. */
+/** Fraction of tile_size that each stack level rises on screen. Only accurate
+ *  for flat tiles (tile_height ≈ tile_size). For tall blocks use the dynamic
+ *  formula inside composeIsoMap — duplicated in map-store.ts as
+ *  `computeStackStep` for the client renderer. */
 export const STACK_STEP_RATIO = 0.5;
 
 export interface ComposeIsoArgs {
@@ -422,18 +424,27 @@ export async function composeIsoMap(args: ComposeIsoArgs): Promise<Buffer> {
             if (depth > maxStack) maxStack = depth;
         }
     }
-    const stackStep = tileSize * STACK_STEP_RATIO;
+    // For flat tiles this collapses to tileSize/2; for tall blocks (cubes,
+    // where tileRenderHeight > tileSize) each level steps up by the block's
+    // body height so stacked cubes don't overlap their neighbors' body.
+    const stackStep = Math.max(tileSize / 2, tileRenderHeight - tileSize / 2);
     const stackHeadroom = Math.max(0, maxStack - 1) * stackStep;
+    // Every tile extends upward by (tileRenderHeight - tileSize/2) above its
+    // diamond footprint. Without this padding the top row of tall blocks
+    // (iso_depth_ratio > 0) gets clipped off the top of the canvas.
+    const topOverhang = Math.max(0, tileRenderHeight - tileSize / 2);
 
     // Canvas size: the diamond's extents plus headroom for stack levels.
     const diamondW = (gridW + gridH) * (tileSize / 2);
     const diamondH = (gridW + gridH) * (tileSize / 4);
     const canvasW = Math.ceil(diamondW + tileRenderWidth);
-    const canvasH = Math.ceil(diamondH + tileRenderHeight + stackHeadroom);
+    const canvasH = Math.ceil(diamondH + tileSize / 2 + topOverhang + stackHeadroom);
 
     // Origin: (0,0) cell's top-left on screen so nothing clips.
     const offsetX = gridH * (tileSize / 2);
-    const offsetY = stackHeadroom; // shift down so stacked cells don't clip off the top.
+    // Push everything down by the tall-tile overhang + stack headroom so
+    // neither the top row's tiles nor the topmost stack level clip.
+    const offsetY = topOverhang + stackHeadroom;
 
     const composites: Array<{ input: Buffer; left: number; top: number }> = [];
 
