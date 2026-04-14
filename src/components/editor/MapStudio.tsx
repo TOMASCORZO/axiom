@@ -412,12 +412,12 @@ function EditTab() {
     const tools: { id: MapTool; icon: typeof Paintbrush; label: string }[] = [
         { id: 'paint', icon: Paintbrush, label: isIso ? 'Paint' : 'Paint Corner' },
         { id: 'erase', icon: Eraser, label: 'Erase' },
+        { id: 'place_object', icon: Trees, label: 'Place Object' },
+        { id: 'pan', icon: Move, label: 'Pan' },
         ...(isIso ? [
             { id: 'stack_add' as MapTool, icon: Layers, label: 'Stack +' },
             { id: 'stack_pop' as MapTool, icon: Minus, label: 'Stack −' },
         ] : []),
-        { id: 'place_object', icon: Trees, label: 'Place Object' },
-        { id: 'pan', icon: Move, label: 'Pan' },
     ];
 
     const terrainOptions: TerrainCorner[] = ['lower', 'upper'];
@@ -628,6 +628,16 @@ function EditTab() {
             {/* Object library */}
             <div>
                 <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">Objects · {meta.objects_library.length}</label>
+                {tool === 'place_object' && meta.objects_library.length === 0 && (
+                    <div className="mb-1 px-2 py-1.5 rounded bg-fuchsia-500/10 border border-fuchsia-500/20 text-fuchsia-300 text-[10px] leading-relaxed">
+                        Generate an object below to place it on the map.
+                    </div>
+                )}
+                {tool === 'place_object' && meta.objects_library.length > 0 && !selectedObjectId && (
+                    <div className="mb-1 px-2 py-1.5 rounded bg-fuchsia-500/10 border border-fuchsia-500/20 text-fuchsia-300 text-[10px] leading-relaxed">
+                        Pick an object thumbnail, then click the map to place it.
+                    </div>
+                )}
                 <div className="grid grid-cols-4 gap-1">
                     {meta.objects_library.map(o => (
                         <button

@@ -150,7 +150,20 @@ export const useMapEditorStore = create<MapEditorState>((set, get) => ({
         saveError: null,
     }),
 
-    setTool: (tool) => set({ tool }),
+    setTool: (tool) => {
+        const s = get();
+        // Auto-select the first library object if switching to place_object
+        // with nothing selected, so the tool is usable immediately after a
+        // page reload (selectedObjectId resets to null on re-open).
+        if (tool === 'place_object' && !s.selectedObjectId) {
+            const first = s.metadata?.objects_library?.[0];
+            if (first) {
+                set({ tool, selectedObjectId: first.id });
+                return;
+            }
+        }
+        set({ tool });
+    },
     selectTerrain: (label) => set({ selectedTerrain: label }),
     selectIsoTile: (id) => set({ selectedIsoTileId: id }),
     selectObject: (id) => set({ selectedObjectId: id }),

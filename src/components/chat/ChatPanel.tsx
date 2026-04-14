@@ -55,7 +55,7 @@ export default function ChatPanel({ projectId }: ChatPanelProps) {
         messages, isAgentBusy, chatView,
         activeConversationId,
         addMessage, updateMessage, setAgentBusy, setMessages,
-        addProjectFiles, refreshProjectFiles,
+        addProjectFiles, refreshProjectFiles, loadAssets,
         setChatView, setActiveConversationId, newConversation, loadConversations,
     } = useEditorStore();
 
@@ -335,6 +335,9 @@ export default function ChatPanel({ projectId }: ChatPanelProps) {
                                         isStreaming: false,
                                     });
                                     refreshProjectFiles(projectId);
+                                    // Refresh assets too so newly-generated maps/sprites appear
+                                    // in their studios without a manual reload.
+                                    loadAssets(projectId);
                                     break;
                                 }
 

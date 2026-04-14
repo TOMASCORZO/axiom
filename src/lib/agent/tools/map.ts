@@ -57,6 +57,42 @@ async function uploadBinaryAsset(
     return storageKey;
 }
 
+// Register a map in the `assets` table so MapStudio Gallery can pick it up
+// and open it. Without this row, agent-generated maps are only visible as
+// raw PNGs in the FileTree / AssetStudio preview.
+async function registerMapAsset(
+    ctx: ToolContext,
+    params: {
+        storageKey: string;
+        name: string;
+        prompt: string;
+        width: number;
+        height: number;
+        sizeBytes: number;
+        metadata: MapMetadataShape;
+    },
+): Promise<string> {
+    const admin = getAdmin();
+    const id = crypto.randomUUID();
+    const { error } = await admin.from('assets').upsert({
+        id,
+        project_id: ctx.projectId,
+        name: params.name,
+        asset_type: 'map',
+        storage_key: params.storageKey,
+        thumbnail_key: null,
+        file_format: 'png',
+        width: params.width,
+        height: params.height,
+        metadata: { map: params.metadata, tags: ['map'] },
+        generation_prompt: params.prompt,
+        generation_model: 'pixellab-map',
+        size_bytes: params.sizeBytes,
+    }, { onConflict: 'id' });
+    if (error) console.error(`[axiom] Map asset registration failed:`, error.message);
+    return id;
+}
+
 function slugify(s: string): string {
     return s.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 30) || 'map';
 }
@@ -307,12 +343,23 @@ registerTool({
                 placements: [],
             };
 
+            const assetId = await registerMapAsset(ctx, {
+                storageKey: composedSk,
+                name: data.prompt.slice(0, 40),
+                prompt: data.prompt,
+                width: gridW * tileSize,
+                height: gridH * tileSize,
+                sizeBytes: composedBuf.byteLength,
+                metadata,
+            });
+
             return {
                 callId: '', success: true,
                 output: {
                     message: `Orthogonal Wang map generated at ${targetPath} (${gridW}×${gridH}, ${wangEntries.length} wang tiles, ~$${totalCost.toFixed(3)})`,
                     path: targetPath,
                     storage_key: composedSk,
+                    asset_id: assetId,
                     width: gridW * tileSize,
                     height: gridH * tileSize,
                     map_metadata: metadata,
@@ -400,14 +447,27 @@ registerTool({
             placements: [],
         };
 
+        const outW = (gridW + gridH) * (tileSize / 2);
+        const outH = (gridW + gridH) * (tileSize / 4) + (isoEntries[0]?.height ?? tileSize * 2);
+        const assetId = await registerMapAsset(ctx, {
+            storageKey: composedSk,
+            name: data.prompt.slice(0, 40),
+            prompt: data.prompt,
+            width: Math.ceil(outW),
+            height: Math.ceil(outH),
+            sizeBytes: composedBuf.byteLength,
+            metadata,
+        });
+
         return {
             callId: '', success: true,
             output: {
                 message: `Isometric map generated at ${targetPath} (${gridW}×${gridH}, ${isoEntries.length} variants, ~$${totalCost.toFixed(3)})`,
                 path: targetPath,
                 storage_key: composedSk,
-                width: (gridW + gridH) * (tileSize / 2),
-                height: (gridW + gridH) * (tileSize / 4) + (isoEntries[0]?.height ?? tileSize * 2),
+                asset_id: assetId,
+                width: outW,
+                height: outH,
                 map_metadata: metadata,
                 cost: totalCost,
             },
