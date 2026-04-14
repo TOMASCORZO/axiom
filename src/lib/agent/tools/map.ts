@@ -89,7 +89,16 @@ async function registerMapAsset(
         generation_model: 'pixellab-map',
         size_bytes: params.sizeBytes,
     }, { onConflict: 'id' });
-    if (error) console.error(`[axiom] Map asset registration failed:`, error.message);
+    if (error) {
+        // Propagate so the agent + UI can see it. The most common cause is an
+        // outdated assets.asset_type CHECK constraint — run migration
+        // `supabase/migrations/006_map_asset_type.sql` against the DB to fix.
+        console.error(`[axiom] Map asset registration failed:`, error.message);
+        throw new Error(
+            `Map generated but could not be registered in the assets table: ${error.message}. ` +
+            `If this mentions asset_type, apply migration 006_map_asset_type.sql.`,
+        );
+    }
     return id;
 }
 

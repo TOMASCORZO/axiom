@@ -84,7 +84,10 @@ CREATE TABLE IF NOT EXISTS public.assets (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     project_id UUID NOT NULL REFERENCES public.projects(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
-    asset_type TEXT NOT NULL CHECK (asset_type IN ('sprite', 'texture', 'model_3d', 'animation', 'audio', 'ui_element', 'sprite_sheet', 'material')),
+    asset_type TEXT NOT NULL CHECK (asset_type IN (
+        'sprite','sprite_sheet','texture','texture_atlas',
+        'model_3d','material','animation','audio','ui_element','font','particle','map'
+    )),
     storage_key TEXT,
     file_format TEXT,
     width INTEGER,
@@ -95,6 +98,15 @@ CREATE TABLE IF NOT EXISTS public.assets (
     metadata JSONB DEFAULT '{}',
     created_at TIMESTAMPTZ DEFAULT now()
 );
+
+-- Re-apply the asset_type CHECK constraint so DBs created by an older
+-- setup.sql (which omitted 'map', 'texture_atlas', 'font', 'particle')
+-- are repaired in place. Safe to run repeatedly.
+ALTER TABLE public.assets DROP CONSTRAINT IF EXISTS assets_asset_type_check;
+ALTER TABLE public.assets ADD CONSTRAINT assets_asset_type_check CHECK (asset_type IN (
+    'sprite','sprite_sheet','texture','texture_atlas',
+    'model_3d','material','animation','audio','ui_element','font','particle','map'
+));
 
 ALTER TABLE public.assets ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Users can CRUD own assets" ON public.assets FOR ALL
