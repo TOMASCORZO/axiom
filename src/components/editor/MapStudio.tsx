@@ -131,7 +131,11 @@ function GenerateMapTab() {
                 setError('Map generation succeeded but returned no metadata — cannot edit');
                 return;
             }
-            const assetId = crypto.randomUUID();
+            // Use the asset_id returned by the server (registerMapAsset inserted
+            // the row under that id). Falling back to a fresh UUID would leave
+            // the client and DB out of sync — save/recompose would target the
+            // wrong row.
+            const assetId = (out.asset_id as string | undefined) ?? crypto.randomUUID();
             const asset: Asset = {
                 id: assetId,
                 project_id: project.id,
