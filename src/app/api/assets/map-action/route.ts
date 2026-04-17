@@ -13,6 +13,7 @@ import type {
     MapObjectPlacement,
     MapIsoTile,
 } from '@/types/asset';
+import { tryParseMapMetadata, sanitizePlacements } from '@/lib/map-schema';
 
 // Longest actions (generate_object, generate_iso_tile, recompose with many
 // buffers to download) can take a while — match /generate route's cap.
@@ -46,6 +47,9 @@ interface RecomposeBody {
     asset_id: string;
     target_path: string;
     metadata: MapMetadataShape;
+    /** The metadata.version the client loaded. Server rejects with 409 if
+     *  the DB row has advanced past this, indicating a concurrent save. */
+    expected_version?: number;
 }
 
 type Body = GenerateObjectBody | GenerateIsoTileBody | RecomposeBody;
@@ -160,7 +164,50 @@ export async function POST(request: NextRequest) {
 
         // ── recompose ────────────────────────────────────────────
         if (body.action === 'recompose') {
-            const meta = body.metadata;
+            // 1a. Runtime-validate the incoming metadata so a malformed
+            //     client payload can't poison the stored JSONB or crash the
+            //     compositor. Strip unknown fields, enforce grid caps.
+            const parsed = tryParseMapMetadata(body.metadata);
+            if (!parsed.ok) {
+                return NextResponse.json(
+                    { success: false, error: `Invalid metadata: ${parsed.error}` },
+                    { status: 400 },
+                );
+            }
+            // 1b. Drop out-of-grid placements before they hit storage.
+            const meta = sanitizePlacements(parsed.value);
+
+            // 1c. Optimistic-concurrency check. The client sends the version
+            //     it loaded; we compare against the row's current version and
+            //     bail with 409 if someone else saved in the meantime. The
+            //     CAS happens on the final UPDATE — this early read just
+            //     surfaces the conflict before we spend 30s recomposing.
+            const adminEarly = getAdminClient();
+            const { data: currentRow, error: readErr } = await adminEarly
+                .from('assets')
+                .select('id, metadata')
+                .eq('id', body.asset_id)
+                .single();
+            if (readErr || !currentRow) {
+                return NextResponse.json(
+                    { success: false, error: `Asset not found: ${body.asset_id}` },
+                    { status: 404 },
+                );
+            }
+            const dbMap = (currentRow.metadata as { map?: MapMetadataShape } | null)?.map;
+            const dbVersion = dbMap?.version ?? 0;
+            const expected = body.expected_version ?? dbVersion;
+            if (dbVersion !== expected) {
+                return NextResponse.json(
+                    {
+                        success: false,
+                        error: `Map was modified elsewhere — reload to continue (db v${dbVersion} vs expected v${expected})`,
+                        conflict: true,
+                        current_version: dbVersion,
+                    },
+                    { status: 409 },
+                );
+            }
 
             // 1. Library object buffers (shared across projections).
             const objectBufferMap = new Map<string, { buffer: Buffer; w: number; h: number }>();
@@ -215,12 +262,37 @@ export async function POST(request: NextRequest) {
                 }
             }
 
+            // Group placements by layer so we can skip invisible/collision
+            // layers, apply per-layer opacity, and draw in z_order. Layers are
+            // already migrated by `ensureLayers` before validation.
+            const layers = meta.layers ?? [];
+            const layerById = new Map(layers.map(l => [l.id, l]));
+            const sortedLayers = [...layers].sort((a, b) => a.z_order - b.z_order);
+            const renderableLayerIds = new Set(
+                sortedLayers
+                    .filter(l => l.visible && l.kind !== 'collision')
+                    .map(l => l.id),
+            );
+            const layerOrderIndex = new Map(sortedLayers.map((l, i) => [l.id, i]));
             const placements = (meta.placements as MapObjectPlacement[])
+                .filter(p => {
+                    const lid = p.layer_id;
+                    // Untagged placements (shouldn't exist after migration but
+                    // defensive) render on the terrain layer by default.
+                    if (!lid) return true;
+                    return renderableLayerIds.has(lid);
+                })
+                .sort((a, b) => {
+                    const ai = layerOrderIndex.get(a.layer_id ?? '') ?? 0;
+                    const bi = layerOrderIndex.get(b.layer_id ?? '') ?? 0;
+                    return ai - bi;
+                })
                 .map(p => {
                     let buf: { buffer: Buffer; w: number; h: number } | undefined;
                     if (p.asset_id) buf = assetBufferMap.get(p.asset_id);
                     else if (p.object_id) buf = objectBufferMap.get(p.object_id);
                     if (!buf) return null;
+                    const layer = p.layer_id ? layerById.get(p.layer_id) : undefined;
                     return {
                         buffer: buf.buffer,
                         gridX: p.grid_x,
@@ -228,6 +300,7 @@ export async function POST(request: NextRequest) {
                         width: buf.w,
                         height: buf.h,
                         zLevel: p.z_level,
+                        opacity: layer?.opacity ?? 1,
                     };
                 })
                 .filter((x): x is NonNullable<typeof x> => x !== null);
@@ -318,21 +391,58 @@ export async function POST(request: NextRequest) {
                 composed,
             );
 
+            // Atomic CAS: only commit if the row's version is still what
+            // we read before recomposing. If another save raced in during
+            // the compose step, this returns 0 rows and we 409. The
+            // uploaded PNG is orphaned but harmless — next save will
+            // overwrite the storage key.
+            //
+            // Legacy maps (created before the version field existed) have
+            // NULL at metadata->map->>version, which won't match any string
+            // filter. For those we skip the JSONB filter on this first save;
+            // after it bootstraps to v1 every subsequent save uses the CAS.
+            const newVersion = expected + 1;
+            const updatedMeta: MapMetadataShape = { ...meta, version: newVersion };
             const admin = getAdminClient();
-            await admin.from('assets')
+            let query = admin
+                .from('assets')
                 .update({
                     storage_key: sk,
                     width: outW,
                     height: outH,
-                    metadata: { map: meta, tags: ['map'] },
+                    metadata: { map: updatedMeta, tags: ['map'] },
                 })
                 .eq('id', body.asset_id);
+            if (dbMap?.version !== undefined) {
+                query = query.eq('metadata->map->>version', String(expected));
+            }
+            const { data: updatedRows, error: updateErr } = await query.select('id');
+
+            if (updateErr) {
+                return NextResponse.json(
+                    { success: false, error: `DB update failed: ${updateErr.message}` },
+                    { status: 500 },
+                );
+            }
+            if (!updatedRows || updatedRows.length === 0) {
+                // Row exists but version advanced between the early read and
+                // this UPDATE — concurrent save won the race.
+                return NextResponse.json(
+                    {
+                        success: false,
+                        error: 'Map was modified during save — reload to continue',
+                        conflict: true,
+                    },
+                    { status: 409 },
+                );
+            }
 
             return NextResponse.json({
                 success: true,
                 storage_key: sk,
                 width: outW,
                 height: outH,
+                version: newVersion,
             });
         }
 

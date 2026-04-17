@@ -65,6 +65,33 @@ export interface MapObjectPlacement {
     grid_y: number;
     /** Isometric only: stack level the placement sits on top of (0 = ground, 1 = on top of 1 block, …). */
     z_level?: number;
+    /** Which layer this placement belongs to. Legacy placements without a
+     *  layer_id are auto-assigned to the base terrain layer on read. */
+    layer_id?: string;
+    /** Optional path (relative to project root) of an Axiom script (.axs) to attach
+     *  to this placement's anchor node when the map is exported to a scene. */
+    script_path?: string;
+}
+
+/** Drawing order + visibility grouping for placements.
+ *   - terrain: the single layer that owns corners/iso_stack. Only one per map.
+ *     Auto-created on the first read of a pre-layers map.
+ *   - decoration: placement-only. Trees, rocks, decals — drawn above terrain.
+ *   - collision: placement-only. Usually invisible at render but still stored
+ *     (client game code can read them to build collision bodies).
+ *   - overlay: placement-only. Fog, UI markers — usually drawn on top of everything. */
+export type LayerKind = 'terrain' | 'decoration' | 'collision' | 'overlay';
+
+export interface MapLayer {
+    id: string;
+    name: string;
+    kind: LayerKind;
+    visible: boolean;
+    locked: boolean;
+    /** 0..1. Applied to every placement in this layer when rendering. */
+    opacity: number;
+    /** Lower = drawn earlier (further back). The terrain layer is always z_order 0. */
+    z_order: number;
 }
 
 export interface TerrainPrompts {
@@ -79,6 +106,12 @@ export interface MapMetadataShape {
     grid_w: number;             // cell columns
     grid_h: number;             // cell rows
     mode: MapMode;
+
+    // Optimistic-concurrency counter. Incremented server-side on every
+    // recompose; the client sends the version it loaded so concurrent saves
+    // don't silently overwrite each other. Older maps persisted before this
+    // field was introduced read back as undefined → server treats as 0.
+    version?: number;
 
     // ── Orthogonal (Wang auto-tiling) ──
     // Corner grid has (grid_h + 1) rows × (grid_w + 1) cols of terrain labels.
@@ -101,6 +134,12 @@ export interface MapMetadataShape {
     // ── Objects (both modes) ──
     objects_library: MapObjectEntry[];
     placements: MapObjectPlacement[];
+
+    // ── Layers ──
+    // Every map has ≥1 layer after migration. The first one is always the
+    // terrain layer (owns corners/iso_stack). Placements reference a layer by
+    // layer_id; missing layer_id → assigned to terrain on read.
+    layers?: MapLayer[];
 }
 
 export type AssetStyle =

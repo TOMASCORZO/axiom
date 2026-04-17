@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { useEditorStore } from '@/lib/store';
 import { useMapEditorStore, type MapTool } from '@/lib/map-store';
 import type { Asset, MapMetadataShape, MapMode, MapProjection, TerrainCorner } from '@/types/asset';
+import { tryParseMapMetadata } from '@/lib/map-schema';
 import {
     Map as MapIcon,
     Wand2,
@@ -22,7 +23,16 @@ import {
     Square,
     Layers,
     Minus,
+    Eye,
+    EyeOff,
+    Lock,
+    Unlock,
+    ArrowUp,
+    ArrowDown,
+    Trash2,
+    Pencil,
 } from 'lucide-react';
+import type { LayerKind } from '@/types/asset';
 
 const GRID_SIZES = [
     { label: '8×8', w: 8, h: 8 },
@@ -96,9 +106,6 @@ function GenerateMapTab() {
         });
 
         try {
-            const abort = new AbortController();
-            const timer = setTimeout(() => abort.abort(), 270_000);
-
             const options: Record<string, unknown> = {
                 projection,
                 tile_size: tileSize,
@@ -120,43 +127,131 @@ function GenerateMapTab() {
                 }
             }
 
-            const res = await fetch('/api/assets/generate', {
+            // Enqueue job — /start returns immediately with a job_id, and the
+            // heavy generation runs on a separate worker invocation. This
+            // avoids Vercel's per-request timeout on slow maps.
+            const startRes = await fetch('/api/assets/generate-map/start', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                signal: abort.signal,
                 body: JSON.stringify({
                     project_id: project.id,
                     prompt: prompt.trim(),
-                    asset_type: 'map',
                     target_path: targetPath,
                     options,
                 }),
             });
-            clearTimeout(timer);
-            const data = await res.json();
-            if (!res.ok || !data.success) {
-                const errMsg = errorMessage(data.error, `Map generation failed (HTTP ${res.status})`);
+            const startData = await startRes.json();
+            if (!startRes.ok || !startData.success || !startData.job_id) {
+                const errMsg = errorMessage(startData.error, `Map generation failed (HTTP ${startRes.status})`);
                 setError(errMsg);
                 addConsoleEntry({ id: crypto.randomUUID(), level: 'error', message: `[Map Studio] Failed: ${errMsg}`, timestamp: new Date().toISOString() });
                 return;
             }
-            const out = data.output as Record<string, unknown>;
-            const metadata = out.map_metadata as MapMetadataShape | undefined;
-            if (!metadata) {
-                setError('Map generation succeeded but returned no metadata — cannot edit');
+            const jobId = startData.job_id as string;
+
+            // Poll /status until done or timeout. Cap at 10 min — well past
+            // any realistic generation, but short enough that hung workers
+            // surface instead of spinning forever.
+            //
+            // Backoff rules:
+            //   - Normal tick: 2s.
+            //   - On transient HTTP error (5xx / network / non-2xx that isn't
+            //     404): double the wait up to 30s so we don't hammer a sick
+            //     status endpoint.
+            //   - After MAX_FAILS consecutive failures, abort with a clear
+            //     error instead of spinning silently for the full 10 min.
+            //   - 404 on a valid job_id means the row was deleted server-side;
+            //     surface immediately rather than retrying.
+            const pollStart = Date.now();
+            const pollTimeoutMs = 10 * 60 * 1000;
+            const baseIntervalMs = 2000;
+            const maxIntervalMs = 30_000;
+            const maxConsecutiveFails = 5;
+
+            let finalStatus: { status: string; result: Record<string, unknown> | null; error: string | null } | null = null;
+            let consecutiveFails = 0;
+            let currentIntervalMs = baseIntervalMs;
+
+            while (Date.now() - pollStart < pollTimeoutMs) {
+                await new Promise(r => setTimeout(r, currentIntervalMs));
+                let sRes: Response;
+                try {
+                    sRes = await fetch(`/api/assets/generate-map/status?job_id=${jobId}`);
+                } catch {
+                    consecutiveFails++;
+                    currentIntervalMs = Math.min(currentIntervalMs * 2, maxIntervalMs);
+                    if (consecutiveFails >= maxConsecutiveFails) {
+                        setError('Lost connection to generation service — please retry');
+                        return;
+                    }
+                    continue;
+                }
+
+                if (sRes.status === 404) {
+                    setError('Generation job disappeared server-side — please retry');
+                    return;
+                }
+                if (!sRes.ok) {
+                    consecutiveFails++;
+                    currentIntervalMs = Math.min(currentIntervalMs * 2, maxIntervalMs);
+                    if (consecutiveFails >= maxConsecutiveFails) {
+                        setError(`Generation service is unhealthy (HTTP ${sRes.status}) — please retry`);
+                        return;
+                    }
+                    continue;
+                }
+
+                consecutiveFails = 0;
+                currentIntervalMs = baseIntervalMs;
+                const sData = await sRes.json();
+                if (sData.status === 'done' || sData.status === 'failed') {
+                    finalStatus = sData;
+                    break;
+                }
+            }
+
+            if (!finalStatus) {
+                setError('Map generation timed out — please try again');
+                addConsoleEntry({ id: crypto.randomUUID(), level: 'error', message: '[Map Studio] Timeout waiting for job', timestamp: new Date().toISOString() });
                 return;
             }
-            // Use the asset_id returned by the server (registerMapAsset inserted
-            // the row under that id). Falling back to a fresh UUID would leave
-            // the client and DB out of sync — save/recompose would target the
-            // wrong row.
-            const assetId = (out.asset_id as string | undefined) ?? crypto.randomUUID();
+            if (finalStatus.status === 'failed') {
+                const errMsg = errorMessage(finalStatus.error, 'Map generation failed');
+                setError(errMsg);
+                addConsoleEntry({ id: crypto.randomUUID(), level: 'error', message: `[Map Studio] Failed: ${errMsg}`, timestamp: new Date().toISOString() });
+                return;
+            }
+
+            const out = (finalStatus.result ?? {}) as Record<string, unknown>;
+
+            // Validate the metadata shape at the network boundary. PixelLab
+            // partial responses or server regressions used to silently produce
+            // a corrupt map that would later crash MapCanvas — catch it here.
+            const parsed = tryParseMapMetadata(out.map_metadata);
+            if (!parsed.ok) {
+                setError(`Map generation returned invalid metadata: ${parsed.error}`);
+                addConsoleEntry({ id: crypto.randomUUID(), level: 'error', message: `[Map Studio] Invalid metadata: ${parsed.error}`, timestamp: new Date().toISOString() });
+                return;
+            }
+            const metadata = parsed.value;
+
+            // asset_id MUST come from the server — registerMapAsset inserted
+            // the row under that id. Inventing a random UUID here (as the old
+            // fallback did) leaves client and DB silently desynchronized:
+            // save/recompose then targets a nonexistent row and every edit
+            // dead-ends. Treat its absence as a hard failure.
+            const assetId = out.asset_id;
+            if (typeof assetId !== 'string' || assetId.length === 0) {
+                setError('Map generation succeeded but the server did not register the asset — please retry');
+                addConsoleEntry({ id: crypto.randomUUID(), level: 'error', message: '[Map Studio] Missing asset_id in generation result', timestamp: new Date().toISOString() });
+                return;
+            }
             const asset: Asset = {
                 id: assetId,
                 project_id: project.id,
                 name: prompt.trim().slice(0, 40),
                 asset_type: 'map',
-                storage_key: (data.storage_key || out.storage_key) as string,
+                storage_key: out.storage_key as string,
                 thumbnail_key: null,
                 file_format: 'png',
                 width: (out.width as number) ?? grid.w * tileSize,
@@ -393,6 +488,203 @@ function GenerateMapTab() {
     );
 }
 
+// ── Layers Panel ────────────────────────────────────────────────────
+
+const LAYER_KIND_COLORS: Record<LayerKind, string> = {
+    terrain: 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20',
+    decoration: 'bg-fuchsia-500/10 text-fuchsia-300 border-fuchsia-500/20',
+    collision: 'bg-red-500/10 text-red-300 border-red-500/20',
+    overlay: 'bg-amber-500/10 text-amber-300 border-amber-500/20',
+};
+
+function LayersPanel() {
+    const meta = useMapEditorStore(s => s.metadata);
+    const activeLayerId = useMapEditorStore(s => s.activeLayerId);
+    const setActiveLayer = useMapEditorStore(s => s.setActiveLayer);
+    const addLayer = useMapEditorStore(s => s.addLayer);
+    const removeLayer = useMapEditorStore(s => s.removeLayer);
+    const renameLayer = useMapEditorStore(s => s.renameLayer);
+    const setLayerVisibility = useMapEditorStore(s => s.setLayerVisibility);
+    const setLayerLocked = useMapEditorStore(s => s.setLayerLocked);
+    const setLayerOpacity = useMapEditorStore(s => s.setLayerOpacity);
+    const moveLayer = useMapEditorStore(s => s.moveLayer);
+    const [renamingId, setRenamingId] = useState<string | null>(null);
+    const [renameDraft, setRenameDraft] = useState('');
+    const [showAddMenu, setShowAddMenu] = useState(false);
+
+    if (!meta) return null;
+    const layers = meta.layers ?? [];
+    // Top of the draw stack renders last, so show highest z_order first for
+    // the familiar Photoshop/Tiled ordering.
+    const sorted = [...layers].sort((a, b) => b.z_order - a.z_order);
+
+    const placementCounts = new Map<string, number>();
+    for (const p of meta.placements) {
+        const id = p.layer_id ?? layers.find(l => l.kind === 'terrain')?.id ?? '';
+        if (id) placementCounts.set(id, (placementCounts.get(id) ?? 0) + 1);
+    }
+
+    const startRename = (id: string, name: string) => {
+        setRenamingId(id);
+        setRenameDraft(name);
+    };
+    const commitRename = () => {
+        if (renamingId && renameDraft.trim()) renameLayer(renamingId, renameDraft.trim());
+        setRenamingId(null);
+    };
+
+    return (
+        <div className="relative">
+            <div className="flex items-center justify-between mb-1">
+                <label className="text-[10px] uppercase tracking-wider text-zinc-500">Layers · {layers.length}</label>
+                <div className="relative">
+                    <button
+                        onClick={() => setShowAddMenu(v => !v)}
+                        className="p-0.5 rounded hover:bg-white/5 text-zinc-400 hover:text-zinc-200 transition-colors"
+                        title="Add layer"
+                    >
+                        <Plus size={12} />
+                    </button>
+                    {showAddMenu && (
+                        <div
+                            className="absolute right-0 top-full mt-1 z-10 bg-zinc-900 border border-white/10 rounded-md shadow-lg min-w-[120px] py-1"
+                            onMouseLeave={() => setShowAddMenu(false)}
+                        >
+                            {(['decoration', 'collision', 'overlay'] as LayerKind[]).map(kind => (
+                                <button
+                                    key={kind}
+                                    onClick={() => {
+                                        addLayer(kind);
+                                        setShowAddMenu(false);
+                                    }}
+                                    className="w-full px-2.5 py-1 text-left text-xs text-zinc-300 hover:bg-white/5 capitalize"
+                                >
+                                    {kind}
+                                </button>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            </div>
+            <div className="flex flex-col gap-0.5 max-h-[220px] overflow-y-auto">
+                {sorted.map(layer => {
+                    const isActive = layer.id === activeLayerId;
+                    const isTerrain = layer.kind === 'terrain';
+                    const count = placementCounts.get(layer.id) ?? 0;
+                    return (
+                        <div
+                            key={layer.id}
+                            onClick={() => setActiveLayer(layer.id)}
+                            className={`group flex items-center gap-1 px-1.5 py-1 rounded border cursor-pointer transition-colors ${
+                                isActive
+                                    ? 'bg-violet-500/15 border-violet-500/40'
+                                    : 'bg-zinc-900/60 border-white/5 hover:border-white/10'
+                            }`}
+                        >
+                            <button
+                                onClick={(e) => { e.stopPropagation(); setLayerVisibility(layer.id, !layer.visible); }}
+                                className="p-0.5 rounded hover:bg-white/5 text-zinc-400 hover:text-zinc-200 transition-colors flex-shrink-0"
+                                title={layer.visible ? 'Hide' : 'Show'}
+                            >
+                                {layer.visible ? <Eye size={11} /> : <EyeOff size={11} className="opacity-50" />}
+                            </button>
+                            <button
+                                onClick={(e) => { e.stopPropagation(); setLayerLocked(layer.id, !layer.locked); }}
+                                className="p-0.5 rounded hover:bg-white/5 text-zinc-400 hover:text-zinc-200 transition-colors flex-shrink-0"
+                                title={layer.locked ? 'Unlock' : 'Lock'}
+                            >
+                                {layer.locked ? <Lock size={11} className="text-amber-400" /> : <Unlock size={11} className="opacity-50" />}
+                            </button>
+                            <div className="flex-1 min-w-0">
+                                {renamingId === layer.id ? (
+                                    <input
+                                        autoFocus
+                                        value={renameDraft}
+                                        onChange={e => setRenameDraft(e.target.value)}
+                                        onBlur={commitRename}
+                                        onKeyDown={e => {
+                                            if (e.key === 'Enter') commitRename();
+                                            if (e.key === 'Escape') setRenamingId(null);
+                                        }}
+                                        onClick={e => e.stopPropagation()}
+                                        className="w-full bg-zinc-800 border border-white/10 rounded px-1 py-0.5 text-[11px] text-zinc-100 focus:outline-none focus:border-violet-500/50"
+                                    />
+                                ) : (
+                                    <div
+                                        className="text-[11px] text-zinc-200 truncate"
+                                        onDoubleClick={(e) => { e.stopPropagation(); startRename(layer.id, layer.name); }}
+                                        title="Double-click to rename"
+                                    >
+                                        {layer.name}
+                                    </div>
+                                )}
+                                <div className="flex items-center gap-1 mt-0.5">
+                                    <span className={`text-[8px] px-1 py-[1px] rounded border ${LAYER_KIND_COLORS[layer.kind]}`}>
+                                        {layer.kind}
+                                    </span>
+                                    <span className="text-[8px] text-zinc-600">{count} placements</span>
+                                </div>
+                            </div>
+                            <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
+                                <button
+                                    onClick={(e) => { e.stopPropagation(); moveLayer(layer.id, 'up'); }}
+                                    className="p-0.5 rounded hover:bg-white/5 text-zinc-400 hover:text-zinc-200"
+                                    title="Move up (draw on top)"
+                                >
+                                    <ArrowUp size={10} />
+                                </button>
+                                <button
+                                    onClick={(e) => { e.stopPropagation(); moveLayer(layer.id, 'down'); }}
+                                    className="p-0.5 rounded hover:bg-white/5 text-zinc-400 hover:text-zinc-200"
+                                    title="Move down"
+                                >
+                                    <ArrowDown size={10} />
+                                </button>
+                                <button
+                                    onClick={(e) => { e.stopPropagation(); startRename(layer.id, layer.name); }}
+                                    className="p-0.5 rounded hover:bg-white/5 text-zinc-400 hover:text-zinc-200"
+                                    title="Rename"
+                                >
+                                    <Pencil size={10} />
+                                </button>
+                                {!isTerrain && (
+                                    <button
+                                        onClick={(e) => { e.stopPropagation(); if (confirm(`Delete layer "${layer.name}"? Its ${count} placements will move to the base layer.`)) removeLayer(layer.id); }}
+                                        className="p-0.5 rounded hover:bg-red-500/10 text-zinc-500 hover:text-red-400"
+                                        title="Delete"
+                                    >
+                                        <Trash2 size={10} />
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+                    );
+                })}
+            </div>
+            {(() => {
+                const activeLayer = layers.find(l => l.id === activeLayerId);
+                if (!activeLayer) return null;
+                return (
+                    <div className="mt-1.5 px-1.5">
+                        <label className="text-[9px] uppercase tracking-wider text-zinc-500 flex items-center justify-between">
+                            <span>Opacity · {activeLayer.name}</span>
+                            <span className="text-zinc-400">{Math.round(activeLayer.opacity * 100)}%</span>
+                        </label>
+                        <input
+                            type="range"
+                            min={0}
+                            max={100}
+                            value={Math.round(activeLayer.opacity * 100)}
+                            onChange={e => setLayerOpacity(activeLayer.id, Number(e.target.value) / 100)}
+                            className="w-full accent-violet-500 mt-0.5"
+                        />
+                    </div>
+                );
+            })()}
+        </div>
+    );
+}
+
 // ── Edit Tab ────────────────────────────────────────────────────────
 
 function EditTab() {
@@ -561,6 +853,9 @@ function EditTab() {
                     >Looping</button>
                 </div>
             </div>
+
+            {/* Layers */}
+            <LayersPanel />
 
             {/* Extend grid */}
             <div>

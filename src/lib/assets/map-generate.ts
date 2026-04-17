@@ -329,8 +329,18 @@ export interface ComposeWangArgs {
     gridH: number;              // cell rows
     corners: TerrainCorner[][]; // (gridH+1) × (gridW+1)
     wangTiles: WangTileLookup[];
-    /** Object placements in cell coordinates. Rendered on top. */
-    placements?: Array<{ buffer: Buffer; gridX: number; gridY: number; width: number; height: number }>;
+    /** Object placements in cell coordinates. Rendered on top, in the order
+     *  provided — the caller is responsible for sorting by layer z_order +
+     *  filtering invisible/collision layers. `opacity` (0..1) multiplies the
+     *  sprite's alpha when < 1. */
+    placements?: Array<{
+        buffer: Buffer;
+        gridX: number;
+        gridY: number;
+        width: number;
+        height: number;
+        opacity?: number;
+    }>;
 }
 
 export async function composeWangMap(args: ComposeWangArgs): Promise<Buffer> {
@@ -363,7 +373,11 @@ export async function composeWangMap(args: ComposeWangArgs): Promise<Buffer> {
     }
 
     for (const p of args.placements ?? []) {
-        const buf = await sharp(p.buffer).resize(p.width, p.height, { fit: 'fill' }).png().toBuffer();
+        let pipe = sharp(p.buffer).resize(p.width, p.height, { fit: 'fill' });
+        if (p.opacity !== undefined && p.opacity < 1) {
+            pipe = pipe.ensureAlpha().linear([1, 1, 1, Math.max(0, p.opacity)], [0, 0, 0, 0]);
+        }
+        const buf = await pipe.png().toBuffer();
         composites.push({ input: buf, left: p.gridX * tileSize, top: p.gridY * tileSize });
     }
 
@@ -409,6 +423,8 @@ export interface ComposeIsoArgs {
         height: number;
         /** Stack level the placement sits on top of (default 0 = ground). */
         zLevel?: number;
+        /** 0..1 alpha multiplier applied when < 1. */
+        opacity?: number;
     }>;
 }
 
@@ -481,7 +497,11 @@ export async function composeIsoMap(args: ComposeIsoArgs): Promise<Buffer> {
         const z = p.zLevel ?? 0;
         const screenX = worldX + offsetX - p.width / 2 + tileSize / 2;
         const screenY = worldY + offsetY - p.height + tileSize / 2 - z * stackStep;
-        const buf = await sharp(p.buffer).resize(p.width, p.height, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } }).png().toBuffer();
+        let pipe = sharp(p.buffer).resize(p.width, p.height, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } });
+        if (p.opacity !== undefined && p.opacity < 1) {
+            pipe = pipe.ensureAlpha().linear([1, 1, 1, Math.max(0, p.opacity)], [0, 0, 0, 0]);
+        }
+        const buf = await pipe.png().toBuffer();
         composites.push({ input: buf, left: Math.round(screenX), top: Math.round(screenY) });
     }
 

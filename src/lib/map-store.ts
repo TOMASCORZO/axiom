@@ -4,9 +4,12 @@ import type {
     MapIsoTile,
     MapObjectEntry,
     MapObjectPlacement,
+    MapLayer,
+    LayerKind,
     MapMode,
     TerrainCorner,
 } from '@/types/asset';
+import { ensureLayers } from '@/lib/map-schema';
 
 // Tools available to the user. Brush meaning depends on projection:
 //   orthogonal → paint a CORNER with the selected terrain label (Wang)
@@ -33,6 +36,7 @@ interface HistoryEntry {
     corners?: TerrainCorner[][];           // ortho
     isoStack?: string[][][];               // iso (stacked)
     placements: MapObjectPlacement[];
+    layers?: MapLayer[];
 }
 
 interface MapEditorState {
@@ -44,6 +48,9 @@ interface MapEditorState {
     selectedTerrain: TerrainCorner;        // ortho
     selectedIsoTileId: string | null;      // iso
     selectedObjectId: string | null;
+    /** Which layer new placements land on. Paint/erase always act on the
+     *  terrain layer regardless of this selection. */
+    activeLayerId: string | null;
     saving: boolean;
     saveError: string | null;
 
@@ -57,6 +64,17 @@ interface MapEditorState {
     selectTerrain: (label: TerrainCorner) => void;
     selectIsoTile: (id: string | null) => void;
     selectObject: (id: string | null) => void;
+    setActiveLayer: (id: string) => void;
+
+    // Layer management
+    addLayer: (kind: LayerKind, name?: string) => string;
+    removeLayer: (id: string) => void;
+    renameLayer: (id: string, name: string) => void;
+    setLayerVisibility: (id: string, visible: boolean) => void;
+    setLayerLocked: (id: string, locked: boolean) => void;
+    setLayerOpacity: (id: string, opacity: number) => void;
+    moveLayer: (id: string, direction: 'up' | 'down') => void;
+    reorderLayer: (id: string, newZOrder: number) => void;
 
     /** Paint one grid coord.
      * - orthogonal: (x, y) are CORNER coordinates (0..grid_w, 0..grid_h).
@@ -115,7 +133,34 @@ function snapshot(meta: MapMetadataShape): HistoryEntry {
         corners: meta.corners ? cloneGrid2D(meta.corners) : undefined,
         isoStack: meta.iso_stack ? cloneStack(meta.iso_stack) : undefined,
         placements: meta.placements.map(p => ({ ...p })),
+        layers: meta.layers ? meta.layers.map(l => ({ ...l })) : undefined,
     };
+}
+
+/** Non-terrain layer with the highest z_order; falls back to terrain if none
+ *  exist. Used to pick a default active layer so new placements don't land on
+ *  the terrain layer by default (which would mix decoration with base tiles). */
+function pickDefaultActiveLayer(layers: MapLayer[]): string {
+    const nonTerrain = layers.filter(l => l.kind !== 'terrain');
+    if (nonTerrain.length > 0) {
+        return nonTerrain.reduce((top, l) => l.z_order > top.z_order ? l : top).id;
+    }
+    return layers[0]!.id;
+}
+
+/** "Decoration 1", "Collision 2", etc — finds the next free numeric suffix so
+ *  repeated adds don't produce duplicate names. */
+function defaultLayerName(kind: LayerKind, existing: MapLayer[]): string {
+    const label = kind.charAt(0).toUpperCase() + kind.slice(1);
+    const prefix = `${label} `;
+    const used = new Set(
+        existing.filter(l => l.name.startsWith(prefix))
+            .map(l => Number(l.name.slice(prefix.length)))
+            .filter(n => Number.isInteger(n) && n > 0),
+    );
+    let i = 1;
+    while (used.has(i)) i++;
+    return `${prefix}${i}`;
 }
 
 export const useMapEditorStore = create<MapEditorState>((set, get) => ({
@@ -126,6 +171,7 @@ export const useMapEditorStore = create<MapEditorState>((set, get) => ({
     selectedTerrain: 'upper',
     selectedIsoTileId: null,
     selectedObjectId: null,
+    activeLayerId: null,
     saving: false,
     saveError: null,
     history: [],
@@ -137,14 +183,17 @@ export const useMapEditorStore = create<MapEditorState>((set, get) => ({
         if (clone.projection === 'isometric') {
             clone.iso_stack = migrateIsoGridToStack(clone);
         }
+        // Guarantee layers exist (covers maps created before this release).
+        const migrated = ensureLayers(clone);
         set({
             assetId,
-            metadata: clone,
+            metadata: migrated,
             dirty: false,
             tool: 'paint',
             selectedTerrain: 'upper',
-            selectedIsoTileId: clone.iso_tiles?.[0]?.id ?? null,
+            selectedIsoTileId: migrated.iso_tiles?.[0]?.id ?? null,
             selectedObjectId: null,
+            activeLayerId: pickDefaultActiveLayer(migrated.layers ?? []),
             history: [],
             redo: [],
             saveError: null,
@@ -155,6 +204,7 @@ export const useMapEditorStore = create<MapEditorState>((set, get) => ({
         assetId: null,
         metadata: null,
         dirty: false,
+        activeLayerId: null,
         history: [],
         redo: [],
         saveError: null,
@@ -177,11 +227,143 @@ export const useMapEditorStore = create<MapEditorState>((set, get) => ({
     selectTerrain: (label) => set({ selectedTerrain: label }),
     selectIsoTile: (id) => set({ selectedIsoTileId: id }),
     selectObject: (id) => set({ selectedObjectId: id }),
+    setActiveLayer: (id) => {
+        const s = get();
+        if (!s.metadata?.layers?.some(l => l.id === id)) return;
+        set({ activeLayerId: id });
+    },
+
+    addLayer: (kind, name) => {
+        const s = get();
+        const meta = s.metadata;
+        if (!meta) return '';
+        // Only one terrain layer is allowed (it owns corners/iso_stack).
+        if (kind === 'terrain') return '';
+        const before = snapshot(meta);
+        const layers = meta.layers ?? [];
+        const nextZ = Math.max(0, ...layers.map(l => l.z_order)) + 1;
+        const defaultName = name ?? defaultLayerName(kind, layers);
+        const newLayer: MapLayer = {
+            id: `layer_${crypto.randomUUID().slice(0, 8)}`,
+            name: defaultName,
+            kind,
+            visible: true,
+            locked: false,
+            opacity: 1,
+            z_order: nextZ,
+        };
+        set({
+            metadata: { ...meta, layers: [...layers, newLayer] },
+            activeLayerId: newLayer.id,
+            history: [...s.history, before].slice(-100),
+            redo: [],
+            dirty: true,
+        });
+        return newLayer.id;
+    },
+
+    removeLayer: (id) => {
+        const s = get();
+        const meta = s.metadata;
+        if (!meta?.layers) return;
+        const layer = meta.layers.find(l => l.id === id);
+        if (!layer) return;
+        // Terrain layer is load-bearing — it owns corners/iso_stack. Blocking
+        // its deletion here keeps the render/save pipeline from having to
+        // gracefully handle its absence.
+        if (layer.kind === 'terrain') return;
+        const before = snapshot(meta);
+        const terrainId = meta.layers.find(l => l.kind === 'terrain')!.id;
+        // Reassign orphan placements to the terrain layer (safer than dropping
+        // them — user can inspect + delete from the placement list).
+        const placements = meta.placements.map(p =>
+            p.layer_id === id ? { ...p, layer_id: terrainId } : p
+        );
+        const layers = meta.layers
+            .filter(l => l.id !== id)
+            .map((l, i) => ({ ...l, z_order: i }));
+        const newActive = s.activeLayerId === id ? pickDefaultActiveLayer(layers) : s.activeLayerId;
+        set({
+            metadata: { ...meta, placements, layers },
+            activeLayerId: newActive,
+            history: [...s.history, before].slice(-100),
+            redo: [],
+            dirty: true,
+        });
+    },
+
+    renameLayer: (id, name) => {
+        const s = get();
+        const meta = s.metadata;
+        if (!meta?.layers) return;
+        const trimmed = name.trim().slice(0, 60);
+        if (!trimmed) return;
+        const layers = meta.layers.map(l => l.id === id ? { ...l, name: trimmed } : l);
+        set({ metadata: { ...meta, layers }, dirty: true });
+    },
+
+    setLayerVisibility: (id, visible) => {
+        const s = get();
+        const meta = s.metadata;
+        if (!meta?.layers) return;
+        const layers = meta.layers.map(l => l.id === id ? { ...l, visible } : l);
+        set({ metadata: { ...meta, layers }, dirty: true });
+    },
+
+    setLayerLocked: (id, locked) => {
+        const s = get();
+        const meta = s.metadata;
+        if (!meta?.layers) return;
+        const layers = meta.layers.map(l => l.id === id ? { ...l, locked } : l);
+        set({ metadata: { ...meta, layers }, dirty: true });
+    },
+
+    setLayerOpacity: (id, opacity) => {
+        const s = get();
+        const meta = s.metadata;
+        if (!meta?.layers) return;
+        const clamped = Math.max(0, Math.min(1, opacity));
+        const layers = meta.layers.map(l => l.id === id ? { ...l, opacity: clamped } : l);
+        set({ metadata: { ...meta, layers }, dirty: true });
+    },
+
+    moveLayer: (id, direction) => {
+        const s = get();
+        const meta = s.metadata;
+        if (!meta?.layers) return;
+        const sorted = [...meta.layers].sort((a, b) => a.z_order - b.z_order);
+        const idx = sorted.findIndex(l => l.id === id);
+        if (idx === -1) return;
+        const swap = direction === 'up' ? idx + 1 : idx - 1;
+        if (swap < 0 || swap >= sorted.length) return;
+        [sorted[idx], sorted[swap]] = [sorted[swap], sorted[idx]];
+        const layers = sorted.map((l, i) => ({ ...l, z_order: i }));
+        set({ metadata: { ...meta, layers }, dirty: true });
+    },
+
+    reorderLayer: (id, newZOrder) => {
+        const s = get();
+        const meta = s.metadata;
+        if (!meta?.layers) return;
+        const sorted = [...meta.layers].sort((a, b) => a.z_order - b.z_order);
+        const from = sorted.findIndex(l => l.id === id);
+        if (from === -1) return;
+        const [moved] = sorted.splice(from, 1);
+        const to = Math.max(0, Math.min(sorted.length, newZOrder));
+        sorted.splice(to, 0, moved);
+        const layers = sorted.map((l, i) => ({ ...l, z_order: i }));
+        set({ metadata: { ...meta, layers }, dirty: true });
+    },
 
     paintAt: (x, y) => {
         const s = get();
         const meta = s.metadata;
         if (!meta) return;
+        // Paint/erase only mutate terrain data (corners / iso_stack base). If
+        // the terrain layer is locked, bail so the UI toggle actually protects
+        // the base terrain from edits.
+        const terrainLayer = meta.layers?.find(l => l.kind === 'terrain');
+        if (terrainLayer?.locked) return;
         const before = snapshot(meta);
 
         if (meta.projection === 'isometric') {
@@ -220,6 +402,8 @@ export const useMapEditorStore = create<MapEditorState>((set, get) => ({
         const s = get();
         const meta = s.metadata;
         if (!meta) return;
+        const terrainLayer = meta.layers?.find(l => l.kind === 'terrain');
+        if (terrainLayer?.locked) return;
         const before = snapshot(meta);
 
         if (meta.projection === 'isometric') {
@@ -257,6 +441,8 @@ export const useMapEditorStore = create<MapEditorState>((set, get) => ({
         if (!meta || meta.projection !== 'isometric') return;
         if (!s.selectedIsoTileId) return;
         if (x < 0 || y < 0 || x >= meta.grid_w || y >= meta.grid_h) return;
+        const terrainLayer = meta.layers?.find(l => l.kind === 'terrain');
+        if (terrainLayer?.locked) return;
         const before = snapshot(meta);
         const stack = cloneStack(meta.iso_stack ?? migrateIsoGridToStack(meta));
         stack[y][x] = [...(stack[y][x] ?? []), s.selectedIsoTileId];
@@ -273,6 +459,8 @@ export const useMapEditorStore = create<MapEditorState>((set, get) => ({
         const meta = s.metadata;
         if (!meta || meta.projection !== 'isometric') return;
         if (x < 0 || y < 0 || x >= meta.grid_w || y >= meta.grid_h) return;
+        const terrainLayer = meta.layers?.find(l => l.kind === 'terrain');
+        if (terrainLayer?.locked) return;
         const before = snapshot(meta);
         const stack = cloneStack(meta.iso_stack ?? migrateIsoGridToStack(meta));
         const cell = stack[y]?.[x] ?? [];
@@ -290,14 +478,28 @@ export const useMapEditorStore = create<MapEditorState>((set, get) => ({
         const s = get();
         const meta = s.metadata;
         if (!meta) return;
+        // Match placeAsset's bounds check: placements outside the grid render
+        // invisibly and corrupt the stored metadata. Fail silently on OOB
+        // clicks — the caller can't distinguish a miss from an intentional
+        // placement, so there's nothing useful to surface.
+        if (x < 0 || y < 0 || x >= meta.grid_w || y >= meta.grid_h) return;
+        // Skip placement on a locked layer so the UI's lock toggle is honoured.
+        const activeLayer = meta.layers?.find(l => l.id === s.activeLayerId);
+        if (activeLayer?.locked) return;
         const before = snapshot(meta);
-        // Default iso z_level: sit on top of whatever stack is at (x,y).
         const zLevel = meta.projection === 'isometric'
             ? (meta.iso_stack?.[y]?.[x]?.length ?? 0)
             : undefined;
         const placements = [
             ...meta.placements,
-            { id: crypto.randomUUID(), object_id: objectId, grid_x: x, grid_y: y, z_level: zLevel },
+            {
+                id: crypto.randomUUID(),
+                object_id: objectId,
+                grid_x: x,
+                grid_y: y,
+                z_level: zLevel,
+                layer_id: s.activeLayerId ?? undefined,
+            },
         ];
         set({
             metadata: { ...meta, placements },
@@ -312,14 +514,22 @@ export const useMapEditorStore = create<MapEditorState>((set, get) => ({
         const meta = s.metadata;
         if (!meta) return;
         if (x < 0 || y < 0 || x >= meta.grid_w || y >= meta.grid_h) return;
+        const activeLayer = meta.layers?.find(l => l.id === s.activeLayerId);
+        if (activeLayer?.locked) return;
         const before = snapshot(meta);
-        // Default iso z_level: sit on top of the cell's current stack.
         const effectiveZ = zLevel ?? (meta.projection === 'isometric'
             ? (meta.iso_stack?.[y]?.[x]?.length ?? 0)
             : undefined);
         const placements = [
             ...meta.placements,
-            { id: crypto.randomUUID(), asset_id: assetId, grid_x: x, grid_y: y, z_level: effectiveZ },
+            {
+                id: crypto.randomUUID(),
+                asset_id: assetId,
+                grid_x: x,
+                grid_y: y,
+                z_level: effectiveZ,
+                layer_id: s.activeLayerId ?? undefined,
+            },
         ];
         set({
             metadata: { ...meta, placements },
@@ -420,6 +630,7 @@ export const useMapEditorStore = create<MapEditorState>((set, get) => ({
         };
         if (last.corners) patch.corners = last.corners;
         if (last.isoStack) patch.iso_stack = last.isoStack;
+        if (last.layers) patch.layers = last.layers;
         set({
             metadata: { ...s.metadata, ...patch },
             history: s.history.slice(0, -1),
@@ -438,6 +649,7 @@ export const useMapEditorStore = create<MapEditorState>((set, get) => ({
         };
         if (next.corners) patch.corners = next.corners;
         if (next.isoStack) patch.iso_stack = next.isoStack;
+        if (next.layers) patch.layers = next.layers;
         set({
             metadata: { ...s.metadata, ...patch },
             history: [...s.history, current],

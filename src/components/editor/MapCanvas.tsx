@@ -209,39 +209,52 @@ export default function MapCanvas() {
                 }
             }
 
-            // Placements in iso: support both object_id (library) and asset_id (Gallery drag).
+            // Placements in iso, grouped by layer so opacity + visibility are
+            // honoured. Within each layer we keep the back-to-front cell order
+            // so stacked sprites still occlude correctly.
             const objLib = new Map(metadata.objects_library.map(o => [o.id, o]));
-            // Back-to-front placement order matches cell order.
-            const sortedPlacements = [...metadata.placements].sort((a, b) => {
-                const da = a.grid_x + a.grid_y;
-                const db = b.grid_x + b.grid_y;
-                if (da !== db) return da - db;
-                return (a.z_level ?? 0) - (b.z_level ?? 0);
-            });
-            for (const p of sortedPlacements) {
-                let storageKey: string | null = null;
-                let w = tileSize;
-                let h = tileSize;
-                if (p.asset_id) {
-                    const a = assetById.get(p.asset_id);
-                    if (!a) continue;
-                    storageKey = a.storage_key;
-                    w = a.width ?? tileSize;
-                    h = a.height ?? tileSize;
-                } else if (p.object_id) {
-                    const obj = objLib.get(p.object_id);
-                    if (!obj) continue;
-                    storageKey = obj.storage_key;
-                    w = obj.width;
-                    h = obj.height;
+            const layers = metadata.layers ?? [];
+            const sortedLayers = [...layers].sort((a, b) => a.z_order - b.z_order)
+                .filter(l => l.visible && l.kind !== 'collision');
+            for (const layer of sortedLayers) {
+                const layerPlacements = metadata.placements
+                    .filter(p => (p.layer_id ?? layer.id) === layer.id
+                        || (layer.kind === 'terrain' && !p.layer_id))
+                    .sort((a, b) => {
+                        const da = a.grid_x + a.grid_y;
+                        const db = b.grid_x + b.grid_y;
+                        if (da !== db) return da - db;
+                        return (a.z_level ?? 0) - (b.z_level ?? 0);
+                    });
+                if (layerPlacements.length === 0) continue;
+                const prevAlpha = ctx.globalAlpha;
+                ctx.globalAlpha = prevAlpha * layer.opacity;
+                for (const p of layerPlacements) {
+                    let storageKey: string | null = null;
+                    let w = tileSize;
+                    let h = tileSize;
+                    if (p.asset_id) {
+                        const a = assetById.get(p.asset_id);
+                        if (!a) continue;
+                        storageKey = a.storage_key;
+                        w = a.width ?? tileSize;
+                        h = a.height ?? tileSize;
+                    } else if (p.object_id) {
+                        const obj = objLib.get(p.object_id);
+                        if (!obj) continue;
+                        storageKey = obj.storage_key;
+                        w = obj.width;
+                        h = obj.height;
+                    }
+                    if (!storageKey) continue;
+                    const anchorX = (p.grid_x - p.grid_y) * halfW + isoOffsetX;
+                    const anchorY = (p.grid_x + p.grid_y) * halfH + isoOffsetY - (p.z_level ?? 0) * stackStep;
+                    const img = imageCache.get(storageKey);
+                    if (img) {
+                        ctx.drawImage(img, anchorX - w / 2, anchorY - (h - tileSize / 2), w, h);
+                    }
                 }
-                if (!storageKey) continue;
-                const anchorX = (p.grid_x - p.grid_y) * halfW + isoOffsetX;
-                const anchorY = (p.grid_x + p.grid_y) * halfH + isoOffsetY - (p.z_level ?? 0) * stackStep;
-                const img = imageCache.get(storageKey);
-                if (img) {
-                    ctx.drawImage(img, anchorX - w / 2, anchorY - (h - tileSize / 2), w, h);
-                }
+                ctx.globalAlpha = prevAlpha;
             }
 
             // Cell-edge overlay — faint diamond outlines at ground level.
@@ -294,30 +307,43 @@ export default function MapCanvas() {
                 }
             }
 
-            // Placements — support both object_id (library) and asset_id (Gallery drag).
+            // Placements, layer-grouped. Same filter + opacity rules as iso.
             const objLib = new Map(metadata.objects_library.map(o => [o.id, o]));
-            for (const p of metadata.placements) {
-                let storageKey: string | null = null;
-                let w = tileSize;
-                let h = tileSize;
-                if (p.asset_id) {
-                    const a = assetById.get(p.asset_id);
-                    if (!a) continue;
-                    storageKey = a.storage_key;
-                    w = a.width ?? tileSize;
-                    h = a.height ?? tileSize;
-                } else if (p.object_id) {
-                    const obj = objLib.get(p.object_id);
-                    if (!obj) continue;
-                    storageKey = obj.storage_key;
-                    w = obj.width;
-                    h = obj.height;
+            const layers = metadata.layers ?? [];
+            const sortedLayers = [...layers].sort((a, b) => a.z_order - b.z_order)
+                .filter(l => l.visible && l.kind !== 'collision');
+            for (const layer of sortedLayers) {
+                const layerPlacements = metadata.placements.filter(p =>
+                    (p.layer_id ?? layer.id) === layer.id
+                    || (layer.kind === 'terrain' && !p.layer_id),
+                );
+                if (layerPlacements.length === 0) continue;
+                const prevAlpha = ctx.globalAlpha;
+                ctx.globalAlpha = prevAlpha * layer.opacity;
+                for (const p of layerPlacements) {
+                    let storageKey: string | null = null;
+                    let w = tileSize;
+                    let h = tileSize;
+                    if (p.asset_id) {
+                        const a = assetById.get(p.asset_id);
+                        if (!a) continue;
+                        storageKey = a.storage_key;
+                        w = a.width ?? tileSize;
+                        h = a.height ?? tileSize;
+                    } else if (p.object_id) {
+                        const obj = objLib.get(p.object_id);
+                        if (!obj) continue;
+                        storageKey = obj.storage_key;
+                        w = obj.width;
+                        h = obj.height;
+                    }
+                    if (!storageKey) continue;
+                    const img = imageCache.get(storageKey);
+                    if (img) {
+                        ctx.drawImage(img, p.grid_x * tileSize, p.grid_y * tileSize, w, h);
+                    }
                 }
-                if (!storageKey) continue;
-                const img = imageCache.get(storageKey);
-                if (img) {
-                    ctx.drawImage(img, p.grid_x * tileSize, p.grid_y * tileSize, w, h);
-                }
+                ctx.globalAlpha = prevAlpha;
             }
 
             // Cell grid overlay
@@ -453,9 +479,15 @@ export default function MapCanvas() {
             // right click: remove topmost placement under cursor.
             const cell = coordsFromEvent(e, 'cell');
             if (!cell || !metadata) return;
+            const lockedLayerIds = new Set(
+                (metadata.layers ?? []).filter(l => l.locked || !l.visible).map(l => l.id),
+            );
             // Iterate in reverse (and highest z first) so we hit the visually topmost placement.
+            // Skip placements on hidden/locked layers — they aren't visible,
+            // so right-clicking through them would be surprising.
             const candidates = [...metadata.placements]
                 .map((p, i) => ({ p, i }))
+                .filter(({ p }) => !(p.layer_id && lockedLayerIds.has(p.layer_id)))
                 .sort((a, b) => ((b.p.z_level ?? 0) - (a.p.z_level ?? 0)) || (b.i - a.i));
             const hit = candidates.find(({ p }) => {
                 let w = tileSize, h = tileSize;
@@ -544,6 +576,9 @@ export default function MapCanvas() {
         useMapEditorStore.getState().setSaveError(null);
         try {
             const targetPath = `assets/maps/${assetId}.png`;
+            // Include the version we loaded so the server can CAS. If the DB
+            // has advanced past this (concurrent save elsewhere) we get 409.
+            const expectedVersion = metadata.version ?? 0;
             const res = await fetch('/api/assets/map-action', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -553,19 +588,31 @@ export default function MapCanvas() {
                     asset_id: assetId,
                     target_path: targetPath,
                     metadata,
+                    expected_version: expectedVersion,
                 }),
             });
             const data = await res.json();
+            if (res.status === 409 || data?.conflict) {
+                useMapEditorStore.getState().setSaveError(
+                    data.error || 'Map was modified elsewhere — reload to continue',
+                );
+                return;
+            }
             if (!res.ok || !data.success) {
                 useMapEditorStore.getState().setSaveError(data.error || `HTTP ${res.status}`);
                 return;
             }
+            // Adopt the new version the server assigned, so subsequent saves
+            // pass the correct expected_version.
+            const newVersion = typeof data.version === 'number' ? data.version : expectedVersion + 1;
+            const newMetadata = { ...metadata, version: newVersion };
+            useMapEditorStore.setState({ metadata: newMetadata });
             useMapEditorStore.getState().markSaved();
             // Update the asset in the editor store so gallery reflects new snapshot
             const editor = useEditorStore.getState();
             const updated = editor.assets.map(a =>
                 a.id === assetId
-                    ? { ...a, storage_key: data.storage_key, width: data.width, height: data.height, metadata: { ...a.metadata, map: metadata } }
+                    ? { ...a, storage_key: data.storage_key, width: data.width, height: data.height, metadata: { ...a.metadata, map: newMetadata } }
                     : a,
             );
             editor.setAssets(updated);

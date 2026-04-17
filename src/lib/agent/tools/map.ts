@@ -71,9 +71,13 @@ async function registerMapAsset(
         sizeBytes: number;
         metadata: MapMetadataShape;
     },
-): Promise<string> {
+): Promise<{ id: string; metadata: MapMetadataShape }> {
     const admin = getAdmin();
     const id = crypto.randomUUID();
+    // Seed version=1 so the optimistic-concurrency CAS in /map-action [recompose]
+    // has a baseline. Maps created before this field existed read back as
+    // undefined → the recompose handler coerces to 0 for the comparison.
+    const metadataWithVersion: MapMetadataShape = { ...params.metadata, version: 1 };
     const { error } = await admin.from('assets').upsert({
         id,
         project_id: ctx.projectId,
@@ -84,7 +88,7 @@ async function registerMapAsset(
         file_format: 'png',
         width: params.width,
         height: params.height,
-        metadata: { map: params.metadata, tags: ['map'] },
+        metadata: { map: metadataWithVersion, tags: ['map'] },
         generation_prompt: params.prompt,
         generation_model: 'pixellab-map',
         size_bytes: params.sizeBytes,
@@ -99,7 +103,7 @@ async function registerMapAsset(
             `If this mentions asset_type, apply migration 006_map_asset_type.sql.`,
         );
     }
-    return id;
+    return { id, metadata: metadataWithVersion };
 }
 
 function slugify(s: string): string {
@@ -352,7 +356,7 @@ registerTool({
                 placements: [],
             };
 
-            const assetId = await registerMapAsset(ctx, {
+            const registered = await registerMapAsset(ctx, {
                 storageKey: composedSk,
                 name: data.prompt.slice(0, 40),
                 prompt: data.prompt,
@@ -368,10 +372,10 @@ registerTool({
                     message: `Orthogonal Wang map generated at ${targetPath} (${gridW}×${gridH}, ${wangEntries.length} wang tiles, ~$${totalCost.toFixed(3)})`,
                     path: targetPath,
                     storage_key: composedSk,
-                    asset_id: assetId,
+                    asset_id: registered.id,
                     width: gridW * tileSize,
                     height: gridH * tileSize,
-                    map_metadata: metadata,
+                    map_metadata: registered.metadata,
                     cost: totalCost,
                 },
                 filesModified: [targetPath],
@@ -466,7 +470,7 @@ registerTool({
         const topOverhang = Math.max(0, renderH - tileSize / 2);
         const outW = Math.ceil((gridW + gridH) * (tileSize / 2) + renderW);
         const outH = Math.ceil((gridW + gridH) * (tileSize / 4) + tileSize / 2 + topOverhang);
-        const assetId = await registerMapAsset(ctx, {
+        const registered = await registerMapAsset(ctx, {
             storageKey: composedSk,
             name: data.prompt.slice(0, 40),
             prompt: data.prompt,
@@ -482,10 +486,10 @@ registerTool({
                 message: `Isometric map generated at ${targetPath} (${gridW}×${gridH}, ${isoEntries.length} variants, ~$${totalCost.toFixed(3)})`,
                 path: targetPath,
                 storage_key: composedSk,
-                asset_id: assetId,
+                asset_id: registered.id,
                 width: outW,
                 height: outH,
-                map_metadata: metadata,
+                map_metadata: registered.metadata,
                 cost: totalCost,
             },
             filesModified: [targetPath],
