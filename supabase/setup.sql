@@ -1,6 +1,9 @@
 -- ============================================================
 -- Axiom Engine — Supabase Setup Script
--- Run this ONCE in Supabase SQL Editor (supabase.com → SQL Editor)
+-- Single source of truth for the schema. Safe to re-run at any time:
+-- every statement is idempotent (IF NOT EXISTS / CREATE OR REPLACE /
+-- DROP+CREATE for constraints and policies).
+-- Apply in Supabase SQL Editor (supabase.com → SQL Editor).
 -- ============================================================
 
 -- ── 1. Profiles ────────────────────────────────────────────────
@@ -16,7 +19,9 @@ CREATE TABLE IF NOT EXISTS public.profiles (
 );
 
 ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Users can read own profile" ON public.profiles;
 CREATE POLICY "Users can read own profile" ON public.profiles FOR SELECT USING (auth.uid() = id);
+DROP POLICY IF EXISTS "Users can update own profile" ON public.profiles;
 CREATE POLICY "Users can update own profile" ON public.profiles FOR UPDATE USING (auth.uid() = id);
 
 -- Auto-create profile on signup
@@ -53,7 +58,9 @@ CREATE TABLE IF NOT EXISTS public.projects (
 );
 
 ALTER TABLE public.projects ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Users can CRUD own projects" ON public.projects;
 CREATE POLICY "Users can CRUD own projects" ON public.projects FOR ALL USING (auth.uid() = owner_id);
+DROP POLICY IF EXISTS "Public projects are readable" ON public.projects;
 CREATE POLICY "Public projects are readable" ON public.projects FOR SELECT USING (is_public = true);
 
 -- ── 3. Project Files ───────────────────────────────────────────
@@ -72,6 +79,7 @@ CREATE TABLE IF NOT EXISTS public.project_files (
 );
 
 ALTER TABLE public.project_files ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Users can CRUD own project files" ON public.project_files;
 CREATE POLICY "Users can CRUD own project files" ON public.project_files FOR ALL
     USING (project_id IN (SELECT id FROM public.projects WHERE owner_id = auth.uid()));
 
@@ -89,6 +97,7 @@ CREATE TABLE IF NOT EXISTS public.assets (
         'model_3d','material','animation','audio','ui_element','font','particle','map'
     )),
     storage_key TEXT,
+    thumbnail_key TEXT,
     file_format TEXT,
     width INTEGER,
     height INTEGER,
@@ -108,7 +117,11 @@ ALTER TABLE public.assets ADD CONSTRAINT assets_asset_type_check CHECK (asset_ty
     'model_3d','material','animation','audio','ui_element','font','particle','map'
 ));
 
+-- DBs provisioned via an earlier setup.sql may be missing thumbnail_key.
+ALTER TABLE public.assets ADD COLUMN IF NOT EXISTS thumbnail_key TEXT;
+
 ALTER TABLE public.assets ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Users can CRUD own assets" ON public.assets;
 CREATE POLICY "Users can CRUD own assets" ON public.assets FOR ALL
     USING (project_id IN (SELECT id FROM public.projects WHERE owner_id = auth.uid()));
 
@@ -130,7 +143,9 @@ CREATE TABLE IF NOT EXISTS public.agent_logs (
 );
 
 ALTER TABLE public.agent_logs ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Users can read own agent logs" ON public.agent_logs;
 CREATE POLICY "Users can read own agent logs" ON public.agent_logs FOR SELECT USING (auth.uid() = user_id);
+DROP POLICY IF EXISTS "Users can insert own agent logs" ON public.agent_logs;
 CREATE POLICY "Users can insert own agent logs" ON public.agent_logs FOR INSERT WITH CHECK (auth.uid() = user_id);
 
 CREATE INDEX IF NOT EXISTS idx_agent_logs_conversation ON public.agent_logs(conversation_id);
@@ -151,10 +166,36 @@ CREATE TABLE IF NOT EXISTS public.builds (
 );
 
 ALTER TABLE public.builds ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Users can CRUD own builds" ON public.builds;
 CREATE POLICY "Users can CRUD own builds" ON public.builds FOR ALL
     USING (project_id IN (SELECT id FROM public.projects WHERE owner_id = auth.uid()));
 
--- ── 7. RPC: Decrement Credits ──────────────────────────────────
+-- ── 7. Map Jobs ────────────────────────────────────────────────
+-- Async queue for long-running map generation. /start inserts a row,
+-- /run fills in result + flips status, client polls /status.
+CREATE TABLE IF NOT EXISTS public.map_jobs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id UUID NOT NULL REFERENCES public.projects(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending','running','done','failed')),
+    params JSONB NOT NULL,
+    result JSONB,
+    error TEXT,
+    started_at TIMESTAMPTZ,
+    finished_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_map_jobs_project ON public.map_jobs(project_id);
+CREATE INDEX IF NOT EXISTS idx_map_jobs_user_status ON public.map_jobs(user_id, status);
+
+ALTER TABLE public.map_jobs ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Project owner access" ON public.map_jobs;
+CREATE POLICY "Project owner access" ON public.map_jobs FOR ALL
+    USING (project_id IN (SELECT id FROM public.projects WHERE owner_id = auth.uid()));
+
+-- ── 8. RPC: Decrement Credits ──────────────────────────────────
 -- Called by the agent API after each interaction
 CREATE OR REPLACE FUNCTION public.decrement_credits(uid UUID, amount INTEGER)
 RETURNS void AS $$
@@ -166,14 +207,28 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
--- ── 8. Storage Bucket ──────────────────────────────────────────
+-- ── 9. Storage Bucket ──────────────────────────────────────────
 -- Run this separately if not auto-created:
 -- Go to Supabase Dashboard → Storage → Create bucket "assets" (public: false)
 
--- ── 9. Realtime ────────────────────────────────────────────────
--- Enable realtime for live collaboration (optional)
-ALTER PUBLICATION supabase_realtime ADD TABLE public.project_files;
-ALTER PUBLICATION supabase_realtime ADD TABLE public.agent_logs;
+-- ── 10. Realtime ───────────────────────────────────────────────
+-- Enable realtime for live collaboration (optional). Guarded so re-runs
+-- don't fail when the tables are already in the publication.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_publication_tables
+        WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'project_files'
+    ) THEN
+        ALTER PUBLICATION supabase_realtime ADD TABLE public.project_files;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_publication_tables
+        WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'agent_logs'
+    ) THEN
+        ALTER PUBLICATION supabase_realtime ADD TABLE public.agent_logs;
+    END IF;
+END $$;
 
 -- ============================================================
 -- DONE! Your Axiom database is ready.
