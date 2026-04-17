@@ -7,6 +7,7 @@
 import './coding';
 import './game';
 import './map';
+import './map-edit';
 import './search';
 import './web';
 import './multiedit';
