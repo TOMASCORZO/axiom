@@ -16,10 +16,19 @@ export type EngineMessage =
     | { type: 'screenshot'; dataUrl: string }
     | { type: 'files-synced' };
 
+/** One entry in a start/sync-files payload. Binary assets (PNG, audio, glb)
+ *  must be sent with `encoding: 'base64'` — the iframe decodes before writing
+ *  to the WASM virtual filesystem. Text files default to 'utf8'. */
+export interface FilePayload {
+    path: string;
+    content: string;
+    encoding?: 'utf8' | 'base64';
+}
+
 export type AppCommand =
-    | { type: 'start'; files: Array<{ path: string; content: string }> }
+    | { type: 'start'; files: FilePayload[] }
     | { type: 'stop' }
-    | { type: 'sync-files'; files: Array<{ path: string; content: string }> }
+    | { type: 'sync-files'; files: FilePayload[] }
     | { type: 'reload-scene' }
     | { type: 'screenshot' };
 
@@ -95,7 +104,7 @@ export class AxiomEngineBridge {
     /**
      * Start the engine with project files.
      */
-    startGame(files: Array<{ path: string; content: string }>): void {
+    startGame(files: FilePayload[]): void {
         this.send({ type: 'start', files });
     }
 
@@ -109,7 +118,7 @@ export class AxiomEngineBridge {
     /**
      * Sync project files to the engine's virtual filesystem.
      */
-    syncFiles(files: Array<{ path: string; content: string }>): void {
+    syncFiles(files: FilePayload[]): void {
         this.send({ type: 'sync-files', files });
     }
 

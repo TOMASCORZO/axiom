@@ -216,6 +216,9 @@ export function translateEngineMessage(message: string): string {
 export interface ProjectFile {
     path: string;
     content: string;
+    /** 'base64' for binary files (PNG, audio, glb). Defaults to 'utf8'.
+     *  Binary content is passed through verbatim — only the path is translated. */
+    encoding?: 'utf8' | 'base64';
 }
 
 /**
@@ -223,8 +226,16 @@ export interface ProjectFile {
  * This is the main entry point — call it right before sending files to the engine.
  */
 export function translateProjectFiles(axiomFiles: ProjectFile[]): ProjectFile[] {
-    return axiomFiles.map((file) => ({
-        path: translatePath(file.path),
-        content: translateContent(file.path, file.content),
-    }));
+    return axiomFiles.map((file) => {
+        if (file.encoding === 'base64') {
+            // Binary: path can still be translated (e.g. .scene → .tscn inside
+            // zipped assets someday), but content is opaque — leave it alone.
+            return { path: translatePath(file.path), content: file.content, encoding: 'base64' };
+        }
+        return {
+            path: translatePath(file.path),
+            content: translateContent(file.path, file.content),
+            encoding: file.encoding,
+        };
+    });
 }

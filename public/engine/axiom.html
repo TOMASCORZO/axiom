@@ -111,8 +111,13 @@
                 sendToParent({ type: 'console', level: 'log', message: `[Axiom] Received ${projectFiles.length} files from editor` });
                 for (const f of projectFiles) {
                     const size = f.content ? f.content.length : 0;
-                    const preview = f.content ? f.content.slice(0, 60).replace(/\n/g, '\\n') : '(empty)';
-                    sendToParent({ type: 'console', level: 'log', message: `[Axiom]   → ${f.path} (${size} chars): ${preview}` });
+                    const enc = f.encoding || 'utf8';
+                    if (enc === 'base64') {
+                        sendToParent({ type: 'console', level: 'log', message: `[Axiom]   → ${f.path} (${size} b64 chars, binary)` });
+                    } else {
+                        const preview = f.content ? f.content.slice(0, 60).replace(/\n/g, '\\n') : '(empty)';
+                        sendToParent({ type: 'console', level: 'log', message: `[Axiom]   → ${f.path} (${size} chars): ${preview}` });
+                    }
                 }
 
                 // Check if axiom.js exists
@@ -175,12 +180,10 @@
                 // Preload project files into the virtual filesystem
                 let preloadedCount = 0;
                 for (const file of projectFiles) {
-                    if (file.content) {
-                        const encoder = new TextEncoder();
-                        const buffer = encoder.encode(file.content);
-                        await engine.preloadFile(buffer.buffer, `/project/${file.path}`);
-                        preloadedCount++;
-                    }
+                    if (!file.content) continue;
+                    const buffer = decodeFileContent(file);
+                    await engine.preloadFile(buffer.buffer, `/project/${file.path}`);
+                    preloadedCount++;
                 }
                 sendToParent({ type: 'console', level: 'log', message: `[Axiom] Preloaded ${preloadedCount}/${projectFiles.length} files to /project/` });
 
@@ -248,13 +251,24 @@
             if (!engine || !engineStarted) return;
 
             for (const file of files) {
-                if (file.content) {
-                    const encoder = new TextEncoder();
-                    const buffer = encoder.encode(file.content);
-                    engine.copyToFS(`/project/${file.path}`, buffer.buffer);
-                }
+                if (!file.content) continue;
+                const buffer = decodeFileContent(file);
+                engine.copyToFS(`/project/${file.path}`, buffer.buffer);
             }
             sendToParent({ type: 'files-synced' });
+        }
+
+        // Text files come through as utf-8 strings; binaries (png, audio, glb)
+        // arrive base64-encoded so they survive the postMessage hop without
+        // being mangled by TextEncoder. Branch on `encoding` per file.
+        function decodeFileContent(file) {
+            if (file.encoding === 'base64') {
+                const binary = atob(file.content);
+                const arr = new Uint8Array(binary.length);
+                for (let i = 0; i < binary.length; i++) arr[i] = binary.charCodeAt(i);
+                return arr;
+            }
+            return new TextEncoder().encode(file.content);
         }
 
         function reloadScene() {

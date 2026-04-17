@@ -7,6 +7,18 @@ import { engineBridge } from '@/lib/engine/bridge';
 import { translateProjectFiles, translateEngineMessage } from '@/lib/engine/translate';
 import { Loader2, Zap } from 'lucide-react';
 
+// Chunked conversion — a single `btoa(String.fromCharCode(...arr))` blows the
+// call-stack on multi-MB PNGs. 32 KB is well under the argument-count limit.
+function arrayBufferToBase64(buf: ArrayBuffer): string {
+    const bytes = new Uint8Array(buf);
+    let binary = '';
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+        binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunk)));
+    }
+    return btoa(binary);
+}
+
 /**
  * Animated canvas fallback — shown when WASM engine is not compiled.
  * Has all the same visual fidelity as before: grid, crosshair, particles when playing.
@@ -229,16 +241,57 @@ function WasmEngine({ isPlaying }: { isPlaying: boolean }) {
     // Start/stop engine based on isPlaying
     useEffect(() => {
         if (isPlaying && engineBridge.isReady && !engineBridge.isRunning) {
-            // Prepare file list: Axiom format → Godot native before sending to WASM
-            const axiomFiles = files
-                .filter((f) => f.text_content != null)
-                .map((f) => ({ path: f.path, content: f.text_content ?? '' }));
-            const godotFiles = translateProjectFiles(axiomFiles);
-            engineBridge.startGame(godotFiles);
+            // Prepare file list: Axiom format → Godot native before sending to WASM.
+            // Binaries are pulled from storage and base64-encoded so PNGs/audio/glb
+            // survive the postMessage hop — without this step `preload("res://…")`
+            // inside scripts would fail at runtime.
+            let cancelled = false;
+            (async () => {
+                const textFiles: Array<{ path: string; content: string; encoding?: 'utf8' | 'base64' }> = files
+                    .filter(f => f.content_type === 'text' && f.text_content != null)
+                    .map(f => ({ path: f.path, content: f.text_content ?? '', encoding: 'utf8' as const }));
+
+                const binaryCandidates = files.filter(f => f.content_type === 'binary' && f.storage_key);
+                const binaryResults = await Promise.all(binaryCandidates.map(async f => {
+                    try {
+                        const res = await fetch(`/api/assets/serve?key=${encodeURIComponent(f.storage_key!)}`);
+                        if (!res.ok) {
+                            addConsoleEntry({
+                                id: crypto.randomUUID(),
+                                level: 'warn',
+                                message: `[Axiom] Could not load binary ${f.path} (HTTP ${res.status})`,
+                                timestamp: new Date().toISOString(),
+                                source: 'engine',
+                            });
+                            return null;
+                        }
+                        const buf = await res.arrayBuffer();
+                        return { path: f.path, content: arrayBufferToBase64(buf), encoding: 'base64' as const };
+                    } catch (err) {
+                        addConsoleEntry({
+                            id: crypto.randomUUID(),
+                            level: 'warn',
+                            message: `[Axiom] Failed to fetch binary ${f.path}: ${err instanceof Error ? err.message : String(err)}`,
+                            timestamp: new Date().toISOString(),
+                            source: 'engine',
+                        });
+                        return null;
+                    }
+                }));
+                if (cancelled) return;
+
+                const axiomFiles = [
+                    ...textFiles,
+                    ...binaryResults.filter((x): x is NonNullable<typeof x> => x !== null),
+                ];
+                const godotFiles = translateProjectFiles(axiomFiles);
+                engineBridge.startGame(godotFiles);
+            })();
+            return () => { cancelled = true; };
         } else if (!isPlaying && engineBridge.isRunning) {
             engineBridge.stopGame();
         }
-    }, [isPlaying, files, engineState]);
+    }, [isPlaying, files, engineState, addConsoleEntry]);
 
     return (
         <div className="relative w-full h-full">
