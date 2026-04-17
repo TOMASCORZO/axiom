@@ -70,10 +70,10 @@ class ClaudeProvider implements ChatProvider {
                         if (block.type === 'text') {
                             content.push({ type: 'text', text: block.text });
                         } else if (block.type === 'tool_result') {
-                            content.push({ 
-                                type: 'tool_result', 
-                                tool_use_id: block.tool_use_id, 
-                                content: block.content,
+                            content.push({
+                                type: 'tool_result',
+                                tool_use_id: block.tool_use_id,
+                                content: block.content as Anthropic.ToolResultBlockParam['content'],
                                 is_error: block.is_error
                             });
                         }
@@ -200,10 +200,16 @@ class OpenAICompatProvider implements ChatProvider {
                         if (block.type === 'text') {
                             msgs.push({ role: 'user', content: block.text });
                         } else if (block.type === 'tool_result') {
+                            // OpenAI's tool role expects a string. If the tool
+                            // emitted multimodal content, keep only the text
+                            // parts + a placeholder for images.
+                            const content = typeof block.content === 'string'
+                                ? block.content
+                                : block.content.map(c => c.type === 'text' ? c.text : '[image omitted for OpenAI]').join('\n');
                             msgs.push({
                                 role: 'tool',
                                 tool_call_id: block.tool_use_id,
-                                content: block.content
+                                content
                             });
                         }
                     }

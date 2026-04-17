@@ -299,6 +299,15 @@ async function executeToolCall(
         rsMsg = rsMsg.slice(0, MAX_TOOL_OUTPUT_LENGTH) + '\n...[truncated]';
     }
 
+    // If the tool emitted multimodal content (e.g. an image), forward it
+    // verbatim and append the stringified output as a trailing text block so
+    // the model still sees numeric metadata.
+    if (!isError && resultPayload?.contentBlocks && Array.isArray(resultPayload.contentBlocks) && resultPayload.contentBlocks.length > 0) {
+        const mm: import('../../../types/agent').ToolResultContentItem[] = [...resultPayload.contentBlocks];
+        if (rsMsg.trim().length > 0) mm.push({ type: 'text', text: rsMsg });
+        return { type: 'tool_result', tool_use_id: tu.id, content: mm, is_error: false };
+    }
+
     return {
         type: 'tool_result',
         tool_use_id: tu.id,

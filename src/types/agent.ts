@@ -27,6 +27,11 @@ export interface ToolFileData {
     content_type: string;
 }
 
+/** Multimodal content item that can appear in a tool_result body. */
+export type ToolResultContentItem =
+    | { type: 'text'; text: string }
+    | { type: 'image'; source: { type: 'base64'; media_type: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'; data: string } };
+
 export interface ToolResult {
     callId?: string;
     success: boolean;
@@ -35,6 +40,12 @@ export interface ToolResult {
     fileContents?: ToolFileData[];
     error?: string;
     duration_ms: number;
+    /**
+     * Optional multimodal body for the tool_result block. If set, the engine
+     * sends these blocks verbatim to the model instead of the stringified
+     * output. Use for tools that return images (e.g. map previews).
+     */
+    contentBlocks?: ToolResultContentItem[];
 }
 
 // ── Agent Log Types ────────────────────────────────────────────────
@@ -100,7 +111,8 @@ export interface ToolUseBlock extends Block {
 export interface ToolResultBlock extends Block {
     type: 'tool_result';
     tool_use_id: string;
-    content: string;
+    /** Accepts a plain string or an array of multimodal content items (text / image). */
+    content: string | ToolResultContentItem[];
     is_error?: boolean;
 }
 

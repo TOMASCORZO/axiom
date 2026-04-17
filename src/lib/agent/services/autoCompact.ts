@@ -22,7 +22,17 @@ export function estimateMessageTokens(messages: Message[]): number {
             } else {
                 for (const block of msg.message.content) {
                     if (block.type === 'text') tokens += roughTokenCount(block.text);
-                    if (block.type === 'tool_result') tokens += roughTokenCount(block.content);
+                    if (block.type === 'tool_result') {
+                        if (typeof block.content === 'string') {
+                            tokens += roughTokenCount(block.content);
+                        } else {
+                            for (const c of block.content) {
+                                if (c.type === 'text') tokens += roughTokenCount(c.text);
+                                // Image tokens can't be derived from base64 length; use ~1200 as a rough upper bound.
+                                else if (c.type === 'image') tokens += 1200;
+                            }
+                        }
+                    }
                 }
             }
         } else if (msg.type === 'assistant') {
