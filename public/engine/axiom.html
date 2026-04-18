@@ -67,10 +67,60 @@
             }
         }
 
+        // ── AxiomInspector wiring ───────────────────────────────────────
+        // The autoload script (addons/axiom/inspector.gd) sets
+        // window.__axiomInspectorCmd to a JavaScriptBridge callback during its
+        // _ready(). We forward protocol commands to it and accept its outbound
+        // events through window.__axiomPostEvent. Until the script registers,
+        // commands queue here so early calls don't get dropped.
+        window.__axiomPendingInspectorCmds = [];
+        window.__axiomPostEvent = function(jsonStr) {
+            try {
+                const msg = JSON.parse(jsonStr);
+                window.parent.postMessage({ source: 'axiom-engine', ...msg }, '*');
+            } catch (err) {
+                sendToParent({ type: 'console', level: 'error', message: '[Axiom] __axiomPostEvent bad JSON: ' + err });
+            }
+        };
+        // Set of types the inspector handles. Anything not in here stays in the
+        // shell-level switch below.
+        const INSPECTOR_CMDS = new Set([
+            'scene-tree', 'node-info', 'raycast',
+            'set-property', 'set-transform',
+            'add-node', 'delete-node', 'select-node',
+        ]);
+        function forwardToInspector(command) {
+            const json = JSON.stringify(command);
+            if (typeof window.__axiomInspectorCmd === 'function') {
+                window.__axiomInspectorCmd(json);
+            } else {
+                window.__axiomPendingInspectorCmds.push(json);
+            }
+        }
+        // Drain the queue once the autoload installs the callback. Poll cheaply
+        // — this only matters for the first second or so after engine start.
+        const __axiomInspectorDrainTimer = setInterval(function() {
+            if (typeof window.__axiomInspectorCmd === 'function') {
+                clearInterval(__axiomInspectorDrainTimer);
+                while (window.__axiomPendingInspectorCmds.length > 0) {
+                    window.__axiomInspectorCmd(window.__axiomPendingInspectorCmds.shift());
+                }
+            }
+        }, 100);
+
         // Listen for commands from parent
         window.addEventListener('message', function(event) {
             const data = event.data;
             if (!data || data.source !== 'axiom-app') return;
+
+            // Protocol commands belong to the inspector autoload.
+            if (INSPECTOR_CMDS.has(data.type)) {
+                // Strip the source field before forwarding — the GDScript
+                // doesn't care, and it reduces JSON size.
+                const { source, ...command } = data;
+                forwardToInspector(command);
+                return;
+            }
 
             switch (data.type) {
                 case 'ping':

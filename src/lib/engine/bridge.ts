@@ -5,6 +5,18 @@
  * This is the single interface between the React app and the WASM runtime.
  */
 
+import type {
+    NodeInspectorData,
+    RaycastHit,
+    SceneNodeSnapshot,
+    Transform,
+    TransformPatch,
+    Vec2,
+    Vec3,
+} from '@/types/engine';
+
+// ── Wire types ─────────────────────────────────────────────────────
+
 export type EngineMessage =
     | { type: 'ready' }
     | { type: 'started' }
@@ -14,7 +26,13 @@ export type EngineMessage =
     | { type: 'console'; level: 'log' | 'warn' | 'error'; message: string }
     | { type: 'error'; message: string }
     | { type: 'screenshot'; dataUrl: string }
-    | { type: 'files-synced' };
+    | { type: 'files-synced' }
+    // Sprint 0 — protocol responses & spontaneous events
+    | { type: 'response'; requestId: string; ok: true; data: unknown }
+    | { type: 'response'; requestId: string; ok: false; error: string }
+    | { type: 'selection-changed'; path: string | null }
+    | { type: 'scene-tree-changed' }
+    | { type: 'node-transform-changed'; path: string; transform: Transform };
 
 /** One entry in a start/sync-files payload. Binary assets (PNG, audio, glb)
  *  must be sent with `encoding: 'base64'` — the iframe decodes before writing
@@ -30,9 +48,28 @@ export type AppCommand =
     | { type: 'stop' }
     | { type: 'sync-files'; files: FilePayload[] }
     | { type: 'reload-scene' }
-    | { type: 'screenshot' };
+    | { type: 'screenshot' }
+    // Sprint 0 — request/response (every request carries a requestId)
+    | { type: 'scene-tree'; requestId: string }
+    | { type: 'node-info'; requestId: string; path: string }
+    | { type: 'raycast'; requestId: string; screenX: number; screenY: number }
+    | { type: 'set-property'; requestId: string; path: string; property: string; value: unknown }
+    | { type: 'set-transform'; requestId: string; path: string; patch: TransformPatch }
+    | { type: 'add-node'; requestId: string; parentPath: string; nodeType: string; nodeName: string }
+    | { type: 'delete-node'; requestId: string; path: string }
+    // Fire-and-forget
+    | { type: 'select-node'; path: string | null };
 
 type MessageHandler = (msg: EngineMessage) => void;
+
+// Requests time out so a dropped engine response doesn't leak the promise forever.
+const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
+
+interface PendingRequest {
+    resolve: (value: unknown) => void;
+    reject: (error: Error) => void;
+    timeoutId: ReturnType<typeof setTimeout>;
+}
 
 export class AxiomEngineBridge {
     private iframe: HTMLIFrameElement | null = null;
@@ -40,6 +77,7 @@ export class AxiomEngineBridge {
     private boundListener: ((event: MessageEvent) => void) | null = null;
     private _isReady = false;
     private _isRunning = false;
+    private pending = new Map<string, PendingRequest>();
 
     /** Whether the engine iframe has loaded and sent its 'ready' message */
     get isReady(): boolean {
@@ -74,6 +112,11 @@ export class AxiomEngineBridge {
             window.removeEventListener('message', this.boundListener);
             this.boundListener = null;
         }
+        for (const pending of this.pending.values()) {
+            clearTimeout(pending.timeoutId);
+            pending.reject(new Error('Bridge disconnected'));
+        }
+        this.pending.clear();
         this.iframe = null;
         this._isReady = false;
         this._isRunning = false;
@@ -102,39 +145,109 @@ export class AxiomEngineBridge {
     }
 
     /**
-     * Start the engine with project files.
+     * Send a request and wait for the engine's matching response.
+     * The engine pairs request and response via `requestId`.
+     *
+     * Typed via the public `getSceneTree`/`getNodeInfo`/etc. wrappers — call
+     * sites should not invoke this directly. The `partial` arg is a plain
+     * object so the union's distributed Omit doesn't fight us.
      */
+    private request<T>(
+        partial: Record<string, unknown> & { type: string },
+        timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+    ): Promise<T> {
+        const requestId = (typeof crypto !== 'undefined' && crypto.randomUUID)
+            ? crypto.randomUUID()
+            : `req_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+
+        return new Promise<T>((resolve, reject) => {
+            const timeoutId = setTimeout(() => {
+                this.pending.delete(requestId);
+                reject(new Error(`Engine request '${partial.type}' timed out after ${timeoutMs}ms`));
+            }, timeoutMs);
+
+            this.pending.set(requestId, {
+                resolve: resolve as (value: unknown) => void,
+                reject,
+                timeoutId,
+            });
+
+            this.send({ ...partial, requestId } as unknown as AppCommand);
+        });
+    }
+
+    // ── Existing fire-and-forget commands ──────────────────────────
+
     startGame(files: FilePayload[]): void {
         this.send({ type: 'start', files });
     }
 
-    /**
-     * Stop the running engine.
-     */
     stopGame(): void {
         this.send({ type: 'stop' });
     }
 
-    /**
-     * Sync project files to the engine's virtual filesystem.
-     */
     syncFiles(files: FilePayload[]): void {
         this.send({ type: 'sync-files', files });
     }
 
-    /**
-     * Request a scene reload.
-     */
     reloadScene(): void {
         this.send({ type: 'reload-scene' });
     }
 
-    /**
-     * Request a screenshot from the engine canvas.
-     */
     requestScreenshot(): void {
         this.send({ type: 'screenshot' });
     }
+
+    // ── Sprint 0 — Protocol API ────────────────────────────────────
+
+    /** Get the full live scene tree from the running engine. */
+    getSceneTree(): Promise<SceneNodeSnapshot> {
+        return this.request<SceneNodeSnapshot>({ type: 'scene-tree' });
+    }
+
+    /** Get the inspector data (properties + script) for a node. */
+    getNodeInfo(path: string): Promise<NodeInspectorData> {
+        return this.request<NodeInspectorData>({ type: 'node-info', path });
+    }
+
+    /** Hit-test a screen-space point against the live scene. */
+    raycast(screenX: number, screenY: number): Promise<RaycastHit[]> {
+        return this.request<RaycastHit[]>({ type: 'raycast', screenX, screenY });
+    }
+
+    /**
+     * Set an arbitrary node property at runtime.
+     * NOTE: Runtime-only — does not persist to the .scene file. Use saveScene()
+     * to flush runtime state back to disk.
+     */
+    setProperty(path: string, property: string, value: unknown): Promise<void> {
+        return this.request<void>({ type: 'set-property', path, property, value });
+    }
+
+    /** Shortcut for setting position/rotation/scale in one call. */
+    setTransform(path: string, patch: TransformPatch): Promise<void> {
+        return this.request<void>({ type: 'set-transform', path, patch });
+    }
+
+    addNode(parentPath: string, nodeType: string, nodeName: string): Promise<{ path: string }> {
+        return this.request<{ path: string }>({
+            type: 'add-node',
+            parentPath,
+            nodeType,
+            nodeName,
+        });
+    }
+
+    deleteNode(path: string): Promise<void> {
+        return this.request<void>({ type: 'delete-node', path });
+    }
+
+    /** Highlight a node visually in the engine viewport. Pass null to clear. */
+    selectNode(path: string | null): void {
+        this.send({ type: 'select-node', path });
+    }
+
+    // ── Internal ───────────────────────────────────────────────────
 
     private handleMessage(event: MessageEvent): void {
         const data = event.data;
@@ -142,12 +255,27 @@ export class AxiomEngineBridge {
 
         const msg = data as EngineMessage;
 
-        // Track state
+        // Track lifecycle state.
         if (msg.type === 'ready') this._isReady = true;
         if (msg.type === 'started') this._isRunning = true;
         if (msg.type === 'stopped') this._isRunning = false;
 
-        // Notify all handlers
+        // Resolve pending request if this is a response.
+        if (msg.type === 'response') {
+            const pending = this.pending.get(msg.requestId);
+            if (pending) {
+                clearTimeout(pending.timeoutId);
+                this.pending.delete(msg.requestId);
+                if (msg.ok) {
+                    pending.resolve(msg.data);
+                } else {
+                    pending.reject(new Error(msg.error));
+                }
+            }
+            // Responses are not fanned out to general handlers — they're 1:1.
+            return;
+        }
+
         for (const handler of this.handlers) {
             handler(msg);
         }
@@ -158,3 +286,6 @@ export class AxiomEngineBridge {
  * Singleton bridge instance for the app.
  */
 export const engineBridge = new AxiomEngineBridge();
+
+// Re-export protocol types as a convenience for consumers.
+export type { Vec2, Vec3 };

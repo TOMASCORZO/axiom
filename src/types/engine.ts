@@ -40,6 +40,93 @@ export interface ConsoleEntry {
     timestamp: string;
 }
 
+// ── Scene Inspection Protocol (Sprint 0) ──────────────────────────
+// Wire types for the bidirectional bridge between React and the engine.
+// Mirror the structures the C++ debugger captures emit.
+
+export interface SceneNodeSnapshot {
+    path: string;
+    name: string;
+    type: string;
+    children: SceneNodeSnapshot[];
+    visible: boolean;
+}
+
+export type NodePropertyType =
+    | 'bool'
+    | 'int'
+    | 'float'
+    | 'string'
+    | 'vector2'
+    | 'vector3'
+    | 'vector4'
+    | 'color'
+    | 'node_path'
+    | 'resource'
+    | 'enum'
+    | 'object';
+
+export type NodePropertyHint =
+    | 'none'
+    | 'range'
+    | 'file'
+    | 'dir'
+    | 'color_no_alpha'
+    | 'enum'
+    | 'multiline'
+    | 'resource_type'
+    | 'layers_2d'
+    | 'layers_3d';
+
+export type NodePropertyUsage = 'editor' | 'default' | 'storage' | 'category' | 'group';
+
+export interface NodeProperty {
+    name: string;
+    type: NodePropertyType;
+    value: unknown;
+    hint?: NodePropertyHint;
+    hintString?: string;
+    usage?: NodePropertyUsage;
+}
+
+export interface NodeInspectorData {
+    path: string;
+    name: string;
+    type: string;
+    properties: NodeProperty[];
+    script: string | null;
+}
+
+export type Vec2 = [number, number];
+export type Vec3 = [number, number, number];
+
+export interface Transform2D {
+    position: Vec2;
+    rotation: number;
+    scale: Vec2;
+}
+
+export interface Transform3D {
+    position: Vec3;
+    rotation: Vec3;
+    scale: Vec3;
+}
+
+export type Transform = Transform2D | Transform3D;
+
+export interface TransformPatch {
+    position?: Vec2 | Vec3;
+    rotation?: number | Vec3;
+    scale?: Vec2 | Vec3;
+}
+
+export interface RaycastHit {
+    path: string;
+    distance: number;
+    position: Vec3;
+    normal?: Vec3;
+}
+
 // ── Build Types ────────────────────────────────────────────────────
 
 export type BuildPlatform = 'web' | 'windows' | 'linux' | 'macos' | 'android';

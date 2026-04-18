@@ -10,7 +10,17 @@
  *   Headers:      [axiom_scene …] → [gd_scene …]   [axiom_resource …] → [gd_resource …]
  *   Node types:   Entity2D → Node2D   Entity3D → Node3D
  *   ExtResource:  path-based → id-based (Godot 4.x format)
+ *
+ * Also injects the AxiomInspector autoload (see runtime/axiom_inspector.ts)
+ * into every project so the React app can talk to the live SceneTree via
+ * the bidirectional bridge.
  */
+
+import {
+    AXIOM_INSPECTOR_AUTOLOAD_NAME,
+    AXIOM_INSPECTOR_GD,
+    AXIOM_INSPECTOR_PATH,
+} from './runtime/axiom_inspector';
 
 // ── Path Translation ──────────────────────────────────────────────
 
@@ -99,7 +109,48 @@ function translateProjectConfig(content: string): string {
     // Translate internal scene path references
     result = result.replace(/\.scene"/g, '.tscn"');
     result = result.replace(/\.axs"/g, '.gd"');
+    // Inject AxiomInspector autoload so the React bridge can talk to the SceneTree
+    result = injectInspectorAutoload(result);
     return result;
+}
+
+/**
+ * Make sure project.godot registers the AxiomInspector autoload.
+ *
+ * Adds:
+ *   [autoload]
+ *   AxiomInspector="*res://addons/axiom/inspector.gd"
+ *
+ * Idempotent — if the section/key already exists with the right value, no-op.
+ * If [autoload] exists with other autoloads, prepend ours to that section.
+ */
+function injectInspectorAutoload(projectIni: string): string {
+    const key = AXIOM_INSPECTOR_AUTOLOAD_NAME;
+    const value = `"*res://${AXIOM_INSPECTOR_PATH}"`;
+    const line = `${key}=${value}`;
+
+    // Already registered with correct value — nothing to do.
+    if (new RegExp(`^${key}\\s*=\\s*"\\*res://${escapeRegExp(AXIOM_INSPECTOR_PATH)}"`, 'm').test(projectIni)) {
+        return projectIni;
+    }
+
+    // Replace an existing AxiomInspector= line that points elsewhere.
+    if (new RegExp(`^${key}\\s*=`, 'm').test(projectIni)) {
+        return projectIni.replace(new RegExp(`^${key}\\s*=.*$`, 'm'), line);
+    }
+
+    // [autoload] section already exists — append our key under it.
+    if (/^\[autoload\]\s*$/m.test(projectIni)) {
+        return projectIni.replace(/^\[autoload\]\s*$/m, `[autoload]\n${line}`);
+    }
+
+    // No [autoload] section — append a new one.
+    const trailingNl = projectIni.endsWith('\n') ? '' : '\n';
+    return `${projectIni}${trailingNl}\n[autoload]\n${line}\n`;
+}
+
+function escapeRegExp(s: string): string {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 /** Translate .scene → .tscn content (Axiom scene → Godot scene) */
@@ -224,9 +275,13 @@ export interface ProjectFile {
 /**
  * Translate an entire set of project files from Axiom format to Godot native.
  * This is the main entry point — call it right before sending files to the engine.
+ *
+ * Also injects the AxiomInspector autoload script so the React bridge can talk
+ * to the live SceneTree. The script is idempotent: re-injecting on every
+ * sync-files call is safe.
  */
 export function translateProjectFiles(axiomFiles: ProjectFile[]): ProjectFile[] {
-    return axiomFiles.map((file) => {
+    const translated: ProjectFile[] = axiomFiles.map((file) => {
         if (file.encoding === 'base64') {
             // Binary: path can still be translated (e.g. .scene → .tscn inside
             // zipped assets someday), but content is opaque — leave it alone.
@@ -238,4 +293,20 @@ export function translateProjectFiles(axiomFiles: ProjectFile[]): ProjectFile[] 
             encoding: file.encoding,
         };
     });
+
+    // Make sure the inspector script is in the project. We always overwrite
+    // so changes to runtime/axiom_inspector.ts pick up on the next sync.
+    const inspectorIdx = translated.findIndex((f) => f.path === AXIOM_INSPECTOR_PATH);
+    const inspectorFile: ProjectFile = {
+        path: AXIOM_INSPECTOR_PATH,
+        content: AXIOM_INSPECTOR_GD,
+        encoding: 'utf8',
+    };
+    if (inspectorIdx >= 0) {
+        translated[inspectorIdx] = inspectorFile;
+    } else {
+        translated.push(inspectorFile);
+    }
+
+    return translated;
 }

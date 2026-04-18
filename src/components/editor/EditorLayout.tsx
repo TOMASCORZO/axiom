@@ -12,6 +12,8 @@ import MapCanvas from './MapCanvas';
 import ConsolePanel from './ConsolePanel';
 import SubsystemsPanel from './SubsystemsPanel';
 import AnimationTimeline from './AnimationTimeline';
+import HierarchyPanel from './HierarchyPanel';
+import InspectorPanel from './InspectorPanel';
 import { useEditorStore } from '@/lib/store';
 
 interface EditorLayoutProps {
@@ -19,8 +21,9 @@ interface EditorLayoutProps {
 }
 
 export default function EditorLayout({ projectId }: EditorLayoutProps) {
-    const { leftPanelWidth, rightPanelWidth, bottomPanelHeight, openFiles, activeRightPanel } = useEditorStore();
+    const { leftPanelWidth, rightPanelWidth, bottomPanelHeight, openFiles, activeRightPanel, selectedNodePath } = useEditorStore();
     const hasOpenFiles = openFiles.length > 0;
+    const showInspector = selectedNodePath !== null && activeRightPanel === 'chat';
 
     return (
         <div className="h-screen w-screen flex flex-col bg-zinc-950 text-white overflow-hidden">
@@ -29,16 +32,21 @@ export default function EditorLayout({ projectId }: EditorLayoutProps) {
 
             {/* Main Content */}
             <div className="flex-1 flex overflow-hidden">
-                {/* Left Panel — File Tree */}
+                {/* Left Panel — File Tree + Scene Hierarchy */}
                 <div
-                    className="flex-shrink-0 border-r border-white/5 overflow-hidden"
+                    className="flex-shrink-0 border-r border-white/5 overflow-hidden flex flex-col"
                     style={{ width: `${leftPanelWidth}px` }}
                 >
-                    <FileTree projectId={projectId} />
+                    <div className="flex-1 overflow-hidden min-h-0" style={{ flex: '1 1 50%' }}>
+                        <FileTree projectId={projectId} />
+                    </div>
+                    <div className="flex-1 overflow-hidden min-h-0 border-t border-white/5" style={{ flex: '1 1 50%' }}>
+                        <HierarchyPanel />
+                    </div>
                 </div>
 
                 {/* Center + Bottom */}
-                <div className="flex-1 flex flex-col overflow-hidden">
+                <div className="flex-1 flex flex-col overflow-hidden relative">
                     {/* Center — Asset Preview / Map Canvas / Code Editor + Viewport */}
                     <div className="flex-1 flex flex-col overflow-hidden">
                         {activeRightPanel === 'maps' ? (
@@ -64,6 +72,13 @@ export default function EditorLayout({ projectId }: EditorLayoutProps) {
                             </div>
                         )}
                     </div>
+
+                    {/* Inspector — floating overlay over the viewport when a node is selected */}
+                    {showInspector && (
+                        <div className="absolute top-0 right-0 bottom-0 w-[320px] border-l border-white/5 shadow-[-8px_0_24px_rgba(0,0,0,0.3)] z-20 bg-zinc-950/95 backdrop-blur-sm">
+                            <InspectorPanel />
+                        </div>
+                    )}
 
                     {/* Bottom — Console + Subsystems / Animation Timeline / hidden for maps */}
                     <div

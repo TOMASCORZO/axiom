@@ -38,6 +38,10 @@ interface EditorState {
     activeBottomTab: 'console' | 'build' | 'errors';
     activeRightPanel: 'chat' | 'assets' | 'maps';
 
+    // Scene inspection (Sprint 1)
+    selectedNodePath: string | null;
+    sceneTreeRevision: number;
+
     // Asset Studio
     assets: Asset[];
     assetGenerating: boolean;
@@ -72,6 +76,8 @@ interface EditorState {
     setBottomPanelHeight: (height: number) => void;
     setActiveBottomTab: (tab: 'console' | 'build' | 'errors') => void;
     setActiveRightPanel: (panel: 'chat' | 'assets' | 'maps') => void;
+    setSelectedNodePath: (path: string | null) => void;
+    bumpSceneTreeRevision: () => void;
     setAssets: (assets: Asset[]) => void;
     addAsset: (asset: Asset) => void;
     removeAsset: (id: string) => void;
@@ -123,6 +129,8 @@ export const useEditorStore = create<EditorState>((set) => ({
     animCurrentFrame: 0,
     animIsPlaying: false,
     animFps: 12,
+    selectedNodePath: null,
+    sceneTreeRevision: 0,
 
     // Actions
     setProject: (project) => set({ project }),
@@ -205,6 +213,8 @@ export const useEditorStore = create<EditorState>((set) => ({
     setBottomPanelHeight: (height) => set({ bottomPanelHeight: height }),
     setActiveBottomTab: (tab) => set({ activeBottomTab: tab }),
     setActiveRightPanel: (panel) => set({ activeRightPanel: panel }),
+    setSelectedNodePath: (path) => set({ selectedNodePath: path }),
+    bumpSceneTreeRevision: () => set((s) => ({ sceneTreeRevision: s.sceneTreeRevision + 1 })),
     setAssets: (assets) => set({ assets }),
     addAsset: (asset) => {
         set((state) => ({ assets: [...state.assets, asset] }));
