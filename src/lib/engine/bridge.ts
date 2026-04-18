@@ -6,6 +6,7 @@
  */
 
 import type {
+    GizmoMode,
     NodeInspectorData,
     RaycastHit,
     SceneNodeSnapshot,
@@ -58,7 +59,8 @@ export type AppCommand =
     | { type: 'add-node'; requestId: string; parentPath: string; nodeType: string; nodeName: string }
     | { type: 'delete-node'; requestId: string; path: string }
     // Fire-and-forget
-    | { type: 'select-node'; path: string | null };
+    | { type: 'select-node'; path: string | null }
+    | { type: 'set-gizmo-mode'; mode: GizmoMode };
 
 type MessageHandler = (msg: EngineMessage) => void;
 
@@ -245,6 +247,11 @@ export class AxiomEngineBridge {
     /** Highlight a node visually in the engine viewport. Pass null to clear. */
     selectNode(path: string | null): void {
         this.send({ type: 'select-node', path });
+    }
+
+    /** Switch the in-engine 3D gizmo tool: translate / rotate / scale / none. */
+    setGizmoMode(mode: GizmoMode): void {
+        this.send({ type: 'set-gizmo-mode', mode });
     }
 
     // ── Internal ───────────────────────────────────────────────────

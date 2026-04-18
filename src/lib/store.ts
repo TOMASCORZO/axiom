@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import type { Project, ProjectFile, FileNode } from '@/types/project';
 import type { ChatMessage, ToolCallDisplay, ConversationSummary } from '@/types/agent';
-import type { ConsoleEntry, EngineLoadProgress } from '@/types/engine';
+import type { ConsoleEntry, EngineLoadProgress, GizmoMode } from '@/types/engine';
 import type { Asset } from '@/types/asset';
 
 // ── Editor Store ───────────────────────────────────────────────────
@@ -42,6 +42,9 @@ interface EditorState {
     selectedNodePath: string | null;
     sceneTreeRevision: number;
 
+    // Gizmos (Sprint 2)
+    gizmoMode: GizmoMode;
+
     // Asset Studio
     assets: Asset[];
     assetGenerating: boolean;
@@ -78,6 +81,7 @@ interface EditorState {
     setActiveRightPanel: (panel: 'chat' | 'assets' | 'maps') => void;
     setSelectedNodePath: (path: string | null) => void;
     bumpSceneTreeRevision: () => void;
+    setGizmoMode: (mode: GizmoMode) => void;
     setAssets: (assets: Asset[]) => void;
     addAsset: (asset: Asset) => void;
     removeAsset: (id: string) => void;
@@ -131,6 +135,7 @@ export const useEditorStore = create<EditorState>((set) => ({
     animFps: 12,
     selectedNodePath: null,
     sceneTreeRevision: 0,
+    gizmoMode: 'translate',
 
     // Actions
     setProject: (project) => set({ project }),
@@ -215,6 +220,7 @@ export const useEditorStore = create<EditorState>((set) => ({
     setActiveRightPanel: (panel) => set({ activeRightPanel: panel }),
     setSelectedNodePath: (path) => set({ selectedNodePath: path }),
     bumpSceneTreeRevision: () => set((s) => ({ sceneTreeRevision: s.sceneTreeRevision + 1 })),
+    setGizmoMode: (mode) => set({ gizmoMode: mode }),
     setAssets: (assets) => set({ assets }),
     addAsset: (asset) => {
         set((state) => ({ assets: [...state.assets, asset] }));

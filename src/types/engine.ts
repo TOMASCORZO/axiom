@@ -127,6 +127,9 @@ export interface RaycastHit {
     normal?: Vec3;
 }
 
+/** 3D gizmo modes mirror the Unity/Godot toolset: translate (W/T), rotate (E/R), scale (S). */
+export type GizmoMode = 'translate' | 'rotate' | 'scale' | 'none';
+
 // ── Build Types ────────────────────────────────────────────────────
 
 export type BuildPlatform = 'web' | 'windows' | 'linux' | 'macos' | 'android';

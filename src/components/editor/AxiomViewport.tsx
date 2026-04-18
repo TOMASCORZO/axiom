@@ -6,6 +6,7 @@ import { checkEngineAvailability, type EngineAvailability } from '@/lib/engine/l
 import { engineBridge } from '@/lib/engine/bridge';
 import { translateProjectFiles, translateEngineMessage } from '@/lib/engine/translate';
 import { Loader2, Zap } from 'lucide-react';
+import GizmoToolbar from './GizmoToolbar';
 
 // Chunked conversion — a single `btoa(String.fromCharCode(...arr))` blows the
 // call-stack on multi-MB PNGs. 32 KB is well under the argument-count limit.
@@ -360,6 +361,9 @@ export default function AxiomViewport() {
             ) : (
                 <FallbackCanvas isPlaying={isPlaying} />
             )}
+
+            {/* Gizmo tool palette — visible only with a 3D node selected */}
+            <GizmoToolbar />
 
             {/* Loading overlay (engine status from store) */}
             {engineStatus !== 'idle' && engineStatus !== 'ready' && engineStatus !== 'error' && (
