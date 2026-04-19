@@ -499,6 +499,34 @@ GRANT EXECUTE ON FUNCTION public.axiom_exec_in_game(UUID, UUID, TEXT, TEXT, TEXT
 GRANT EXECUTE ON FUNCTION public.axiom_list_game_tables(UUID)                TO service_role;
 GRANT EXECUTE ON FUNCTION public.axiom_describe_game_table(UUID, TEXT)       TO service_role;
 
+-- ── 14. Runtime: Game Players (Phase 2) ────────────────────────
+-- One row per (game, player). The same OAuth identity gets a *different*
+-- player_id in each game so player data stays scoped per project — devs
+-- can't trivially correlate users across games. Anonymous players have
+-- provider='anonymous' and provider_user_id = player_id::text.
+CREATE TABLE IF NOT EXISTS public.game_players (
+    player_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    game_id UUID NOT NULL REFERENCES public.projects(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL CHECK (provider IN ('anonymous', 'google', 'discord', 'github')),
+    provider_user_id TEXT NOT NULL,
+    email TEXT,
+    display_name TEXT,
+    avatar_url TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (game_id, provider, provider_user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_game_players_game ON public.game_players(game_id);
+CREATE INDEX IF NOT EXISTS idx_game_players_lookup ON public.game_players(game_id, provider, provider_user_id);
+
+ALTER TABLE public.game_players ENABLE ROW LEVEL SECURITY;
+
+-- Project owner can see all players in their game (for moderation / analytics).
+DROP POLICY IF EXISTS "Project owner reads players" ON public.game_players;
+CREATE POLICY "Project owner reads players" ON public.game_players FOR SELECT
+    USING (game_id IN (SELECT id FROM public.projects WHERE owner_id = auth.uid()));
+
 -- ============================================================
 -- DONE! Your Axiom database is ready.
 -- 
