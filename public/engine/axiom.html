@@ -317,15 +317,16 @@
                 progressFill.style.width = '70%';
                 statusText.textContent = 'Loading project files...';
 
-                // Preload project files into the virtual filesystem
+                // Preload project files into the virtual filesystem at root — Godot
+                // looks for project.godot at the current working dir by default.
                 let preloadedCount = 0;
                 for (const file of projectFiles) {
                     if (!file.content) continue;
                     const buffer = decodeFileContent(file);
-                    await engine.preloadFile(buffer.buffer, `/project/${file.path}`);
+                    await engine.preloadFile(buffer.buffer, `/${file.path}`);
                     preloadedCount++;
                 }
-                sendToParent({ type: 'console', level: 'log', message: `[Axiom] Preloaded ${preloadedCount}/${projectFiles.length} files to /project/` });
+                sendToParent({ type: 'console', level: 'log', message: `[Axiom] Preloaded ${preloadedCount}/${projectFiles.length} files to /` });
 
                 // Check critical file: project.godot
                 const hasProjectFile = projectFiles.some(f => f.path === 'project.godot');
@@ -352,10 +353,10 @@
                 progressFill.style.width = '90%';
                 statusText.textContent = 'Starting game...';
 
-                // Start the engine — only --path, no --main-pack so Godot
-                // reads project.godot + scenes from the virtual filesystem
+                // Start the engine — files are at root of the virtual FS, so no
+                // --path needed. Godot finds project.godot via its cwd.
                 await engine.start({
-                    args: ['--path', '/project'],
+                    args: ['--path', '/'],
                 });
 
                 engineStarted = true;
