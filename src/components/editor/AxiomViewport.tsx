@@ -300,8 +300,8 @@ function WasmEngine({ isPlaying }: { isPlaying: boolean }) {
                 ref={iframeRef}
                 src="/engine/axiom.html"
                 className="w-full h-full border-0"
-                allow="autoplay; fullscreen"
-                sandbox="allow-scripts allow-same-origin"
+                allow="autoplay; fullscreen; cross-origin-isolated"
+                sandbox="allow-scripts allow-same-origin allow-modals allow-popups allow-pointer-lock"
             />
 
             {/* Loading overlay */}
