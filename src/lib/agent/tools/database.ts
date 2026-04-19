@@ -1,0 +1,319 @@
+/**
+ * Database Studio tools — let the agent define and query a per-game schema.
+ *
+ *   - list_game_tables       Tables in this project's schema with row counts.
+ *   - describe_game_table    Columns / types / PK for a single table.
+ *   - create_game_table      Builds a safe CREATE TABLE from a structured
+ *                            column spec (preferred over raw SQL for setup).
+ *   - execute_game_sql       Fallback for anything the structured tools don't
+ *                            cover (joins, conditional updates, etc.). The
+ *                            validator gates dangerous statements.
+ *
+ * All execution funnels through the SECURITY DEFINER RPCs in migration 007,
+ * which pin search_path to the project schema and write an audit row.
+ */
+
+import { registerTool, type ToolContext, type ToolInput } from './registry';
+import {
+    validateSql,
+    runStatement,
+    listGameTables,
+    describeGameTable,
+} from '@/lib/game-db';
+
+// ── Postgres type allowlist ───────────────────────────────────────────
+//
+// We intentionally don't accept arbitrary type strings — the agent could
+// otherwise pass `text CHECK (foo())` and smuggle expressions. The user can
+// drop to execute_game_sql for exotic types.
+const ALLOWED_COL_TYPES: ReadonlySet<string> = new Set([
+    'text', 'varchar',
+    'int', 'integer', 'bigint', 'smallint',
+    'real', 'double precision', 'numeric',
+    'boolean', 'bool',
+    'uuid',
+    'jsonb', 'json',
+    'timestamptz', 'timestamp', 'date', 'time',
+    'bytea',
+]);
+
+const IDENT_RE = /^[a-z_][a-z0-9_]{0,62}$/i;
+
+function quoteIdent(name: string): string {
+    if (!IDENT_RE.test(name)) {
+        throw new Error(`Invalid identifier "${name}" — must match /^[a-z_][a-z0-9_]{0,62}$/i.`);
+    }
+    return `"${name}"`;
+}
+
+interface ColumnSpec {
+    name: string;
+    type: string;
+    nullable?: boolean;
+    primary_key?: boolean;
+    default?: string | number | boolean | null;
+    unique?: boolean;
+}
+
+function buildColumnDef(col: ColumnSpec): string {
+    const ident = quoteIdent(col.name);
+    const type = col.type.toLowerCase().trim();
+    if (!ALLOWED_COL_TYPES.has(type)) {
+        throw new Error(`Column type "${col.type}" not allowed. Allowed: ${Array.from(ALLOWED_COL_TYPES).join(', ')}.`);
+    }
+    const parts = [ident, type];
+    if (col.primary_key) parts.push('PRIMARY KEY');
+    if (col.unique && !col.primary_key) parts.push('UNIQUE');
+    if (col.nullable === false && !col.primary_key) parts.push('NOT NULL');
+    if (col.default !== undefined) {
+        // Whitelist a few safe default forms. Anything else falls through to
+        // a literal — quoted via $$..$$ so the agent can't break out.
+        const d = col.default;
+        if (d === null) parts.push('DEFAULT NULL');
+        else if (typeof d === 'boolean') parts.push(`DEFAULT ${d ? 'TRUE' : 'FALSE'}`);
+        else if (typeof d === 'number' && Number.isFinite(d)) parts.push(`DEFAULT ${d}`);
+        else if (typeof d === 'string') {
+            const lower = d.toLowerCase();
+            if (lower === 'now()' || lower === 'gen_random_uuid()' || lower === 'current_timestamp') {
+                parts.push(`DEFAULT ${lower}`);
+            } else {
+                // Dollar-quote with a random tag the user can't pre-escape.
+                const tag = `dq${Math.random().toString(36).slice(2, 8)}`;
+                parts.push(`DEFAULT $${tag}$${d}$${tag}$`);
+            }
+        }
+    }
+    return parts.join(' ');
+}
+
+// ── list_game_tables ──────────────────────────────────────────────────
+
+registerTool({
+    name: 'list_game_tables',
+    description: 'List all tables in this project\'s game database, with row counts. Use this first to see what\'s already defined before creating new tables.',
+    parameters: {
+        type: 'object',
+        properties: {},
+        required: [],
+    },
+    access: ['build', 'plan', 'explore'],
+    isReadOnly: true,
+    isConcurrencySafe: true,
+    async execute(ctx: ToolContext) {
+        const start = Date.now();
+        try {
+            const tables = await listGameTables(ctx.projectId);
+            return {
+                callId: '', success: true,
+                output: {
+                    table_count: tables.length,
+                    tables,
+                    message: tables.length === 0
+                        ? 'Game database is empty — no tables defined yet.'
+                        : `${tables.length} table(s) in game database.`,
+                },
+                duration_ms: Date.now() - start,
+            };
+        } catch (err) {
+            return {
+                callId: '', success: false,
+                output: {},
+                error: err instanceof Error ? err.message : 'Failed to list tables',
+                duration_ms: Date.now() - start,
+            };
+        }
+    },
+});
+
+// ── describe_game_table ───────────────────────────────────────────────
+
+registerTool({
+    name: 'describe_game_table',
+    description: 'Show the schema of one table in the game database: columns, types, nullability, defaults, primary key. Use before writing INSERT/UPDATE statements.',
+    parameters: {
+        type: 'object',
+        properties: {
+            table_name: { type: 'string', description: 'Table name (without schema prefix).' },
+        },
+        required: ['table_name'],
+    },
+    access: ['build', 'plan', 'explore'],
+    isReadOnly: true,
+    isConcurrencySafe: true,
+    async execute(ctx: ToolContext, input: ToolInput) {
+        const start = Date.now();
+        const tableName = input.table_name as string;
+        try {
+            // Sanity-check the name before round-tripping to Postgres so a bad
+            // call returns a clean error instead of a SQL exception.
+            quoteIdent(tableName);
+            const schema = await describeGameTable(ctx.projectId, tableName);
+            return {
+                callId: '', success: true,
+                output: {
+                    table_name: tableName,
+                    ...schema,
+                    message: `Table "${tableName}" has ${schema.columns.length} column(s).`,
+                },
+                duration_ms: Date.now() - start,
+            };
+        } catch (err) {
+            return {
+                callId: '', success: false,
+                output: {},
+                error: err instanceof Error ? err.message : 'Failed to describe table',
+                duration_ms: Date.now() - start,
+            };
+        }
+    },
+});
+
+// ── create_game_table ─────────────────────────────────────────────────
+
+registerTool({
+    name: 'create_game_table',
+    description: 'Create a new table in the game database. Builds a safe CREATE TABLE from a structured column spec — prefer this over raw SQL for table setup. Each column needs name + type. Optional: nullable (default true), primary_key, unique, default (literal value or one of: now(), gen_random_uuid(), current_timestamp).',
+    parameters: {
+        type: 'object',
+        properties: {
+            name: { type: 'string', description: 'Table name. Lowercase letters, digits, underscore.' },
+            if_not_exists: { type: 'boolean', default: true },
+            columns: {
+                type: 'array',
+                description: 'At least one column. The first column with primary_key=true becomes the PRIMARY KEY.',
+                items: {
+                    type: 'object',
+                    properties: {
+                        name: { type: 'string' },
+                        type: {
+                            type: 'string',
+                            description: 'Postgres type. Allowed: text, varchar, int, integer, bigint, smallint, real, double precision, numeric, boolean, bool, uuid, jsonb, json, timestamptz, timestamp, date, time, bytea.',
+                        },
+                        nullable: { type: 'boolean', default: true },
+                        primary_key: { type: 'boolean', default: false },
+                        unique: { type: 'boolean', default: false },
+                        default: { description: 'Literal default. Use the string "now()" / "gen_random_uuid()" / "current_timestamp" for function defaults.' },
+                    },
+                    required: ['name', 'type'],
+                },
+            },
+        },
+        required: ['name', 'columns'],
+    },
+    access: ['build'],
+    async execute(ctx: ToolContext, input: ToolInput) {
+        const start = Date.now();
+        const tableName = input.name as string;
+        const ifNotExists = input.if_not_exists !== false;
+        const cols = input.columns as ColumnSpec[];
+        try {
+            if (!Array.isArray(cols) || cols.length === 0) {
+                throw new Error('At least one column is required.');
+            }
+            const tableIdent = quoteIdent(tableName);
+            const colDefs = cols.map(buildColumnDef).join(', ');
+            const sql = `CREATE TABLE${ifNotExists ? ' IF NOT EXISTS' : ''} ${tableIdent} (${colDefs})`;
+
+            // Round-trip through the validator — this exercises the same safety
+            // net the user-typed SQL goes through, so create_game_table can
+            // never bypass the global guarantees by accident.
+            const v = validateSql(sql, ctx.projectId);
+            if (!v.ok) throw new Error(`Generated SQL failed validation: ${v.error}`);
+
+            const result = await runStatement(v.statements[0], {
+                projectId: ctx.projectId, userId: ctx.userId, toolName: 'create_game_table',
+            });
+            return {
+                callId: '', success: true,
+                output: {
+                    table: tableName,
+                    sql,
+                    duration_ms: result.duration_ms,
+                    message: `Table "${tableName}" created with ${cols.length} column(s).`,
+                },
+                duration_ms: Date.now() - start,
+            };
+        } catch (err) {
+            return {
+                callId: '', success: false,
+                output: { table: tableName },
+                error: err instanceof Error ? err.message : 'Failed to create table',
+                duration_ms: Date.now() - start,
+            };
+        }
+    },
+});
+
+// ── execute_game_sql ──────────────────────────────────────────────────
+
+registerTool({
+    name: 'execute_game_sql',
+    description: 'Run arbitrary SQL against the project\'s game database. Validator blocks CREATE EXTENSION/FUNCTION/SCHEMA, transactions, COPY, GRANT, references to other schemas, etc. Use for SELECTs with joins, conditional UPDATEs, and any case the structured tools don\'t cover. SELECTs return rows; everything else returns row_count.',
+    parameters: {
+        type: 'object',
+        properties: {
+            sql: {
+                type: 'string',
+                description: 'A single SQL statement (or multiple separated by semicolons — each is validated). No schema prefix needed; search_path is pinned to the project schema.',
+            },
+            limit: {
+                type: 'integer',
+                default: 200,
+                description: 'For queries, cap rows returned to the agent (output truncation). Does NOT add a LIMIT clause to the SQL itself.',
+            },
+        },
+        required: ['sql'],
+    },
+    access: ['build'],
+    async execute(ctx: ToolContext, input: ToolInput) {
+        const start = Date.now();
+        const sql = (input.sql as string).trim();
+        const limit = (input.limit as number) ?? 200;
+        try {
+            const v = validateSql(sql, ctx.projectId);
+            if (!v.ok) {
+                return {
+                    callId: '', success: false,
+                    output: { sql, validation_error: v.error },
+                    error: v.error,
+                    duration_ms: Date.now() - start,
+                };
+            }
+
+            const results: unknown[] = [];
+            for (const stmt of v.statements) {
+                const r = await runStatement(stmt, {
+                    projectId: ctx.projectId, userId: ctx.userId, toolName: 'execute_game_sql',
+                });
+                if (r.kind === 'query') {
+                    results.push({
+                        kind: 'query',
+                        rows: r.rows.slice(0, limit),
+                        truncated: r.rows.length > limit,
+                        row_count: r.row_count,
+                        duration_ms: r.duration_ms,
+                    });
+                } else {
+                    results.push({
+                        kind: r.kind,
+                        row_count: r.row_count,
+                        duration_ms: r.duration_ms,
+                    });
+                }
+            }
+
+            return {
+                callId: '', success: true,
+                output: results.length === 1 ? results[0] : { statement_count: results.length, results },
+                duration_ms: Date.now() - start,
+            };
+        } catch (err) {
+            return {
+                callId: '', success: false,
+                output: { sql },
+                error: err instanceof Error ? err.message : 'SQL execution failed',
+                duration_ms: Date.now() - start,
+            };
+        }
+    },
+});

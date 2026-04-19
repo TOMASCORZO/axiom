@@ -9,6 +9,7 @@ import ChatPanel from '@/components/chat/ChatPanel';
 import AssetStudio from './AssetStudio';
 import MapStudio from './MapStudio';
 import MapCanvas from './MapCanvas';
+import DatabaseStudio from './DatabaseStudio';
 import ConsolePanel from './ConsolePanel';
 import SubsystemsPanel from './SubsystemsPanel';
 import AnimationTimeline from './AnimationTimeline';
@@ -56,6 +57,10 @@ export default function EditorLayout({ projectId }: EditorLayoutProps) {
                         ) : activeRightPanel === 'assets' ? (
                             <div className="flex-1 overflow-hidden">
                                 <AssetPreview />
+                            </div>
+                        ) : activeRightPanel === 'database' ? (
+                            <div className="flex-1 overflow-hidden">
+                                <AxiomViewport />
                             </div>
                         ) : hasOpenFiles ? (
                             <>
@@ -111,6 +116,8 @@ export default function EditorLayout({ projectId }: EditorLayoutProps) {
                         <AssetStudio />
                     ) : activeRightPanel === 'maps' ? (
                         <MapStudio />
+                    ) : activeRightPanel === 'database' ? (
+                        <DatabaseStudio />
                     ) : (
                         <ChatPanel projectId={projectId} />
                     )}

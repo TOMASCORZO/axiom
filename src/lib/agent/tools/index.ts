@@ -20,6 +20,7 @@ import './swarm';
 import './terminal';
 import './sandbox';
 import './integrations';
+import './database';
 
 // Re-export registry API
 export { executeTool, getToolSchemas, getToolsForAgent, getAllTools, type ToolContext, type ToolInput } from './registry';

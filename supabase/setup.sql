@@ -230,6 +230,275 @@ BEGIN
     END IF;
 END $$;
 
+-- ── 11. Database Studio: Schema-per-Game ───────────────────────
+-- Each project gets a dedicated Postgres schema (game_<project_id>) where
+-- the user — via the agent or the SQL Console — defines their game's tables.
+-- All execution is funnelled through SECURITY DEFINER RPCs so the API never
+-- runs raw SQL with the service role: each RPC pins search_path to the project
+-- schema, sets a 5s statement timeout, and writes an audit row.
+--
+-- Portability: no Supabase-specific features; replays cleanly on vanilla PG.
+
+-- Source of truth for migrations applied to each game schema. Replaying these
+-- rows on a fresh Postgres reconstructs the user's database exactly.
+CREATE TABLE IF NOT EXISTS public.game_schemas (
+    project_id UUID NOT NULL REFERENCES public.projects(id) ON DELETE CASCADE,
+    version INT NOT NULL,
+    sql_up TEXT NOT NULL,
+    description TEXT,
+    applied_by UUID,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (project_id, version)
+);
+
+-- Audit log: every statement executed against a game schema (UI, agent, rows
+-- endpoint). Single chokepoint for debugging + abuse detection.
+CREATE TABLE IF NOT EXISTS public.database_audit (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id UUID NOT NULL REFERENCES public.projects(id) ON DELETE CASCADE,
+    user_id UUID,
+    tool_name TEXT,
+    statement TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('query','exec','ddl','error')),
+    success BOOLEAN NOT NULL,
+    row_count INT,
+    duration_ms INT,
+    error TEXT,
+    executed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_database_audit_project
+    ON public.database_audit(project_id, executed_at DESC);
+
+ALTER TABLE public.game_schemas ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.database_audit ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Project owner access" ON public.game_schemas;
+CREATE POLICY "Project owner access" ON public.game_schemas FOR ALL
+    USING (project_id IN (SELECT id FROM public.projects WHERE owner_id = auth.uid()));
+
+DROP POLICY IF EXISTS "Project owner access" ON public.database_audit;
+CREATE POLICY "Project owner access" ON public.database_audit FOR ALL
+    USING (project_id IN (SELECT id FROM public.projects WHERE owner_id = auth.uid()));
+
+-- Deterministic schema name. Postgres identifiers can't contain hyphens
+-- unquoted, so we strip them. Result is always 'game_<32 hex chars>'.
+CREATE OR REPLACE FUNCTION public.axiom_game_schema(p_project_id UUID)
+RETURNS TEXT
+LANGUAGE SQL IMMUTABLE
+AS $func$
+    SELECT 'game_' || replace(p_project_id::text, '-', '_')
+$func$;
+
+-- Lazily provision the project schema. Every executor calls this so the agent
+-- never needs a separate "init" step before its first CREATE TABLE.
+CREATE OR REPLACE FUNCTION public.axiom_ensure_game_schema(p_project_id UUID)
+RETURNS TEXT
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $func$
+DECLARE
+    v_schema TEXT := public.axiom_game_schema(p_project_id);
+BEGIN
+    EXECUTE format('CREATE SCHEMA IF NOT EXISTS %I', v_schema);
+    RETURN v_schema;
+END;
+$func$;
+
+-- ── 12. Database Studio: Executors ─────────────────────────────
+-- Two RPCs because Postgres can't know in advance whether arbitrary text is a
+-- SELECT (returns rows) vs DDL/DML (returns row count). The API parses the
+-- SQL with pgsql-ast-parser and routes to the correct one.
+--
+-- Both functions:
+--   * Pin search_path to the project schema (no leakage to public/auth/etc.)
+--   * Apply a 5s statement timeout
+--   * Write an audit row in every code path (success and error)
+--   * Are SECURITY DEFINER so they run elevated. The validator at
+--     src/lib/game-db/validator.ts is what keeps this safe.
+
+-- Run a SELECT (or any rows-returning statement) and return rows as JSONB.
+-- FOR-RECORD-IN-EXECUTE is the only pattern that's robust against PL/pgSQL's
+-- plan-cache quirks for dynamic SQL inside SECURITY DEFINER + dynamic
+-- search_path. No temp tables, no EXECUTE … INTO scalar.
+CREATE OR REPLACE FUNCTION public.axiom_query_in_game(
+    p_project_id UUID,
+    p_user_id UUID,
+    p_tool_name TEXT,
+    p_sql TEXT
+) RETURNS JSONB
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $func$
+DECLARE
+    v_schema   TEXT := public.axiom_game_schema(p_project_id);
+    v_start    TIMESTAMPTZ := clock_timestamp();
+    v_arr      JSONB := '[]'::jsonb;
+    v_row      RECORD;
+    v_count    INT := 0;
+    v_duration INT;
+BEGIN
+    PERFORM public.axiom_ensure_game_schema(p_project_id);
+
+    EXECUTE 'SET LOCAL statement_timeout = ''5s''';
+    EXECUTE format('SET LOCAL search_path = %I, public, pg_temp', v_schema);
+
+    FOR v_row IN EXECUTE p_sql LOOP
+        v_arr := v_arr || jsonb_build_array(to_jsonb(v_row));
+        v_count := v_count + 1;
+    END LOOP;
+
+    v_duration := extract(milliseconds FROM clock_timestamp() - v_start)::int;
+
+    INSERT INTO public.database_audit
+        (project_id, user_id, tool_name, statement, kind, success, row_count, duration_ms)
+    VALUES
+        (p_project_id, p_user_id, p_tool_name, p_sql, 'query', true, v_count, v_duration);
+
+    RETURN jsonb_build_object(
+        'kind', 'query',
+        'rows', v_arr,
+        'row_count', v_count,
+        'duration_ms', v_duration
+    );
+EXCEPTION WHEN OTHERS THEN
+    v_duration := extract(milliseconds FROM clock_timestamp() - v_start)::int;
+    INSERT INTO public.database_audit
+        (project_id, user_id, tool_name, statement, kind, success, duration_ms, error)
+    VALUES
+        (p_project_id, p_user_id, p_tool_name, p_sql, 'error', false, v_duration, SQLERRM);
+    RAISE;
+END;
+$func$;
+
+-- Run a non-rows statement (CREATE TABLE, INSERT/UPDATE/DELETE without
+-- RETURNING, etc.) and return the affected row count.
+CREATE OR REPLACE FUNCTION public.axiom_exec_in_game(
+    p_project_id UUID,
+    p_user_id UUID,
+    p_tool_name TEXT,
+    p_sql TEXT,
+    p_kind TEXT DEFAULT 'exec'
+) RETURNS JSONB
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $func$
+DECLARE
+    v_schema   TEXT := public.axiom_game_schema(p_project_id);
+    v_start    TIMESTAMPTZ := clock_timestamp();
+    v_count    INT;
+    v_duration INT;
+BEGIN
+    PERFORM public.axiom_ensure_game_schema(p_project_id);
+
+    EXECUTE 'SET LOCAL statement_timeout = ''5s''';
+    EXECUTE format('SET LOCAL search_path = %I, public, pg_temp', v_schema);
+
+    EXECUTE p_sql;
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+    v_duration := extract(milliseconds FROM clock_timestamp() - v_start)::int;
+
+    INSERT INTO public.database_audit
+        (project_id, user_id, tool_name, statement, kind, success, row_count, duration_ms)
+    VALUES
+        (p_project_id, p_user_id, p_tool_name, p_sql, p_kind, true, v_count, v_duration);
+
+    RETURN jsonb_build_object(
+        'kind', p_kind,
+        'row_count', v_count,
+        'duration_ms', v_duration
+    );
+EXCEPTION WHEN OTHERS THEN
+    v_duration := extract(milliseconds FROM clock_timestamp() - v_start)::int;
+    INSERT INTO public.database_audit
+        (project_id, user_id, tool_name, statement, kind, success, duration_ms, error)
+    VALUES
+        (p_project_id, p_user_id, p_tool_name, p_sql, 'error', false, v_duration, SQLERRM);
+    RAISE;
+END;
+$func$;
+
+-- ── 13. Database Studio: Introspection + Grants ────────────────
+
+-- List tables in the game schema with row counts. Saves the UI from rolling
+-- its own information_schema joins on every load.
+-- Uses RETURN (subquery) — no SELECT INTO, which has shown plan-cache issues
+-- under SECURITY DEFINER + dynamic search_path on this PG instance.
+CREATE OR REPLACE FUNCTION public.axiom_list_game_tables(p_project_id UUID)
+RETURNS JSONB
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $func$
+DECLARE
+    v_schema TEXT := public.axiom_game_schema(p_project_id);
+BEGIN
+    PERFORM public.axiom_ensure_game_schema(p_project_id);
+    RETURN (
+        SELECT coalesce(jsonb_agg(jsonb_build_object(
+            'name', t.table_name,
+            'row_count', (
+                SELECT n_live_tup FROM pg_stat_user_tables
+                WHERE schemaname = v_schema AND relname = t.table_name
+            )
+        )), '[]'::jsonb)
+        FROM information_schema.tables t
+        WHERE t.table_schema = v_schema AND t.table_type = 'BASE TABLE'
+    );
+END;
+$func$;
+
+-- Describe a single table: columns, types, nullability, defaults, primary key.
+CREATE OR REPLACE FUNCTION public.axiom_describe_game_table(
+    p_project_id UUID,
+    p_table_name TEXT
+) RETURNS JSONB
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $func$
+DECLARE
+    v_schema TEXT := public.axiom_game_schema(p_project_id);
+BEGIN
+    PERFORM public.axiom_ensure_game_schema(p_project_id);
+    RETURN jsonb_build_object(
+        'columns', (
+            SELECT coalesce(jsonb_agg(jsonb_build_object(
+                'name', column_name,
+                'type', data_type,
+                'nullable', is_nullable = 'YES',
+                'default', column_default
+            ) ORDER BY ordinal_position), '[]'::jsonb)
+            FROM information_schema.columns
+            WHERE table_schema = v_schema AND table_name = p_table_name
+        ),
+        'primary_key', (
+            SELECT coalesce(jsonb_agg(kcu.column_name), '[]'::jsonb)
+            FROM information_schema.table_constraints tc
+            JOIN information_schema.key_column_usage kcu
+                ON tc.constraint_name = kcu.constraint_name
+               AND tc.table_schema = kcu.table_schema
+            WHERE tc.table_schema = v_schema
+              AND tc.table_name = p_table_name
+              AND tc.constraint_type = 'PRIMARY KEY'
+        )
+    );
+END;
+$func$;
+
+-- Only the service role (used by the Axiom API) can call these RPCs. Anonymous
+-- and authenticated PostgREST roles must NOT touch them — players talk to
+-- Axiom's HTTP layer, never directly to PostgREST against game schemas.
+REVOKE ALL ON FUNCTION public.axiom_ensure_game_schema(UUID)              FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.axiom_query_in_game(UUID, UUID, TEXT, TEXT) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.axiom_exec_in_game(UUID, UUID, TEXT, TEXT, TEXT) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.axiom_list_game_tables(UUID)                FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.axiom_describe_game_table(UUID, TEXT)       FROM PUBLIC, anon, authenticated;
+
+GRANT EXECUTE ON FUNCTION public.axiom_ensure_game_schema(UUID)              TO service_role;
+GRANT EXECUTE ON FUNCTION public.axiom_query_in_game(UUID, UUID, TEXT, TEXT) TO service_role;
+GRANT EXECUTE ON FUNCTION public.axiom_exec_in_game(UUID, UUID, TEXT, TEXT, TEXT) TO service_role;
+GRANT EXECUTE ON FUNCTION public.axiom_list_game_tables(UUID)                TO service_role;
+GRANT EXECUTE ON FUNCTION public.axiom_describe_game_table(UUID, TEXT)       TO service_role;
+
 -- ============================================================
 -- DONE! Your Axiom database is ready.
 -- 

@@ -36,7 +36,7 @@ interface EditorState {
     rightPanelWidth: number;
     bottomPanelHeight: number;
     activeBottomTab: 'console' | 'build' | 'errors';
-    activeRightPanel: 'chat' | 'assets' | 'maps';
+    activeRightPanel: 'chat' | 'assets' | 'maps' | 'database';
 
     // Scene inspection (Sprint 1)
     selectedNodePath: string | null;
@@ -78,7 +78,7 @@ interface EditorState {
     setPanelWidth: (panel: 'left' | 'right', width: number) => void;
     setBottomPanelHeight: (height: number) => void;
     setActiveBottomTab: (tab: 'console' | 'build' | 'errors') => void;
-    setActiveRightPanel: (panel: 'chat' | 'assets' | 'maps') => void;
+    setActiveRightPanel: (panel: 'chat' | 'assets' | 'maps' | 'database') => void;
     setSelectedNodePath: (path: string | null) => void;
     bumpSceneTreeRevision: () => void;
     setGizmoMode: (mode: GizmoMode) => void;

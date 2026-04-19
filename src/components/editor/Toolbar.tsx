@@ -15,6 +15,7 @@ import {
     ArrowLeft,
     ImageIcon,
     Map as MapIcon,
+    Database as DatabaseIcon,
 } from 'lucide-react';
 
 export default function Toolbar() {
@@ -156,6 +157,17 @@ export default function Toolbar() {
                     title="Map Studio"
                 >
                     <MapIcon size={15} />
+                </button>
+                <button
+                    onClick={() => setActiveRightPanel(activeRightPanel === 'database' ? 'chat' : 'database')}
+                    className={`p-2 rounded-lg transition-all ${
+                        activeRightPanel === 'database'
+                            ? 'bg-cyan-500/20 text-cyan-400 hover:bg-cyan-500/30'
+                            : 'text-zinc-500 hover:text-zinc-300 hover:bg-white/5'
+                    }`}
+                    title="Database Studio"
+                >
+                    <DatabaseIcon size={15} />
                 </button>
             </div>
 
