@@ -6,28 +6,109 @@
     <title>Axiom Engine Runtime</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a0f; }
+        html, body {
+            width: 100%; height: 100%; overflow: hidden;
+            background: #0a0a0f;
+            font-family: 'Geist', 'Inter', -apple-system, system-ui, sans-serif;
+            color: #ededed;
+        }
         canvas { display: block; width: 100%; height: 100%; }
-        #status {
-            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-            color: #a78bfa; font-family: 'Inter', system-ui, sans-serif; font-size: 14px;
+
+        #splash {
+            position: absolute; inset: 0;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            background:
+                radial-gradient(ellipse 80% 50% at 50% -20%, rgba(139, 92, 246, 0.25), transparent),
+                radial-gradient(ellipse 60% 40% at 50% 120%, rgba(217, 70, 239, 0.18), transparent),
+                #0a0a0f;
+            gap: 28px;
+            padding: 24px;
             text-align: center;
+            transition: opacity 0.4s ease;
+        }
+        #splash::before {
+            content: '';
+            position: absolute; inset: 0;
+            background-image:
+                linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px);
+            background-size: 48px 48px;
+            mask-image: radial-gradient(ellipse 60% 50% at 50% 50%, black 20%, transparent 70%);
+            pointer-events: none;
+        }
+        #splash-title {
+            position: relative;
+            font-size: clamp(40px, 8vw, 88px);
+            font-weight: 700;
+            letter-spacing: -0.04em;
+            background: linear-gradient(180deg, #fafafa 0%, #a1a1aa 100%);
+            -webkit-background-clip: text; background-clip: text;
+            -webkit-text-fill-color: transparent;
+            line-height: 1;
+        }
+        #splash-subtitle {
+            position: relative;
+            font-size: 14px;
+            font-weight: 500;
+            letter-spacing: 0.18em;
+            text-transform: uppercase;
+            color: #71717a;
+        }
+        #splash-accent {
+            position: relative;
+            display: inline-block;
+            padding: 6px 14px;
+            border-radius: 999px;
+            font-size: 12px;
+            font-weight: 500;
+            letter-spacing: 0.04em;
+            color: #c4b5fd;
+            background: rgba(139, 92, 246, 0.08);
+            border: 1px solid rgba(139, 92, 246, 0.25);
+            backdrop-filter: blur(8px);
+        }
+        #splash-accent-dot {
+            display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+            background: #a78bfa; margin-right: 8px; vertical-align: middle;
+            box-shadow: 0 0 10px #a78bfa;
+            animation: pulse 2s ease-in-out infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+
+        #status-text {
+            position: relative;
+            font-size: 13px;
+            color: #71717a;
+            font-variant-numeric: tabular-nums;
         }
         #progress-bar {
-            width: 200px; height: 4px; background: #27272a; border-radius: 2px;
-            margin: 12px auto 0; overflow: hidden;
+            position: relative;
+            width: 240px; height: 2px;
+            background: rgba(255,255,255,0.06);
+            border-radius: 2px; overflow: hidden;
+            opacity: 0; transition: opacity 0.3s ease;
         }
+        #progress-bar.active { opacity: 1; }
         #progress-fill {
             height: 100%; width: 0%;
             background: linear-gradient(90deg, #8b5cf6, #d946ef);
             border-radius: 2px; transition: width 0.3s ease;
+            box-shadow: 0 0 12px rgba(139, 92, 246, 0.5);
         }
+
+        #splash.hidden { opacity: 0; pointer-events: none; }
     </style>
 </head>
 <body>
     <canvas id="canvas" tabindex="0"></canvas>
-    <div id="status">
-        <div id="status-text">Loading Axiom Engine...</div>
+    <div id="splash">
+        <div id="splash-accent"><span id="splash-accent-dot"></span>Runtime ready</div>
+        <div id="splash-title">Axiom</div>
+        <div id="splash-subtitle">AI Game Engine</div>
+        <div id="status-text">Press play to start</div>
         <div id="progress-bar"><div id="progress-fill"></div></div>
     </div>
 
@@ -38,9 +119,17 @@
         // ═══════════════════════════════════════════════════════════════════
 
         const canvas = document.getElementById('canvas');
-        const statusEl = document.getElementById('status');
+        const statusEl = document.getElementById('splash');
         const statusText = document.getElementById('status-text');
         const progressFill = document.getElementById('progress-fill');
+        const progressBar = document.getElementById('progress-bar');
+        const splashTitle = document.getElementById('splash-title');
+        const splashSubtitle = document.getElementById('splash-subtitle');
+
+        function setLoading(active, label) {
+            progressBar.classList.toggle('active', !!active);
+            if (label) statusText.textContent = label;
+        }
 
         // Track FPS
         let lastTime = performance.now();
@@ -155,7 +244,7 @@
             if (engineStarted) return;
 
             try {
-                statusText.textContent = 'Loading WASM module...';
+                setLoading(true, 'Loading WASM module...');
                 progressFill.style.width = '20%';
 
                 // Diagnostics: log received files
@@ -270,7 +359,7 @@
                 });
 
                 engineStarted = true;
-                statusEl.style.display = 'none';
+                statusEl.classList.add('hidden');
                 progressFill.style.width = '100%';
 
                 sendToParent({ type: 'started' });
@@ -283,7 +372,7 @@
                 const message = err instanceof Error ? err.message : String(err);
                 sendToParent({ type: 'error', message: `Engine failed to start: ${message}` });
                 sendToParent({ type: 'console', level: 'error', message: `[Axiom] Stack: ${err instanceof Error ? err.stack : 'N/A'}` });
-                statusText.textContent = 'Failed to start engine';
+                setLoading(false, 'Failed to start engine');
                 progressFill.style.width = '0%';
             }
         }
@@ -292,8 +381,9 @@
             if (engine && engineStarted) {
                 engine.requestQuit();
                 engineStarted = false;
-                statusEl.style.display = '';
-                statusText.textContent = 'Engine stopped';
+                statusEl.classList.remove('hidden');
+                setLoading(false, 'Press play to start');
+                progressFill.style.width = '0%';
                 sendToParent({ type: 'stopped' });
             }
         }
