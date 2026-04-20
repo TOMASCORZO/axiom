@@ -30,6 +30,7 @@ const TOOLS = `## Tools
 **Files:** read_file, edit_file, write_file, list_files, search_files, delete_file
 **Game:** create_project_config, create_scene, write_game_logic, modify_scene, modify_physics, update_ui_layout, debug_runtime_error, export_build
 **Realtime:** configure_realtime (declare chat/rooms/presence/state/events/custom in realtime.axiom.json)
+**DB:** list_game_tables, describe_game_table, create_game_table, add_column, drop_column, rename_column, alter_column, execute_game_sql
 **Assets:** search_free_asset (free, prefer this), generate_sprite (5cr), generate_texture (5cr), generate_animation`;
 
 const TOOLS_3D_EXTRA = `, generate_3d_model (10cr)`;
@@ -68,6 +69,9 @@ export const TOOLS_2D = [
     'search_free_asset', 'generate_sprite', 'generate_texture', 'generate_animation',
     'update_ui_layout', 'debug_runtime_error', 'export_build', 'create_project_config',
     'configure_realtime',
+    'list_game_tables', 'describe_game_table', 'create_game_table',
+    'add_column', 'drop_column', 'rename_column', 'alter_column',
+    'execute_game_sql',
 ];
 
 export const TOOLS_3D = [
@@ -76,6 +80,9 @@ export const TOOLS_3D = [
     'search_free_asset', 'generate_sprite', 'generate_texture', 'generate_3d_model', 'generate_animation',
     'update_ui_layout', 'debug_runtime_error', 'export_build', 'create_project_config',
     'configure_realtime',
+    'list_game_tables', 'describe_game_table', 'create_game_table',
+    'add_column', 'drop_column', 'rename_column', 'alter_column',
+    'execute_game_sql',
 ];
 
 export const MODE_CREDIT_MULTIPLIER: Record<GameMode, number> = {

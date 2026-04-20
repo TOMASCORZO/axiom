@@ -22,6 +22,7 @@ import {
     Flame,
     GitBranch,
     Download,
+    Users,
 } from 'lucide-react';
 
 // ── Types ──────────────────────────────────────────────────────────────
@@ -75,14 +76,25 @@ interface MigrationEntry {
     applied_at: string;
 }
 
-type Tab = 'tables' | 'sql' | 'migrations' | 'audit';
+type Tab = 'tables' | 'sql' | 'players' | 'migrations' | 'audit';
 
 const TABS: { id: Tab; label: string; icon: typeof TableIcon }[] = [
     { id: 'tables', label: 'Tables', icon: TableIcon },
     { id: 'sql', label: 'SQL Console', icon: Terminal },
+    { id: 'players', label: 'Players', icon: Users },
     { id: 'migrations', label: 'Migrations', icon: GitBranch },
     { id: 'audit', label: 'Audit', icon: History },
 ];
+
+const COLUMN_TYPES = [
+    'text', 'varchar',
+    'int', 'integer', 'bigint', 'smallint',
+    'real', 'double precision', 'numeric',
+    'boolean', 'uuid',
+    'jsonb', 'json',
+    'timestamptz', 'timestamp', 'date', 'time',
+    'bytea',
+] as const;
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
@@ -134,6 +146,15 @@ function TablesTab({ refreshKey }: { refreshKey: number }) {
     const [editing, setEditing] = useState<EditRow | null>(null);
     const [rowError, setRowError] = useState<string | null>(null);
     const [rowBusy, setRowBusy] = useState(false);
+
+    // Column editor state
+    type ColAction =
+        | { mode: 'add'; name: string; type: string; nullable: boolean; defaultValue: string }
+        | { mode: 'rename'; columnName: string; to: string }
+        | null;
+    const [colAction, setColAction] = useState<ColAction>(null);
+    const [colError, setColError] = useState<string | null>(null);
+    const [colBusy, setColBusy] = useState(false);
 
     const refreshTables = useCallback(async () => {
         if (!project?.id) return;
@@ -260,6 +281,123 @@ function TablesTab({ refreshKey }: { refreshKey: number }) {
         }
     };
 
+    const beginAddColumn = () => {
+        setColAction({ mode: 'add', name: '', type: 'text', nullable: true, defaultValue: '' });
+        setColError(null);
+    };
+    const beginRenameColumn = (columnName: string) => {
+        setColAction({ mode: 'rename', columnName, to: columnName });
+        setColError(null);
+    };
+    const cancelColumnAction = () => { setColAction(null); setColError(null); };
+
+    const submitAddColumn = async () => {
+        if (!colAction || colAction.mode !== 'add' || !selected || !project?.id) return;
+        const trimmed = colAction.name.trim();
+        if (!trimmed) { setColError('Column name is required'); return; }
+        setColBusy(true);
+        setColError(null);
+        try {
+            const payload: {
+                project_id: string;
+                column: { name: string; type: string; nullable: boolean; default?: unknown };
+            } = {
+                project_id: project.id,
+                column: { name: trimmed, type: colAction.type, nullable: colAction.nullable },
+            };
+            if (colAction.defaultValue.trim()) {
+                payload.column.default = parseEditValue(colAction.defaultValue);
+            }
+            const res = await fetch(`/api/database/tables/${encodeURIComponent(selected)}/columns`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            const data = await res.json();
+            if (!res.ok) { setColError(data.error ?? 'Add column failed'); return; }
+            setColAction(null);
+            await loadTable(selected, page);
+        } catch (e) {
+            setColError(e instanceof Error ? e.message : 'Network error');
+        } finally {
+            setColBusy(false);
+        }
+    };
+
+    const submitRenameColumn = async () => {
+        if (!colAction || colAction.mode !== 'rename' || !selected || !project?.id) return;
+        const to = colAction.to.trim();
+        if (!to || to === colAction.columnName) { setColAction(null); return; }
+        setColBusy(true);
+        setColError(null);
+        try {
+            const res = await fetch(`/api/database/tables/${encodeURIComponent(selected)}/columns`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    project_id: project.id,
+                    op: 'rename',
+                    column_name: colAction.columnName,
+                    to,
+                }),
+            });
+            const data = await res.json();
+            if (!res.ok) { setColError(data.error ?? 'Rename failed'); return; }
+            setColAction(null);
+            await loadTable(selected, page);
+        } catch (e) {
+            setColError(e instanceof Error ? e.message : 'Network error');
+        } finally {
+            setColBusy(false);
+        }
+    };
+
+    const toggleNullable = async (columnName: string, nextNullable: boolean) => {
+        if (!selected || !project?.id) return;
+        setColBusy(true);
+        setColError(null);
+        try {
+            const res = await fetch(`/api/database/tables/${encodeURIComponent(selected)}/columns`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    project_id: project.id,
+                    op: 'set_nullable',
+                    column_name: columnName,
+                    nullable: nextNullable,
+                }),
+            });
+            const data = await res.json();
+            if (!res.ok) { setColError(data.error ?? 'Update failed'); return; }
+            await loadTable(selected, page);
+        } catch (e) {
+            setColError(e instanceof Error ? e.message : 'Network error');
+        } finally {
+            setColBusy(false);
+        }
+    };
+
+    const dropColumn = async (columnName: string) => {
+        if (!selected || !project?.id) return;
+        if (!confirm(`Drop column "${columnName}"? This cannot be undone.`)) return;
+        setColBusy(true);
+        setColError(null);
+        try {
+            const res = await fetch(`/api/database/tables/${encodeURIComponent(selected)}/columns`, {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ project_id: project.id, column_name: columnName }),
+            });
+            const data = await res.json();
+            if (!res.ok) { setColError(data.error ?? 'Drop failed'); return; }
+            await loadTable(selected, page);
+        } catch (e) {
+            setColError(e instanceof Error ? e.message : 'Network error');
+        } finally {
+            setColBusy(false);
+        }
+    };
+
     const deleteRow = async (row: Record<string, unknown>) => {
         if (!schema || !selected || !project?.id) return;
         const pk: Record<string, unknown> = {};
@@ -356,14 +494,84 @@ function TablesTab({ refreshKey }: { refreshKey: number }) {
                     <div>
                         <div className="flex items-center justify-between mb-1">
                             <span className="text-[10px] uppercase tracking-wider text-zinc-500">Schema · {selected}</span>
-                            <a
-                                href={project?.id ? `/api/database/export?project_id=${project.id}&format=csv&table=${encodeURIComponent(selected)}` : undefined}
-                                className="flex items-center gap-1 text-[10px] text-zinc-500 hover:text-zinc-300 px-2 py-0.5 rounded hover:bg-white/5 transition-colors"
-                                title="Download this table as CSV"
-                            >
-                                <Download size={10} /> CSV
-                            </a>
+                            <div className="flex items-center gap-1">
+                                <button
+                                    onClick={beginAddColumn}
+                                    disabled={colAction !== null || colBusy}
+                                    className="flex items-center gap-1 px-2 py-0.5 text-[10px] rounded bg-cyan-500/15 text-cyan-300 hover:bg-cyan-500/25 disabled:opacity-30 transition-colors"
+                                    title="Add a new column"
+                                >
+                                    <Plus size={10} /> Column
+                                </button>
+                                <a
+                                    href={project?.id ? `/api/database/export?project_id=${project.id}&format=csv&table=${encodeURIComponent(selected)}` : undefined}
+                                    className="flex items-center gap-1 text-[10px] text-zinc-500 hover:text-zinc-300 px-2 py-0.5 rounded hover:bg-white/5 transition-colors"
+                                    title="Download this table as CSV"
+                                >
+                                    <Download size={10} /> CSV
+                                </a>
+                            </div>
                         </div>
+
+                        {colError && (
+                            <div className="mb-2 px-2 py-1 rounded bg-red-500/10 border border-red-500/20 text-red-400 text-[11px] font-mono break-all">
+                                {colError}
+                            </div>
+                        )}
+
+                        {colAction?.mode === 'add' && (
+                            <div className="mb-2 p-2 border border-cyan-500/20 bg-cyan-500/5 rounded flex flex-col gap-1.5">
+                                <div className="flex items-center gap-1.5">
+                                    <input
+                                        autoFocus
+                                        value={colAction.name}
+                                        onChange={e => setColAction({ ...colAction, name: e.target.value })}
+                                        placeholder="column_name"
+                                        className="flex-1 bg-zinc-950 border border-white/10 rounded px-1.5 py-0.5 text-[11px] font-mono text-zinc-200 placeholder:text-zinc-700 focus:outline-none focus:border-cyan-500/50"
+                                    />
+                                    <select
+                                        value={colAction.type}
+                                        onChange={e => setColAction({ ...colAction, type: e.target.value })}
+                                        className="bg-zinc-950 border border-white/10 rounded px-1.5 py-0.5 text-[11px] font-mono text-cyan-400 focus:outline-none focus:border-cyan-500/50"
+                                    >
+                                        {COLUMN_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                                    </select>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    <label className="flex items-center gap-1 text-[10px] text-zinc-400 cursor-pointer">
+                                        <input
+                                            type="checkbox"
+                                            checked={colAction.nullable}
+                                            onChange={e => setColAction({ ...colAction, nullable: e.target.checked })}
+                                            className="accent-cyan-500"
+                                        />
+                                        nullable
+                                    </label>
+                                    <input
+                                        value={colAction.defaultValue}
+                                        onChange={e => setColAction({ ...colAction, defaultValue: e.target.value })}
+                                        placeholder="default (optional, e.g. 0 or now())"
+                                        className="flex-1 bg-zinc-950 border border-white/10 rounded px-1.5 py-0.5 text-[11px] font-mono text-zinc-200 placeholder:text-zinc-700 focus:outline-none focus:border-cyan-500/50"
+                                    />
+                                </div>
+                                <div className="flex items-center justify-end gap-1">
+                                    <button
+                                        onClick={cancelColumnAction}
+                                        disabled={colBusy}
+                                        className="px-2 py-0.5 text-[10px] rounded text-zinc-500 hover:text-zinc-300 hover:bg-white/5"
+                                    >Cancel</button>
+                                    <button
+                                        onClick={submitAddColumn}
+                                        disabled={colBusy || !colAction.name.trim()}
+                                        className="flex items-center gap-1 px-2 py-0.5 text-[10px] rounded bg-cyan-500/20 text-cyan-300 hover:bg-cyan-500/30 disabled:opacity-30"
+                                    >
+                                        {colBusy ? <Loader2 size={10} className="animate-spin" /> : <Check size={10} />}
+                                        Add
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
                         <div className="border border-white/5 rounded overflow-hidden">
                             <table className="w-full text-[11px]">
                                 <thead className="bg-zinc-900/60 text-zinc-500">
@@ -372,19 +580,80 @@ function TablesTab({ refreshKey }: { refreshKey: number }) {
                                         <th className="text-left px-2 py-1 font-normal">Type</th>
                                         <th className="text-left px-2 py-1 font-normal">Null</th>
                                         <th className="text-left px-2 py-1 font-normal">Default</th>
+                                        <th className="w-[50px] px-2 py-1"></th>
                                     </tr>
                                 </thead>
                                 <tbody>
                                     {schema.columns.map(c => {
                                         const isPk = schema.primary_key.includes(c.name);
+                                        const isRenaming = colAction?.mode === 'rename' && colAction.columnName === c.name;
+                                        if (isRenaming) {
+                                            return (
+                                                <tr key={c.name} className="group border-t border-amber-500/20 bg-amber-500/5">
+                                                    <td className="px-1 py-1" colSpan={4}>
+                                                        <input
+                                                            autoFocus
+                                                            value={colAction.to}
+                                                            onChange={e => setColAction({ ...colAction, to: e.target.value })}
+                                                            onKeyDown={e => {
+                                                                if (e.key === 'Enter') submitRenameColumn();
+                                                                if (e.key === 'Escape') cancelColumnAction();
+                                                            }}
+                                                            className="w-full bg-zinc-950 border border-white/10 rounded px-1.5 py-0.5 text-[11px] font-mono text-zinc-200 focus:outline-none focus:border-amber-500/50"
+                                                        />
+                                                    </td>
+                                                    <td className="px-1 py-1 whitespace-nowrap">
+                                                        <button onClick={submitRenameColumn} disabled={colBusy} className="p-1 text-emerald-400 hover:bg-emerald-500/10 rounded disabled:opacity-30" title="Save">
+                                                            {colBusy ? <Loader2 size={11} className="animate-spin" /> : <Check size={11} />}
+                                                        </button>
+                                                        <button onClick={cancelColumnAction} disabled={colBusy} className="p-1 text-zinc-500 hover:bg-white/5 rounded" title="Cancel">
+                                                            <X size={11} />
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                            );
+                                        }
                                         return (
-                                            <tr key={c.name} className="border-t border-white/5">
+                                            <tr key={c.name} className="group border-t border-white/5 hover:bg-white/[0.02]">
                                                 <td className="px-2 py-1 font-mono text-zinc-200">
                                                     {c.name}{isPk && <span className="ml-1 text-amber-400 text-[9px]">PK</span>}
                                                 </td>
                                                 <td className="px-2 py-1 font-mono text-cyan-400">{c.type}</td>
-                                                <td className="px-2 py-1 text-zinc-500">{c.nullable ? 'yes' : 'no'}</td>
+                                                <td className="px-2 py-1">
+                                                    <button
+                                                        onClick={() => !isPk && toggleNullable(c.name, !c.nullable)}
+                                                        disabled={isPk || colBusy || colAction !== null}
+                                                        title={isPk ? 'Primary key' : `Toggle to ${c.nullable ? 'NOT NULL' : 'NULL'}`}
+                                                        className={`text-[10px] font-mono px-1 rounded ${
+                                                            isPk
+                                                                ? 'text-zinc-600 cursor-not-allowed'
+                                                                : c.nullable
+                                                                    ? 'text-zinc-500 hover:text-zinc-300 hover:bg-white/5'
+                                                                    : 'text-amber-400 hover:bg-amber-500/10'
+                                                        }`}
+                                                    >{c.nullable ? 'yes' : 'no'}</button>
+                                                </td>
                                                 <td className="px-2 py-1 font-mono text-zinc-600 truncate max-w-[80px]">{c.default ?? '—'}</td>
+                                                <td className="px-1 py-1 whitespace-nowrap">
+                                                    <div className="opacity-0 group-hover:opacity-100 transition-opacity flex">
+                                                        <button
+                                                            onClick={() => beginRenameColumn(c.name)}
+                                                            disabled={colAction !== null || colBusy}
+                                                            className="p-1 text-zinc-500 hover:text-amber-400 hover:bg-amber-500/10 rounded disabled:opacity-30"
+                                                            title="Rename column"
+                                                        >
+                                                            <Pencil size={10} />
+                                                        </button>
+                                                        <button
+                                                            onClick={() => dropColumn(c.name)}
+                                                            disabled={isPk || colAction !== null || colBusy}
+                                                            className="p-1 text-zinc-500 hover:text-red-400 hover:bg-red-500/10 rounded disabled:opacity-30"
+                                                            title={isPk ? 'Cannot drop primary key' : 'Drop column'}
+                                                        >
+                                                            <Trash2 size={10} />
+                                                        </button>
+                                                    </div>
+                                                </td>
                                             </tr>
                                         );
                                     })}
@@ -835,6 +1104,171 @@ function MigrationsTab({ refreshKey }: { refreshKey: number }) {
     );
 }
 
+// ── Players Tab ────────────────────────────────────────────────────────
+
+interface PlayerRow {
+    player_id: string;
+    provider: string;
+    provider_user_id: string | null;
+    email: string | null;
+    display_name: string | null;
+    avatar_url: string | null;
+    created_at: string;
+    last_seen_at: string;
+}
+
+function PlayersTab({ refreshKey }: { refreshKey: number }) {
+    const project = useEditorStore(s => s.project);
+    const [players, setPlayers] = useState<PlayerRow[] | null>(null);
+    const [total, setTotal] = useState(0);
+    const [page, setPage] = useState(1);
+    const [pageSize] = useState(50);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const [busy, setBusy] = useState<string | null>(null);
+
+    const refresh = useCallback(async (p = 1) => {
+        if (!project?.id) return;
+        setLoading(true);
+        setError(null);
+        try {
+            const res = await fetch(`/api/database/players?project_id=${project.id}&page=${p}&page_size=${pageSize}`);
+            const data = await res.json();
+            if (!res.ok) { setError(data.error ?? 'Failed to load players'); return; }
+            setPlayers(data.players ?? []);
+            setTotal(data.total ?? 0);
+            setPage(p);
+        } catch (e) {
+            setError(e instanceof Error ? e.message : 'Network error');
+        } finally {
+            setLoading(false);
+        }
+    }, [project?.id, pageSize]);
+
+    useEffect(() => { refresh(1); }, [refresh, refreshKey]);
+
+    const deletePlayer = async (playerId: string, label: string) => {
+        if (!project?.id) return;
+        if (!confirm(`Delete player ${label}? The next time they sign in they'll get a new player_id.`)) return;
+        setBusy(playerId);
+        try {
+            const res = await fetch('/api/database/players', {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ project_id: project.id, player_id: playerId }),
+            });
+            const data = await res.json();
+            if (!res.ok) { setError(data.error ?? 'Delete failed'); return; }
+            await refresh(page);
+        } catch (e) {
+            setError(e instanceof Error ? e.message : 'Network error');
+        } finally {
+            setBusy(null);
+        }
+    };
+
+    if (loading && !players) {
+        return <div className="flex-1 flex items-center justify-center text-zinc-600"><Loader2 size={20} className="animate-spin" /></div>;
+    }
+
+    const providerClass = (provider: string) => {
+        switch (provider) {
+            case 'google': return 'bg-blue-500/10 text-blue-300';
+            case 'anon': return 'bg-zinc-500/10 text-zinc-400';
+            default: return 'bg-fuchsia-500/10 text-fuchsia-300';
+        }
+    };
+
+    return (
+        <div className="flex flex-col flex-1 overflow-hidden">
+            <div className="flex items-center justify-between px-3 py-1.5 border-b border-white/5">
+                <span className="text-[10px] uppercase tracking-wider text-zinc-500">
+                    Players · {total}
+                </span>
+                <button onClick={() => refresh(page)} className="p-0.5 text-zinc-500 hover:text-zinc-300" title="Refresh">
+                    <RefreshCw size={11} className={loading ? 'animate-spin' : ''} />
+                </button>
+            </div>
+
+            {error && (
+                <div className="m-3 px-3 py-2 rounded bg-red-500/10 border border-red-500/20 text-red-400 text-xs">
+                    {error}
+                </div>
+            )}
+
+            {players && players.length === 0 && !error && (
+                <div className="flex-1 p-6 flex flex-col items-center gap-3 text-zinc-600">
+                    <Users size={32} strokeWidth={1} />
+                    <p className="text-sm text-center">No players yet</p>
+                    <p className="text-[11px] text-center text-zinc-700 leading-relaxed">
+                        Players appear here the first time someone signs into your game.<br />
+                        Use <span className="text-zinc-500 font-mono">axiom.auth.signInWithGoogle()</span> or <span className="text-zinc-500 font-mono">signInAnonymously()</span>.
+                    </p>
+                </div>
+            )}
+
+            {players && players.length > 0 && (
+                <div className="flex-1 overflow-y-auto">
+                    {players.map(p => {
+                        const label = p.display_name ?? p.email ?? p.player_id.slice(0, 8);
+                        return (
+                            <div key={p.player_id} className="group px-3 py-2 border-b border-white/5 hover:bg-white/[0.02] flex items-start gap-2">
+                                {p.avatar_url ? (
+                                    // eslint-disable-next-line @next/next/no-img-element
+                                    <img src={p.avatar_url} alt="" className="w-6 h-6 rounded-full flex-shrink-0 mt-0.5" />
+                                ) : (
+                                    <div className="w-6 h-6 rounded-full bg-zinc-800 flex items-center justify-center flex-shrink-0 mt-0.5">
+                                        <span className="text-[10px] text-zinc-500 font-mono">{label.slice(0, 2).toUpperCase()}</span>
+                                    </div>
+                                )}
+                                <div className="flex-1 min-w-0">
+                                    <div className="flex items-center gap-1.5 mb-0.5">
+                                        <span className="text-xs text-zinc-200 truncate">{label}</span>
+                                        <span className={`text-[9px] uppercase px-1 rounded font-mono ${providerClass(p.provider)}`}>{p.provider}</span>
+                                    </div>
+                                    {p.email && p.email !== label && (
+                                        <div className="text-[10px] text-zinc-500 truncate">{p.email}</div>
+                                    )}
+                                    <div className="text-[10px] text-zinc-600 font-mono truncate">{p.player_id}</div>
+                                    <div className="text-[10px] text-zinc-700 font-mono mt-0.5">
+                                        last seen {new Date(p.last_seen_at).toLocaleString()}
+                                    </div>
+                                </div>
+                                <button
+                                    onClick={() => deletePlayer(p.player_id, label)}
+                                    disabled={busy === p.player_id}
+                                    className="opacity-0 group-hover:opacity-100 p-1 text-zinc-500 hover:text-red-400 hover:bg-red-500/10 rounded disabled:opacity-30 transition-opacity flex-shrink-0"
+                                    title="Delete player"
+                                >
+                                    {busy === p.player_id ? <Loader2 size={11} className="animate-spin" /> : <Trash2 size={11} />}
+                                </button>
+                            </div>
+                        );
+                    })}
+                </div>
+            )}
+
+            {players && total > pageSize && (
+                <div className="flex items-center gap-1 px-3 py-2 border-t border-white/5">
+                    <button
+                        onClick={() => refresh(Math.max(1, page - 1))}
+                        disabled={page <= 1 || loading}
+                        className="px-2 py-0.5 text-[10px] rounded bg-zinc-900 text-zinc-400 border border-white/5 disabled:opacity-30 hover:text-zinc-200"
+                    >Prev</button>
+                    <span className="text-[10px] text-zinc-600">
+                        page {page} of {Math.max(1, Math.ceil(total / pageSize))}
+                    </span>
+                    <button
+                        onClick={() => refresh(page + 1)}
+                        disabled={page * pageSize >= total || loading}
+                        className="px-2 py-0.5 text-[10px] rounded bg-zinc-900 text-zinc-400 border border-white/5 disabled:opacity-30 hover:text-zinc-200"
+                    >Next</button>
+                </div>
+            )}
+        </div>
+    );
+}
+
 // ── Main Component ─────────────────────────────────────────────────────
 
 export default function DatabaseStudio() {
@@ -948,6 +1382,7 @@ export default function DatabaseStudio() {
 
             {tab === 'tables' && <TablesTab refreshKey={refreshKey} />}
             {tab === 'sql' && <SqlConsoleTab onAfterRun={() => setRefreshKey(k => k + 1)} />}
+            {tab === 'players' && <PlayersTab refreshKey={refreshKey} />}
             {tab === 'migrations' && <MigrationsTab refreshKey={refreshKey} />}
             {tab === 'audit' && <AuditTab refreshKey={refreshKey} />}
         </div>
