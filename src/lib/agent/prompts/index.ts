@@ -9,6 +9,7 @@
 import { getBasePrompt } from './base';
 import { getSceneFormatReference } from './scene-format';
 import { getGDScriptReference } from './gdscript-reference';
+import { getRealtimeReference } from './realtime-reference';
 
 export type GameMode = '2d' | '3d';
 
@@ -28,6 +29,7 @@ const PROVIDER_HEADERS: Record<string, string> = {
 const TOOLS = `## Tools
 **Files:** read_file, edit_file, write_file, list_files, search_files, delete_file
 **Game:** create_project_config, create_scene, write_game_logic, modify_scene, modify_physics, update_ui_layout, debug_runtime_error, export_build
+**Realtime:** configure_realtime (declare chat/rooms/presence/state/events/custom in realtime.axiom.json)
 **Assets:** search_free_asset (free, prefer this), generate_sprite (5cr), generate_texture (5cr), generate_animation`;
 
 const TOOLS_3D_EXTRA = `, generate_3d_model (10cr)`;
@@ -51,6 +53,7 @@ export function buildSystemPrompt(
         `## Environment\nMode: ${modeLabel} | Engine: Axiom (WASM) | Scripts: .axs (GDScript 4.x) | Scenes: .scene | Date: ${today}`,
         getSceneFormatReference(is3D),
         getGDScriptReference(),
+        getRealtimeReference(),
         TOOLS + (is3D ? TOOLS_3D_EXTRA : ''),
         fileList ? `## Project Files\n${fileList}` : '## Project Files\n(empty — start fresh)',
         conversationHistory ? `## Recent Context\n${conversationHistory}` : '',
@@ -64,6 +67,7 @@ export const TOOLS_2D = [
     'create_scene', 'write_game_logic', 'modify_scene', 'modify_physics',
     'search_free_asset', 'generate_sprite', 'generate_texture', 'generate_animation',
     'update_ui_layout', 'debug_runtime_error', 'export_build', 'create_project_config',
+    'configure_realtime',
 ];
 
 export const TOOLS_3D = [
@@ -71,6 +75,7 @@ export const TOOLS_3D = [
     'create_scene', 'write_game_logic', 'modify_scene', 'modify_physics',
     'search_free_asset', 'generate_sprite', 'generate_texture', 'generate_3d_model', 'generate_animation',
     'update_ui_layout', 'debug_runtime_error', 'export_build', 'create_project_config',
+    'configure_realtime',
 ];
 
 export const MODE_CREDIT_MULTIPLIER: Record<GameMode, number> = {

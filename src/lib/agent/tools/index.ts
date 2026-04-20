@@ -21,6 +21,7 @@ import './terminal';
 import './sandbox';
 import './integrations';
 import './database';
+import './realtime';
 
 // Re-export registry API
 export { executeTool, getToolSchemas, getToolsForAgent, getAllTools, type ToolContext, type ToolInput } from './registry';
