@@ -484,6 +484,65 @@ BEGIN
 END;
 $func$;
 
+-- Drop the entire game schema and recreate it empty. Wipes every table, row,
+-- index, and migration row in one transaction. Used by the Studio "Reset
+-- database" button and by destructive agent flows. Audited as a 'ddl' op.
+CREATE OR REPLACE FUNCTION public.axiom_drop_game_schema(
+    p_project_id UUID,
+    p_user_id UUID
+) RETURNS JSONB
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $func$
+DECLARE
+    v_schema TEXT := public.axiom_game_schema(p_project_id);
+    v_start  TIMESTAMPTZ := clock_timestamp();
+BEGIN
+    EXECUTE format('DROP SCHEMA IF EXISTS %I CASCADE', v_schema);
+    EXECUTE format('CREATE SCHEMA %I', v_schema);
+
+    -- Wipe migration history too — the schema is genuinely empty now, so
+    -- pretending the old migrations still apply would lie to the version log.
+    DELETE FROM public.game_schemas WHERE project_id = p_project_id;
+
+    INSERT INTO public.database_audit
+        (project_id, user_id, tool_name, statement, kind, success, row_count, duration_ms)
+    VALUES
+        (p_project_id, p_user_id, 'reset_schema',
+         format('DROP SCHEMA %I CASCADE; CREATE SCHEMA %I;', v_schema, v_schema),
+         'ddl', true, 0,
+         extract(milliseconds FROM clock_timestamp() - v_start)::int);
+
+    RETURN jsonb_build_object('schema', v_schema, 'reset', true);
+END;
+$func$;
+
+-- Append a new migration row. version auto-increments per project starting at
+-- 1. The Studio calls this from the SQL Console after a successful DDL run so
+-- the user has a replayable history. Returns the new version number.
+CREATE OR REPLACE FUNCTION public.axiom_record_migration(
+    p_project_id UUID,
+    p_user_id    UUID,
+    p_sql        TEXT,
+    p_description TEXT DEFAULT NULL
+) RETURNS INT
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $func$
+DECLARE
+    v_next INT;
+BEGIN
+    SELECT coalesce(max(version), 0) + 1 INTO v_next
+    FROM public.game_schemas
+    WHERE project_id = p_project_id;
+
+    INSERT INTO public.game_schemas (project_id, version, sql_up, description, applied_by)
+    VALUES (p_project_id, v_next, p_sql, p_description, p_user_id);
+
+    RETURN v_next;
+END;
+$func$;
+
 -- Only the service role (used by the Axiom API) can call these RPCs. Anonymous
 -- and authenticated PostgREST roles must NOT touch them — players talk to
 -- Axiom's HTTP layer, never directly to PostgREST against game schemas.
@@ -492,12 +551,16 @@ REVOKE ALL ON FUNCTION public.axiom_query_in_game(UUID, UUID, TEXT, TEXT) FROM P
 REVOKE ALL ON FUNCTION public.axiom_exec_in_game(UUID, UUID, TEXT, TEXT, TEXT) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.axiom_list_game_tables(UUID)                FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.axiom_describe_game_table(UUID, TEXT)       FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.axiom_drop_game_schema(UUID, UUID)          FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.axiom_record_migration(UUID, UUID, TEXT, TEXT) FROM PUBLIC, anon, authenticated;
 
 GRANT EXECUTE ON FUNCTION public.axiom_ensure_game_schema(UUID)              TO service_role;
 GRANT EXECUTE ON FUNCTION public.axiom_query_in_game(UUID, UUID, TEXT, TEXT) TO service_role;
 GRANT EXECUTE ON FUNCTION public.axiom_exec_in_game(UUID, UUID, TEXT, TEXT, TEXT) TO service_role;
 GRANT EXECUTE ON FUNCTION public.axiom_list_game_tables(UUID)                TO service_role;
 GRANT EXECUTE ON FUNCTION public.axiom_describe_game_table(UUID, TEXT)       TO service_role;
+GRANT EXECUTE ON FUNCTION public.axiom_drop_game_schema(UUID, UUID)          TO service_role;
+GRANT EXECUTE ON FUNCTION public.axiom_record_migration(UUID, UUID, TEXT, TEXT) TO service_role;
 
 -- ── 14. Runtime: Game Players (Phase 2) ────────────────────────
 -- One row per (game, player). The same OAuth identity gets a *different*

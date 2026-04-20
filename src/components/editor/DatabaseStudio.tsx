@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { useEditorStore } from '@/lib/store';
+import { SqlEditor } from './SqlHighlighter';
 import {
     Database,
     Table as TableIcon,
@@ -13,6 +14,14 @@ import {
     AlertTriangle,
     CheckCircle2,
     XCircle,
+    Pencil,
+    Trash2,
+    Plus,
+    Check,
+    X,
+    Flame,
+    GitBranch,
+    Download,
 } from 'lucide-react';
 
 // ── Types ──────────────────────────────────────────────────────────────
@@ -58,11 +67,20 @@ interface AuditEntry {
     executed_at: string;
 }
 
-type Tab = 'tables' | 'sql' | 'audit';
+interface MigrationEntry {
+    version: number;
+    sql_up: string;
+    description: string | null;
+    applied_by: string | null;
+    applied_at: string;
+}
+
+type Tab = 'tables' | 'sql' | 'migrations' | 'audit';
 
 const TABS: { id: Tab; label: string; icon: typeof TableIcon }[] = [
     { id: 'tables', label: 'Tables', icon: TableIcon },
     { id: 'sql', label: 'SQL Console', icon: Terminal },
+    { id: 'migrations', label: 'Migrations', icon: GitBranch },
     { id: 'audit', label: 'Audit', icon: History },
 ];
 
@@ -74,9 +92,37 @@ function renderCell(value: unknown): string {
     return String(value);
 }
 
+// Best-effort string→typed conversion for the inline row editor. Empty string
+// maps to NULL so users can clear a nullable column; anything that parses as
+// JSON (numbers, booleans, objects, arrays) is sent typed; everything else
+// goes as a plain string and lets Postgres do the cast.
+function parseEditValue(input: string): unknown {
+    if (input === '') return null;
+    try {
+        const parsed = JSON.parse(input);
+        // JSON.parse('"hello"') returns "hello" — we want that. JSON.parse('foo')
+        // throws and falls through to the string branch below.
+        return parsed;
+    } catch {
+        return input;
+    }
+}
+
+// Inverse of parseEditValue for prefilling the input. Strings are shown raw
+// (no surrounding quotes); null shows as empty; everything else is JSON.
+function stringifyForEdit(value: unknown): string {
+    if (value === null || value === undefined) return '';
+    if (typeof value === 'string') return value;
+    return JSON.stringify(value);
+}
+
 // ── Tables Tab ─────────────────────────────────────────────────────────
 
-function TablesTab() {
+type EditRow =
+    | { mode: 'edit'; index: number; pk: Record<string, unknown>; draft: Record<string, string> }
+    | { mode: 'insert'; draft: Record<string, string> };
+
+function TablesTab({ refreshKey }: { refreshKey: number }) {
     const project = useEditorStore(s => s.project);
     const [tables, setTables] = useState<TableSummary[] | null>(null);
     const [loading, setLoading] = useState(false);
@@ -85,6 +131,9 @@ function TablesTab() {
     const [schema, setSchema] = useState<TableSchema | null>(null);
     const [rowsPage, setRowsPage] = useState<RowsPage | null>(null);
     const [page, setPage] = useState(1);
+    const [editing, setEditing] = useState<EditRow | null>(null);
+    const [rowError, setRowError] = useState<string | null>(null);
+    const [rowBusy, setRowBusy] = useState(false);
 
     const refreshTables = useCallback(async () => {
         if (!project?.id) return;
@@ -105,12 +154,23 @@ function TablesTab() {
         }
     }, [project?.id]);
 
-    useEffect(() => { refreshTables(); }, [refreshTables]);
+    useEffect(() => {
+        refreshTables();
+        // Drop selection when the parent forces a reload (e.g. after Reset).
+        if (refreshKey > 0) {
+            setSelected(null);
+            setSchema(null);
+            setRowsPage(null);
+            setEditing(null);
+        }
+    }, [refreshTables, refreshKey]);
 
     const loadTable = useCallback(async (name: string, p = 1) => {
         if (!project?.id) return;
         setSelected(name);
         setPage(p);
+        setEditing(null);
+        setRowError(null);
         try {
             const [schemaRes, rowsRes] = await Promise.all([
                 fetch(`/api/database/tables/${encodeURIComponent(name)}?project_id=${project.id}`),
@@ -125,6 +185,105 @@ function TablesTab() {
             setError(e instanceof Error ? e.message : 'Network error');
         }
     }, [project?.id]);
+
+    const beginEdit = (row: Record<string, unknown>, index: number) => {
+        if (!schema) return;
+        const pk: Record<string, unknown> = {};
+        for (const k of schema.primary_key) pk[k] = row[k];
+        const draft: Record<string, string> = {};
+        for (const c of schema.columns) draft[c.name] = stringifyForEdit(row[c.name]);
+        setEditing({ mode: 'edit', index, pk, draft });
+        setRowError(null);
+    };
+
+    const beginInsert = () => {
+        if (!schema) return;
+        const draft: Record<string, string> = {};
+        for (const c of schema.columns) draft[c.name] = '';
+        setEditing({ mode: 'insert', draft });
+        setRowError(null);
+    };
+
+    const cancelEdit = () => { setEditing(null); setRowError(null); };
+
+    const updateDraftField = (col: string, value: string) => {
+        setEditing(curr => curr ? ({ ...curr, draft: { ...curr.draft, [col]: value } }) : curr);
+    };
+
+    const saveEdit = async () => {
+        if (!editing || !schema || !selected || !project?.id) return;
+        setRowBusy(true);
+        setRowError(null);
+        try {
+            if (editing.mode === 'insert') {
+                // Send only fields the user actually filled in. Empty string is
+                // treated as "skip and let the column default apply" — explicit
+                // NULL is what the edit-mode flow handles, but for inserts the
+                // user almost always wants the default to fire.
+                const values: Record<string, unknown> = {};
+                for (const [k, v] of Object.entries(editing.draft)) {
+                    if (v !== '') values[k] = parseEditValue(v);
+                }
+                const res = await fetch(`/api/database/tables/${encodeURIComponent(selected)}/rows`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ project_id: project.id, values }),
+                });
+                const data = await res.json();
+                if (!res.ok) { setRowError(data.error ?? 'Insert failed'); return; }
+            } else {
+                // Update mode: build a SET that excludes PK columns (the WHERE
+                // pins them) and any field that didn't actually change.
+                const original = rowsPage?.rows[editing.index] ?? {};
+                const set: Record<string, unknown> = {};
+                for (const [k, v] of Object.entries(editing.draft)) {
+                    if (schema.primary_key.includes(k)) continue;
+                    const next = parseEditValue(v);
+                    if (JSON.stringify(next) !== JSON.stringify(original[k])) set[k] = next;
+                }
+                if (Object.keys(set).length === 0) { setEditing(null); return; }
+                const res = await fetch(`/api/database/tables/${encodeURIComponent(selected)}/rows`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ project_id: project.id, pk: editing.pk, set }),
+                });
+                const data = await res.json();
+                if (!res.ok) { setRowError(data.error ?? 'Update failed'); return; }
+            }
+            setEditing(null);
+            await loadTable(selected, page);
+            await refreshTables();
+        } catch (e) {
+            setRowError(e instanceof Error ? e.message : 'Network error');
+        } finally {
+            setRowBusy(false);
+        }
+    };
+
+    const deleteRow = async (row: Record<string, unknown>) => {
+        if (!schema || !selected || !project?.id) return;
+        const pk: Record<string, unknown> = {};
+        for (const k of schema.primary_key) pk[k] = row[k];
+        const summary = schema.primary_key.map(k => `${k}=${renderCell(pk[k])}`).join(', ');
+        if (!confirm(`Delete row where ${summary}?`)) return;
+        setRowBusy(true);
+        setRowError(null);
+        try {
+            const res = await fetch(`/api/database/tables/${encodeURIComponent(selected)}/rows`, {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ project_id: project.id, pk }),
+            });
+            const data = await res.json();
+            if (!res.ok) { setRowError(data.error ?? 'Delete failed'); return; }
+            await loadTable(selected, page);
+            await refreshTables();
+        } catch (e) {
+            setRowError(e instanceof Error ? e.message : 'Network error');
+        } finally {
+            setRowBusy(false);
+        }
+    };
 
     if (loading && !tables) {
         return (
@@ -195,7 +354,16 @@ function TablesTab() {
             {selected && schema && (
                 <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-3">
                     <div>
-                        <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1">Schema · {selected}</div>
+                        <div className="flex items-center justify-between mb-1">
+                            <span className="text-[10px] uppercase tracking-wider text-zinc-500">Schema · {selected}</span>
+                            <a
+                                href={project?.id ? `/api/database/export?project_id=${project.id}&format=csv&table=${encodeURIComponent(selected)}` : undefined}
+                                className="flex items-center gap-1 text-[10px] text-zinc-500 hover:text-zinc-300 px-2 py-0.5 rounded hover:bg-white/5 transition-colors"
+                                title="Download this table as CSV"
+                            >
+                                <Download size={10} /> CSV
+                            </a>
+                        </div>
                         <div className="border border-white/5 rounded overflow-hidden">
                             <table className="w-full text-[11px]">
                                 <thead className="bg-zinc-900/60 text-zinc-500">
@@ -227,10 +395,26 @@ function TablesTab() {
 
                     {rowsPage && (
                         <div>
-                            <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1">
-                                Rows · page {rowsPage.page} · {rowsPage.row_count} returned
+                            <div className="flex items-center justify-between mb-1">
+                                <span className="text-[10px] uppercase tracking-wider text-zinc-500">
+                                    Rows · page {rowsPage.page} · {rowsPage.row_count} returned
+                                </span>
+                                <button
+                                    onClick={beginInsert}
+                                    disabled={editing !== null || rowBusy}
+                                    className="flex items-center gap-1 px-2 py-0.5 text-[10px] rounded bg-cyan-500/15 text-cyan-300 hover:bg-cyan-500/25 disabled:opacity-30 transition-colors"
+                                >
+                                    <Plus size={10} /> New row
+                                </button>
                             </div>
-                            {rowsPage.rows.length === 0 ? (
+
+                            {rowError && (
+                                <div className="mb-2 px-2 py-1 rounded bg-red-500/10 border border-red-500/20 text-red-400 text-[11px] font-mono break-all">
+                                    {rowError}
+                                </div>
+                            )}
+
+                            {rowsPage.rows.length === 0 && editing?.mode !== 'insert' ? (
                                 <div className="text-xs text-zinc-600 px-2 py-3 text-center border border-dashed border-white/5 rounded">
                                     No rows
                                 </div>
@@ -242,18 +426,91 @@ function TablesTab() {
                                                 {schema.columns.map(c => (
                                                     <th key={c.name} className="text-left px-2 py-1 font-normal whitespace-nowrap">{c.name}</th>
                                                 ))}
+                                                <th className="w-[60px] px-2 py-1"></th>
                                             </tr>
                                         </thead>
                                         <tbody>
-                                            {rowsPage.rows.map((row, i) => (
-                                                <tr key={i} className="border-t border-white/5">
+                                            {editing?.mode === 'insert' && (
+                                                <tr className="border-t border-cyan-500/20 bg-cyan-500/5">
                                                     {schema.columns.map(c => (
-                                                        <td key={c.name} className="px-2 py-1 font-mono text-zinc-300 whitespace-nowrap max-w-[160px] truncate">
-                                                            {renderCell(row[c.name])}
+                                                        <td key={c.name} className="px-1 py-1">
+                                                            <input
+                                                                value={editing.draft[c.name] ?? ''}
+                                                                onChange={e => updateDraftField(c.name, e.target.value)}
+                                                                placeholder={c.default ? `default: ${c.default}` : (c.nullable ? 'NULL' : '')}
+                                                                className="w-full bg-zinc-950 border border-white/10 rounded px-1.5 py-0.5 text-[11px] font-mono text-zinc-200 placeholder:text-zinc-700 focus:outline-none focus:border-cyan-500/50"
+                                                            />
                                                         </td>
                                                     ))}
+                                                    <td className="px-1 py-1 whitespace-nowrap">
+                                                        <button onClick={saveEdit} disabled={rowBusy} className="p-1 text-emerald-400 hover:bg-emerald-500/10 rounded disabled:opacity-30" title="Save">
+                                                            {rowBusy ? <Loader2 size={11} className="animate-spin" /> : <Check size={11} />}
+                                                        </button>
+                                                        <button onClick={cancelEdit} disabled={rowBusy} className="p-1 text-zinc-500 hover:bg-white/5 rounded" title="Cancel">
+                                                            <X size={11} />
+                                                        </button>
+                                                    </td>
                                                 </tr>
-                                            ))}
+                                            )}
+                                            {rowsPage.rows.map((row, i) => {
+                                                const isEditing = editing?.mode === 'edit' && editing.index === i;
+                                                return (
+                                                    <tr key={i} className={`group border-t border-white/5 ${isEditing ? 'bg-amber-500/5' : 'hover:bg-white/[0.02]'}`}>
+                                                        {schema.columns.map(c => {
+                                                            const isPk = schema.primary_key.includes(c.name);
+                                                            if (isEditing) {
+                                                                return (
+                                                                    <td key={c.name} className="px-1 py-1">
+                                                                        <input
+                                                                            value={editing.draft[c.name] ?? ''}
+                                                                            onChange={e => updateDraftField(c.name, e.target.value)}
+                                                                            disabled={isPk}
+                                                                            title={isPk ? 'Primary key (read-only)' : ''}
+                                                                            className={`w-full bg-zinc-950 border border-white/10 rounded px-1.5 py-0.5 text-[11px] font-mono text-zinc-200 focus:outline-none focus:border-amber-500/50 ${isPk ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                                                        />
+                                                                    </td>
+                                                                );
+                                                            }
+                                                            return (
+                                                                <td key={c.name} className="px-2 py-1 font-mono text-zinc-300 whitespace-nowrap max-w-[160px] truncate">
+                                                                    {renderCell(row[c.name])}
+                                                                </td>
+                                                            );
+                                                        })}
+                                                        <td className="px-1 py-1 whitespace-nowrap">
+                                                            {isEditing ? (
+                                                                <>
+                                                                    <button onClick={saveEdit} disabled={rowBusy} className="p-1 text-emerald-400 hover:bg-emerald-500/10 rounded disabled:opacity-30" title="Save">
+                                                                        {rowBusy ? <Loader2 size={11} className="animate-spin" /> : <Check size={11} />}
+                                                                    </button>
+                                                                    <button onClick={cancelEdit} disabled={rowBusy} className="p-1 text-zinc-500 hover:bg-white/5 rounded" title="Cancel">
+                                                                        <X size={11} />
+                                                                    </button>
+                                                                </>
+                                                            ) : (
+                                                                <div className="opacity-0 group-hover:opacity-100 transition-opacity">
+                                                                    <button
+                                                                        onClick={() => beginEdit(row, i)}
+                                                                        disabled={editing !== null || rowBusy || schema.primary_key.length === 0}
+                                                                        className="p-1 text-zinc-500 hover:text-amber-400 hover:bg-amber-500/10 rounded disabled:opacity-30"
+                                                                        title={schema.primary_key.length === 0 ? 'Table has no primary key — cannot edit' : 'Edit row'}
+                                                                    >
+                                                                        <Pencil size={11} />
+                                                                    </button>
+                                                                    <button
+                                                                        onClick={() => deleteRow(row)}
+                                                                        disabled={editing !== null || rowBusy || schema.primary_key.length === 0}
+                                                                        className="p-1 text-zinc-500 hover:text-red-400 hover:bg-red-500/10 rounded disabled:opacity-30"
+                                                                        title={schema.primary_key.length === 0 ? 'Table has no primary key — cannot delete' : 'Delete row'}
+                                                                    >
+                                                                        <Trash2 size={11} />
+                                                                    </button>
+                                                                </div>
+                                                            )}
+                                                        </td>
+                                                    </tr>
+                                                );
+                                            })}
                                         </tbody>
                                     </table>
                                 </div>
@@ -262,13 +519,13 @@ function TablesTab() {
                             <div className="flex items-center gap-1 mt-2">
                                 <button
                                     onClick={() => loadTable(selected, Math.max(1, page - 1))}
-                                    disabled={page <= 1}
+                                    disabled={page <= 1 || editing !== null}
                                     className="px-2 py-0.5 text-[10px] rounded bg-zinc-900 text-zinc-400 border border-white/5 disabled:opacity-30 hover:text-zinc-200"
                                 >Prev</button>
                                 <span className="text-[10px] text-zinc-600">page {page}</span>
                                 <button
                                     onClick={() => loadTable(selected, page + 1)}
-                                    disabled={rowsPage.row_count < rowsPage.page_size}
+                                    disabled={rowsPage.row_count < rowsPage.page_size || editing !== null}
                                     className="px-2 py-0.5 text-[10px] rounded bg-zinc-900 text-zinc-400 border border-white/5 disabled:opacity-30 hover:text-zinc-200"
                                 >Next</button>
                             </div>
@@ -282,7 +539,7 @@ function TablesTab() {
 
 // ── SQL Console Tab ────────────────────────────────────────────────────
 
-function SqlConsoleTab() {
+function SqlConsoleTab({ onAfterRun }: { onAfterRun: () => void }) {
     const project = useEditorStore(s => s.project);
     const addConsoleEntry = useEditorStore(s => s.addConsoleEntry);
     const [sql, setSql] = useState('SELECT * FROM ');
@@ -312,11 +569,13 @@ function SqlConsoleTab() {
                 return;
             }
             setResults(data.results ?? []);
+            const versionTag = data.migration_version ? ` · saved as v${data.migration_version}` : '';
             addConsoleEntry({
                 id: crypto.randomUUID(), level: 'log',
-                message: `[Database Studio] Ran ${data.statement_count} statement(s)`,
+                message: `[Database Studio] Ran ${data.statement_count} statement(s)${versionTag}`,
                 timestamp: new Date().toISOString(),
             });
+            onAfterRun();
         } catch (e) {
             setError(e instanceof Error ? e.message : 'Network error');
         } finally {
@@ -326,15 +585,12 @@ function SqlConsoleTab() {
 
     return (
         <div className="flex flex-col flex-1 overflow-hidden p-3 gap-2">
-            <textarea
+            <SqlEditor
                 value={sql}
-                onChange={e => setSql(e.target.value)}
-                onKeyDown={e => {
-                    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); handleRun(); }
-                }}
+                onChange={setSql}
+                onRun={handleRun}
                 rows={6}
                 placeholder="SELECT * FROM your_table"
-                className="w-full bg-zinc-900 border border-white/10 rounded-lg px-3 py-2 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 resize-none focus:outline-none focus:border-cyan-500/50 transition-colors"
             />
             <div className="flex items-center justify-between">
                 <span className="text-[10px] text-zinc-600">⌘/Ctrl+Enter to run · semicolons split statements</span>
@@ -402,7 +658,7 @@ function SqlConsoleTab() {
 
 // ── Audit Tab ──────────────────────────────────────────────────────────
 
-function AuditTab() {
+function AuditTab({ refreshKey }: { refreshKey: number }) {
     const project = useEditorStore(s => s.project);
     const [entries, setEntries] = useState<AuditEntry[] | null>(null);
     const [loading, setLoading] = useState(false);
@@ -424,7 +680,7 @@ function AuditTab() {
         }
     }, [project?.id]);
 
-    useEffect(() => { refresh(); }, [refresh]);
+    useEffect(() => { refresh(); }, [refresh, refreshKey]);
 
     if (loading && !entries) {
         return <div className="flex-1 flex items-center justify-center text-zinc-600"><Loader2 size={20} className="animate-spin" /></div>;
@@ -474,11 +730,161 @@ function AuditTab() {
     );
 }
 
+// ── Migrations Tab ─────────────────────────────────────────────────────
+
+function MigrationsTab({ refreshKey }: { refreshKey: number }) {
+    const project = useEditorStore(s => s.project);
+    const [entries, setEntries] = useState<MigrationEntry[] | null>(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const [expanded, setExpanded] = useState<number | null>(null);
+
+    const refresh = useCallback(async () => {
+        if (!project?.id) return;
+        setLoading(true);
+        setError(null);
+        try {
+            const res = await fetch(`/api/database/migrations?project_id=${project.id}`);
+            const data = await res.json();
+            if (!res.ok) { setError(data.error ?? 'Failed to load migrations'); return; }
+            setEntries(data.migrations ?? []);
+        } catch (e) {
+            setError(e instanceof Error ? e.message : 'Network error');
+        } finally {
+            setLoading(false);
+        }
+    }, [project?.id]);
+
+    useEffect(() => { refresh(); }, [refresh, refreshKey]);
+
+    const downloadAll = () => {
+        if (!entries || entries.length === 0) return;
+        // Replay order is oldest → newest, so reverse the newest-first list.
+        const ordered = [...entries].reverse();
+        const text = ordered
+            .map(m => `-- v${m.version} · ${m.applied_at}${m.description ? ` · ${m.description}` : ''}\n${m.sql_up}`)
+            .join('\n\n');
+        const blob = new Blob([text], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `axiom-migrations-${project?.id ?? 'project'}.sql`;
+        a.click();
+        URL.revokeObjectURL(url);
+    };
+
+    if (loading && !entries) {
+        return <div className="flex-1 flex items-center justify-center text-zinc-600"><Loader2 size={20} className="animate-spin" /></div>;
+    }
+
+    return (
+        <div className="flex flex-col flex-1 overflow-hidden">
+            <div className="flex items-center justify-between px-3 py-1.5 border-b border-white/5">
+                <span className="text-[10px] uppercase tracking-wider text-zinc-500">
+                    Schema versions · {entries?.length ?? 0}
+                </span>
+                <div className="flex items-center gap-1">
+                    <button
+                        onClick={downloadAll}
+                        disabled={!entries || entries.length === 0}
+                        className="text-[10px] text-zinc-500 hover:text-zinc-300 px-2 py-0.5 rounded hover:bg-white/5 disabled:opacity-30 transition-colors"
+                        title="Download all migrations as a replayable .sql file"
+                    >
+                        Export .sql
+                    </button>
+                    <button onClick={refresh} className="p-0.5 text-zinc-500 hover:text-zinc-300" title="Refresh">
+                        <RefreshCw size={11} className={loading ? 'animate-spin' : ''} />
+                    </button>
+                </div>
+            </div>
+            {error && <div className="m-3 px-3 py-2 rounded bg-red-500/10 border border-red-500/20 text-red-400 text-xs">{error}</div>}
+            <div className="flex-1 overflow-y-auto">
+                {entries && entries.length === 0 && (
+                    <div className="px-3 py-6 text-xs text-center text-zinc-600">
+                        No migrations yet. DDL run from the SQL Console will appear here.
+                    </div>
+                )}
+                {entries?.map(m => {
+                    const open = expanded === m.version;
+                    return (
+                        <div key={m.version} className="border-b border-white/5">
+                            <button
+                                onClick={() => setExpanded(open ? null : m.version)}
+                                className="w-full px-3 py-2 flex items-center justify-between hover:bg-white/[0.02] text-left"
+                            >
+                                <div className="flex items-center gap-2 min-w-0">
+                                    <span className="text-[10px] uppercase px-1.5 rounded bg-amber-500/10 text-amber-300 font-mono">v{m.version}</span>
+                                    <span className="text-[11px] text-zinc-400 font-mono truncate">
+                                        {m.sql_up.replace(/\s+/g, ' ').slice(0, 80)}
+                                    </span>
+                                </div>
+                                <span className="text-[10px] text-zinc-700 font-mono ml-2 flex-shrink-0">
+                                    {new Date(m.applied_at).toLocaleString()}
+                                </span>
+                            </button>
+                            {open && (
+                                <pre className="px-3 pb-3 text-[11px] font-mono text-zinc-300 whitespace-pre-wrap break-all bg-zinc-950">
+                                    {m.sql_up}
+                                </pre>
+                            )}
+                        </div>
+                    );
+                })}
+            </div>
+        </div>
+    );
+}
+
 // ── Main Component ─────────────────────────────────────────────────────
 
 export default function DatabaseStudio() {
     const setActiveRightPanel = useEditorStore(s => s.setActiveRightPanel);
+    const project = useEditorStore(s => s.project);
+    const addConsoleEntry = useEditorStore(s => s.addConsoleEntry);
     const [tab, setTab] = useState<Tab>('tables');
+    const [resetting, setResetting] = useState(false);
+    const [refreshKey, setRefreshKey] = useState(0);
+
+    const resetDatabase = async () => {
+        if (!project?.id) return;
+        // Two-step confirmation: type the project id. Catastrophic + irreversible.
+        const typed = prompt(
+            `This will DROP every table and row in this project's database, including migration history. ` +
+            `Type the project id to confirm:\n\n${project.id}`,
+        );
+        if (typed !== project.id) {
+            if (typed !== null) alert('Project id did not match. Reset cancelled.');
+            return;
+        }
+        setResetting(true);
+        try {
+            const res = await fetch('/api/database/reset', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ project_id: project.id, confirm: project.id }),
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                addConsoleEntry({
+                    id: crypto.randomUUID(), level: 'error',
+                    message: `[Database Studio] Reset failed: ${data.error}`,
+                    timestamp: new Date().toISOString(),
+                });
+                alert(`Reset failed: ${data.error}`);
+                return;
+            }
+            addConsoleEntry({
+                id: crypto.randomUUID(), level: 'log',
+                message: `[Database Studio] Database reset (${data.schema}).`,
+                timestamp: new Date().toISOString(),
+            });
+            setRefreshKey(k => k + 1);
+        } catch (e) {
+            alert(`Reset failed: ${e instanceof Error ? e.message : 'Network error'}`);
+        } finally {
+            setResetting(false);
+        }
+    };
 
     return (
         <div className="flex flex-col h-full bg-zinc-950">
@@ -490,12 +896,35 @@ export default function DatabaseStudio() {
                     </div>
                     <span className="text-sm font-semibold text-zinc-200">Database Studio</span>
                 </div>
-                <button
-                    onClick={() => setActiveRightPanel('chat')}
-                    className="text-[10px] text-zinc-500 hover:text-zinc-300 px-2 py-0.5 rounded hover:bg-white/5 transition-colors"
-                >
-                    Back to Chat
-                </button>
+                <div className="flex items-center gap-1">
+                    <a
+                        href={project?.id ? `/api/database/export?project_id=${project.id}&format=sql` : undefined}
+                        className={`flex items-center gap-1 text-[10px] px-2 py-0.5 rounded transition-colors ${
+                            project?.id
+                                ? 'text-zinc-400 hover:text-zinc-200 hover:bg-white/5'
+                                : 'text-zinc-700 cursor-not-allowed'
+                        }`}
+                        title="Download full schema + data as a replayable .sql file"
+                    >
+                        <Download size={10} />
+                        Export .sql
+                    </a>
+                    <button
+                        onClick={resetDatabase}
+                        disabled={resetting || !project?.id}
+                        className="flex items-center gap-1 text-[10px] text-red-400/70 hover:text-red-300 px-2 py-0.5 rounded hover:bg-red-500/10 disabled:opacity-30 transition-colors"
+                        title="Drop all tables and reset the database"
+                    >
+                        {resetting ? <Loader2 size={10} className="animate-spin" /> : <Flame size={10} />}
+                        Reset
+                    </button>
+                    <button
+                        onClick={() => setActiveRightPanel('chat')}
+                        className="text-[10px] text-zinc-500 hover:text-zinc-300 px-2 py-0.5 rounded hover:bg-white/5 transition-colors"
+                    >
+                        Back to Chat
+                    </button>
+                </div>
             </div>
 
             {/* Tabs */}
@@ -517,9 +946,10 @@ export default function DatabaseStudio() {
                 })}
             </div>
 
-            {tab === 'tables' && <TablesTab />}
-            {tab === 'sql' && <SqlConsoleTab />}
-            {tab === 'audit' && <AuditTab />}
+            {tab === 'tables' && <TablesTab refreshKey={refreshKey} />}
+            {tab === 'sql' && <SqlConsoleTab onAfterRun={() => setRefreshKey(k => k + 1)} />}
+            {tab === 'migrations' && <MigrationsTab refreshKey={refreshKey} />}
+            {tab === 'audit' && <AuditTab refreshKey={refreshKey} />}
         </div>
     );
 }

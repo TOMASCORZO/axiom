@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { validateSql, runStatement } from '@/lib/game-db';
 import { resolveProjectAuth } from '@/lib/game-db/auth';
+import { getAdminClient } from '@/lib/supabase/admin';
 
 export const maxDuration = 30;
 
@@ -46,10 +47,33 @@ export async function POST(req: NextRequest) {
             }
         }
 
+        // Record a migration if any DDL ran successfully. One row per Console
+        // submission, not per statement — replaying the row reproduces the
+        // exact sequence the user typed. Failures earlier in the loop would
+        // have thrown, so reaching this point means every statement succeeded.
+        const hadDdl = v.statements.some(s => s.kind === 'ddl');
+        let migration_version: number | null = null;
+        if (hadDdl) {
+            try {
+                const admin = getAdminClient();
+                const { data: ver } = await admin.rpc('axiom_record_migration', {
+                    p_project_id: project_id,
+                    p_user_id: auth.userId,
+                    p_sql: sql,
+                    p_description: null,
+                });
+                migration_version = (typeof ver === 'number') ? ver : null;
+            } catch {
+                // Non-fatal: the schema change already applied. Migration log
+                // is best-effort — surface a warning but don't fail the call.
+            }
+        }
+
         return NextResponse.json({
             success: true,
             statement_count: results.length,
             results,
+            migration_version,
         });
     } catch (err) {
         return NextResponse.json(

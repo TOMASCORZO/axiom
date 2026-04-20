@@ -18,9 +18,8 @@
 
 import { gameSchemaName } from '@/lib/game-db/schema';
 import { validateSql } from '@/lib/game-db';
+import { safeIdent, safeLiteral } from '@/lib/game-db/literals';
 import { getAdminClient } from '@/lib/supabase/admin';
-
-const IDENT_RE = /^[a-zA-Z_][a-zA-Z0-9_]{0,62}$/;
 
 export type RuntimeOp = 'select' | 'insert' | 'update' | 'delete';
 export type Scope = 'player' | 'public';
@@ -64,27 +63,8 @@ export interface RuntimeResult {
     sql: string;
 }
 
-function ident(name: string): string {
-    if (typeof name !== 'string' || !IDENT_RE.test(name)) {
-        throw new Error(`Invalid identifier: ${JSON.stringify(name)}`);
-    }
-    return `"${name}"`;
-}
-
-// SQL literal for a JS value. Numbers/bools/null go raw; strings are single-
-// quote-escaped; objects + arrays of objects become jsonb. Plain arrays of
-// scalars are only used inside IN (...) and handled by buildFilter directly.
-function literal(value: unknown): string {
-    if (value === null || value === undefined) return 'NULL';
-    if (typeof value === 'number') {
-        if (!Number.isFinite(value)) throw new Error('Non-finite number');
-        return String(value);
-    }
-    if (typeof value === 'boolean') return value ? 'TRUE' : 'FALSE';
-    if (typeof value === 'string') return `'${value.replace(/'/g, "''")}'`;
-    // Object or array → jsonb. Array-of-scalars in IN() is handled separately.
-    return `'${JSON.stringify(value).replace(/'/g, "''")}'::jsonb`;
-}
+const ident = safeIdent;
+const literal = safeLiteral;
 
 function buildWhere(filters: Filter[] | undefined, scope: Scope, playerId: string): string {
     const parts: string[] = [];
