@@ -23,6 +23,8 @@ import {
     GitBranch,
     Download,
     Users,
+    Link2,
+    Zap,
 } from 'lucide-react';
 
 // ── Types ──────────────────────────────────────────────────────────────
@@ -39,11 +41,31 @@ interface Column {
     default: string | null;
 }
 
+interface ForeignKey {
+    name: string;
+    columns: string[];
+    ref_table: string;
+    ref_columns: string[];
+    on_delete: string;
+    on_update: string;
+}
+
+interface TableIndex {
+    name: string;
+    columns: string[];
+    unique: boolean;
+    primary: boolean;
+}
+
 interface TableSchema {
     table_name: string;
     columns: Column[];
     primary_key: string[];
+    foreign_keys: ForeignKey[];
+    indexes: TableIndex[];
 }
+
+const FK_ACTIONS = ['NO ACTION', 'CASCADE', 'SET NULL', 'SET DEFAULT', 'RESTRICT'] as const;
 
 interface RowsPage {
     rows: Record<string, unknown>[];
@@ -155,6 +177,24 @@ function TablesTab({ refreshKey }: { refreshKey: number }) {
     const [colAction, setColAction] = useState<ColAction>(null);
     const [colError, setColError] = useState<string | null>(null);
     const [colBusy, setColBusy] = useState(false);
+
+    // Foreign-key editor state
+    type FkDraft = {
+        columns: string;     // comma-separated
+        ref_table: string;
+        ref_columns: string; // comma-separated
+        on_delete: (typeof FK_ACTIONS)[number];
+        on_update: (typeof FK_ACTIONS)[number];
+    };
+    const [fkDraft, setFkDraft] = useState<FkDraft | null>(null);
+    const [fkError, setFkError] = useState<string | null>(null);
+    const [fkBusy, setFkBusy] = useState(false);
+
+    // Index editor state
+    type IdxDraft = { columns: string; unique: boolean };
+    const [idxDraft, setIdxDraft] = useState<IdxDraft | null>(null);
+    const [idxError, setIdxError] = useState<string | null>(null);
+    const [idxBusy, setIdxBusy] = useState(false);
 
     const refreshTables = useCallback(async () => {
         if (!project?.id) return;
@@ -395,6 +435,116 @@ function TablesTab({ refreshKey }: { refreshKey: number }) {
             setColError(e instanceof Error ? e.message : 'Network error');
         } finally {
             setColBusy(false);
+        }
+    };
+
+    const beginAddFk = () => {
+        setFkDraft({ columns: '', ref_table: '', ref_columns: '', on_delete: 'NO ACTION', on_update: 'NO ACTION' });
+        setFkError(null);
+    };
+    const cancelFk = () => { setFkDraft(null); setFkError(null); };
+
+    const submitFk = async () => {
+        if (!fkDraft || !selected || !project?.id) return;
+        const columns = fkDraft.columns.split(',').map(s => s.trim()).filter(Boolean);
+        const refColumns = fkDraft.ref_columns.split(',').map(s => s.trim()).filter(Boolean);
+        if (columns.length === 0) { setFkError('columns required'); return; }
+        if (!fkDraft.ref_table.trim()) { setFkError('ref_table required'); return; }
+        if (refColumns.length !== columns.length) { setFkError('ref_columns count must match columns'); return; }
+        setFkBusy(true);
+        setFkError(null);
+        try {
+            const res = await fetch(`/api/database/tables/${encodeURIComponent(selected)}/constraints`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    project_id: project.id,
+                    columns,
+                    ref_table: fkDraft.ref_table.trim(),
+                    ref_columns: refColumns,
+                    on_delete: fkDraft.on_delete,
+                    on_update: fkDraft.on_update,
+                }),
+            });
+            const data = await res.json();
+            if (!res.ok) { setFkError(data.error ?? 'Add FK failed'); return; }
+            setFkDraft(null);
+            await loadTable(selected, page);
+        } catch (e) {
+            setFkError(e instanceof Error ? e.message : 'Network error');
+        } finally {
+            setFkBusy(false);
+        }
+    };
+
+    const dropFk = async (constraintName: string) => {
+        if (!selected || !project?.id) return;
+        if (!confirm(`Drop foreign key "${constraintName}"?`)) return;
+        setFkBusy(true);
+        setFkError(null);
+        try {
+            const res = await fetch(`/api/database/tables/${encodeURIComponent(selected)}/constraints`, {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ project_id: project.id, constraint_name: constraintName }),
+            });
+            const data = await res.json();
+            if (!res.ok) { setFkError(data.error ?? 'Drop FK failed'); return; }
+            await loadTable(selected, page);
+        } catch (e) {
+            setFkError(e instanceof Error ? e.message : 'Network error');
+        } finally {
+            setFkBusy(false);
+        }
+    };
+
+    const beginAddIdx = () => {
+        setIdxDraft({ columns: '', unique: false });
+        setIdxError(null);
+    };
+    const cancelIdx = () => { setIdxDraft(null); setIdxError(null); };
+
+    const submitIdx = async () => {
+        if (!idxDraft || !selected || !project?.id) return;
+        const columns = idxDraft.columns.split(',').map(s => s.trim()).filter(Boolean);
+        if (columns.length === 0) { setIdxError('columns required'); return; }
+        setIdxBusy(true);
+        setIdxError(null);
+        try {
+            const res = await fetch(`/api/database/tables/${encodeURIComponent(selected)}/indexes`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ project_id: project.id, columns, unique: idxDraft.unique }),
+            });
+            const data = await res.json();
+            if (!res.ok) { setIdxError(data.error ?? 'Create index failed'); return; }
+            setIdxDraft(null);
+            await loadTable(selected, page);
+        } catch (e) {
+            setIdxError(e instanceof Error ? e.message : 'Network error');
+        } finally {
+            setIdxBusy(false);
+        }
+    };
+
+    const dropIdx = async (indexName: string) => {
+        if (!selected || !project?.id) return;
+        if (!confirm(`Drop index "${indexName}"?`)) return;
+        setIdxBusy(true);
+        setIdxError(null);
+        try {
+            const res = await fetch(`/api/database/tables/${encodeURIComponent(selected)}/indexes`, {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ project_id: project.id, index_name: indexName }),
+            });
+            const data = await res.json();
+            if (!res.ok) { setIdxError(data.error ?? 'Drop index failed'); return; }
+            await loadTable(selected, page);
+        } catch (e) {
+            setIdxError(e instanceof Error ? e.message : 'Network error');
+        } finally {
+            setIdxBusy(false);
         }
     };
 
@@ -660,6 +810,198 @@ function TablesTab({ refreshKey }: { refreshKey: number }) {
                                 </tbody>
                             </table>
                         </div>
+                    </div>
+
+                    {/* Foreign keys */}
+                    <div>
+                        <div className="flex items-center justify-between mb-1">
+                            <span className="text-[10px] uppercase tracking-wider text-zinc-500 flex items-center gap-1">
+                                <Link2 size={10} /> Foreign keys · {schema.foreign_keys?.length ?? 0}
+                            </span>
+                            <button
+                                onClick={beginAddFk}
+                                disabled={fkDraft !== null || fkBusy}
+                                className="flex items-center gap-1 px-2 py-0.5 text-[10px] rounded bg-cyan-500/15 text-cyan-300 hover:bg-cyan-500/25 disabled:opacity-30 transition-colors"
+                            >
+                                <Plus size={10} /> FK
+                            </button>
+                        </div>
+
+                        {fkError && (
+                            <div className="mb-2 px-2 py-1 rounded bg-red-500/10 border border-red-500/20 text-red-400 text-[11px] font-mono break-all">
+                                {fkError}
+                            </div>
+                        )}
+
+                        {fkDraft && (
+                            <div className="mb-2 p-2 border border-cyan-500/20 bg-cyan-500/5 rounded flex flex-col gap-1.5">
+                                <input
+                                    autoFocus
+                                    value={fkDraft.columns}
+                                    onChange={e => setFkDraft({ ...fkDraft, columns: e.target.value })}
+                                    placeholder="column_name (comma-separated for composite)"
+                                    className="bg-zinc-950 border border-white/10 rounded px-1.5 py-0.5 text-[11px] font-mono text-zinc-200 placeholder:text-zinc-700 focus:outline-none focus:border-cyan-500/50"
+                                />
+                                <div className="flex items-center gap-1.5">
+                                    <span className="text-[10px] text-zinc-500">→</span>
+                                    <input
+                                        value={fkDraft.ref_table}
+                                        onChange={e => setFkDraft({ ...fkDraft, ref_table: e.target.value })}
+                                        placeholder="ref_table"
+                                        className="flex-1 bg-zinc-950 border border-white/10 rounded px-1.5 py-0.5 text-[11px] font-mono text-zinc-200 placeholder:text-zinc-700 focus:outline-none focus:border-cyan-500/50"
+                                    />
+                                    <input
+                                        value={fkDraft.ref_columns}
+                                        onChange={e => setFkDraft({ ...fkDraft, ref_columns: e.target.value })}
+                                        placeholder="ref_cols"
+                                        className="flex-1 bg-zinc-950 border border-white/10 rounded px-1.5 py-0.5 text-[11px] font-mono text-zinc-200 placeholder:text-zinc-700 focus:outline-none focus:border-cyan-500/50"
+                                    />
+                                </div>
+                                <div className="flex items-center gap-1.5 text-[10px] text-zinc-500">
+                                    <span>ON DELETE</span>
+                                    <select
+                                        value={fkDraft.on_delete}
+                                        onChange={e => setFkDraft({ ...fkDraft, on_delete: e.target.value as FkDraft['on_delete'] })}
+                                        className="bg-zinc-950 border border-white/10 rounded px-1 py-0.5 text-[10px] font-mono text-zinc-300 focus:outline-none focus:border-cyan-500/50"
+                                    >
+                                        {FK_ACTIONS.map(a => <option key={a} value={a}>{a}</option>)}
+                                    </select>
+                                    <span>ON UPDATE</span>
+                                    <select
+                                        value={fkDraft.on_update}
+                                        onChange={e => setFkDraft({ ...fkDraft, on_update: e.target.value as FkDraft['on_update'] })}
+                                        className="bg-zinc-950 border border-white/10 rounded px-1 py-0.5 text-[10px] font-mono text-zinc-300 focus:outline-none focus:border-cyan-500/50"
+                                    >
+                                        {FK_ACTIONS.map(a => <option key={a} value={a}>{a}</option>)}
+                                    </select>
+                                </div>
+                                <div className="flex items-center justify-end gap-1">
+                                    <button onClick={cancelFk} disabled={fkBusy} className="px-2 py-0.5 text-[10px] rounded text-zinc-500 hover:text-zinc-300 hover:bg-white/5">Cancel</button>
+                                    <button
+                                        onClick={submitFk}
+                                        disabled={fkBusy}
+                                        className="flex items-center gap-1 px-2 py-0.5 text-[10px] rounded bg-cyan-500/20 text-cyan-300 hover:bg-cyan-500/30 disabled:opacity-30"
+                                    >
+                                        {fkBusy ? <Loader2 size={10} className="animate-spin" /> : <Check size={10} />}
+                                        Add FK
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
+                        {(schema.foreign_keys?.length ?? 0) > 0 ? (
+                            <div className="border border-white/5 rounded overflow-hidden">
+                                {schema.foreign_keys.map(fk => (
+                                    <div key={fk.name} className="group px-2 py-1 text-[11px] flex items-center gap-2 border-b border-white/5 last:border-b-0 hover:bg-white/[0.02]">
+                                        <span className="font-mono text-zinc-300 truncate flex-shrink-0">
+                                            ({fk.columns.join(', ')})
+                                        </span>
+                                        <span className="text-zinc-600">→</span>
+                                        <span className="font-mono text-cyan-400 truncate">
+                                            {fk.ref_table}({fk.ref_columns.join(', ')})
+                                        </span>
+                                        <span className="ml-auto text-[9px] text-zinc-600 font-mono whitespace-nowrap">
+                                            DEL {fk.on_delete} / UPD {fk.on_update}
+                                        </span>
+                                        <button
+                                            onClick={() => dropFk(fk.name)}
+                                            disabled={fkBusy}
+                                            className="opacity-0 group-hover:opacity-100 p-1 text-zinc-500 hover:text-red-400 hover:bg-red-500/10 rounded disabled:opacity-30 transition-opacity flex-shrink-0"
+                                            title={`Drop ${fk.name}`}
+                                        >
+                                            <Trash2 size={10} />
+                                        </button>
+                                    </div>
+                                ))}
+                            </div>
+                        ) : !fkDraft && (
+                            <div className="text-[10px] text-zinc-600 px-2 py-2 text-center border border-dashed border-white/5 rounded">
+                                No foreign keys
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Indexes */}
+                    <div>
+                        <div className="flex items-center justify-between mb-1">
+                            <span className="text-[10px] uppercase tracking-wider text-zinc-500 flex items-center gap-1">
+                                <Zap size={10} /> Indexes · {schema.indexes?.length ?? 0}
+                            </span>
+                            <button
+                                onClick={beginAddIdx}
+                                disabled={idxDraft !== null || idxBusy}
+                                className="flex items-center gap-1 px-2 py-0.5 text-[10px] rounded bg-cyan-500/15 text-cyan-300 hover:bg-cyan-500/25 disabled:opacity-30 transition-colors"
+                            >
+                                <Plus size={10} /> Index
+                            </button>
+                        </div>
+
+                        {idxError && (
+                            <div className="mb-2 px-2 py-1 rounded bg-red-500/10 border border-red-500/20 text-red-400 text-[11px] font-mono break-all">
+                                {idxError}
+                            </div>
+                        )}
+
+                        {idxDraft && (
+                            <div className="mb-2 p-2 border border-cyan-500/20 bg-cyan-500/5 rounded flex flex-col gap-1.5">
+                                <input
+                                    autoFocus
+                                    value={idxDraft.columns}
+                                    onChange={e => setIdxDraft({ ...idxDraft, columns: e.target.value })}
+                                    placeholder="column_name (comma-separated for composite)"
+                                    className="bg-zinc-950 border border-white/10 rounded px-1.5 py-0.5 text-[11px] font-mono text-zinc-200 placeholder:text-zinc-700 focus:outline-none focus:border-cyan-500/50"
+                                />
+                                <div className="flex items-center justify-between">
+                                    <label className="flex items-center gap-1 text-[10px] text-zinc-400 cursor-pointer">
+                                        <input
+                                            type="checkbox"
+                                            checked={idxDraft.unique}
+                                            onChange={e => setIdxDraft({ ...idxDraft, unique: e.target.checked })}
+                                            className="accent-cyan-500"
+                                        />
+                                        UNIQUE
+                                    </label>
+                                    <div className="flex items-center gap-1">
+                                        <button onClick={cancelIdx} disabled={idxBusy} className="px-2 py-0.5 text-[10px] rounded text-zinc-500 hover:text-zinc-300 hover:bg-white/5">Cancel</button>
+                                        <button
+                                            onClick={submitIdx}
+                                            disabled={idxBusy}
+                                            className="flex items-center gap-1 px-2 py-0.5 text-[10px] rounded bg-cyan-500/20 text-cyan-300 hover:bg-cyan-500/30 disabled:opacity-30"
+                                        >
+                                            {idxBusy ? <Loader2 size={10} className="animate-spin" /> : <Check size={10} />}
+                                            Create
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {(schema.indexes?.length ?? 0) > 0 ? (
+                            <div className="border border-white/5 rounded overflow-hidden">
+                                {schema.indexes.map(ix => (
+                                    <div key={ix.name} className="group px-2 py-1 text-[11px] flex items-center gap-2 border-b border-white/5 last:border-b-0 hover:bg-white/[0.02]">
+                                        <span className="font-mono text-zinc-300 truncate flex-shrink-0">{ix.name}</span>
+                                        <span className="text-zinc-600 truncate">({ix.columns.join(', ')})</span>
+                                        {ix.primary && <span className="text-[9px] px-1 rounded bg-amber-500/10 text-amber-400 font-mono">PK</span>}
+                                        {ix.unique && !ix.primary && <span className="text-[9px] px-1 rounded bg-cyan-500/10 text-cyan-400 font-mono">UNIQUE</span>}
+                                        {!ix.primary && (
+                                            <button
+                                                onClick={() => dropIdx(ix.name)}
+                                                disabled={idxBusy}
+                                                className="ml-auto opacity-0 group-hover:opacity-100 p-1 text-zinc-500 hover:text-red-400 hover:bg-red-500/10 rounded disabled:opacity-30 transition-opacity flex-shrink-0"
+                                                title={`Drop ${ix.name}`}
+                                            >
+                                                <Trash2 size={10} />
+                                            </button>
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+                        ) : !idxDraft && (
+                            <div className="text-[10px] text-zinc-600 px-2 py-2 text-center border border-dashed border-white/5 rounded">
+                                No indexes
+                            </div>
+                        )}
                     </div>
 
                     {rowsPage && (

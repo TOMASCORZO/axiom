@@ -495,6 +495,212 @@ registerTool({
     },
 });
 
+// ── add_foreign_key ───────────────────────────────────────────────────
+
+const FK_ACTIONS: ReadonlySet<string> = new Set([
+    'NO ACTION', 'CASCADE', 'SET NULL', 'SET DEFAULT', 'RESTRICT',
+]);
+
+function normalizeFkAction(a: unknown, field: string): string {
+    if (a == null) return 'NO ACTION';
+    const up = String(a).toUpperCase().trim();
+    if (!FK_ACTIONS.has(up)) throw new Error(`Invalid ${field}: ${a}`);
+    return up;
+}
+
+registerTool({
+    name: 'add_foreign_key',
+    description: 'Add a foreign key constraint on an existing table. Reference must point at another table in the same game schema.',
+    isDestructive: false,
+    access: ['build'],
+    parameters: {
+        type: 'object',
+        required: ['table', 'columns', 'ref_table', 'ref_columns'],
+        properties: {
+            table: { type: 'string', description: 'Table to add the FK on.' },
+            columns: { type: 'array', items: { type: 'string' }, description: 'Local column(s) that reference the parent.' },
+            ref_table: { type: 'string', description: 'Referenced (parent) table.' },
+            ref_columns: { type: 'array', items: { type: 'string' }, description: 'Referenced column(s); must match columns[] length.' },
+            name: { type: 'string', description: 'Optional constraint name. Defaults to <table>_<cols>_fkey.' },
+            on_delete: { type: 'string', description: 'ON DELETE action. Default NO ACTION.', enum: ['NO ACTION', 'CASCADE', 'SET NULL', 'SET DEFAULT', 'RESTRICT'] },
+            on_update: { type: 'string', description: 'ON UPDATE action. Default NO ACTION.', enum: ['NO ACTION', 'CASCADE', 'SET NULL', 'SET DEFAULT', 'RESTRICT'] },
+        },
+    },
+    async execute(ctx: ToolContext, input: ToolInput) {
+        const start = Date.now();
+        const tableName = String(input.table ?? '');
+        try {
+            const cols = Array.isArray(input.columns) ? (input.columns as unknown[]).map(String) : [];
+            const refCols = Array.isArray(input.ref_columns) ? (input.ref_columns as unknown[]).map(String) : [];
+            const refTable = String(input.ref_table ?? '');
+            if (!tableName || cols.length === 0) throw new Error('table and columns[] are required');
+            if (!refTable || refCols.length !== cols.length) throw new Error('ref_table and matching ref_columns[] are required');
+
+            const onDelete = normalizeFkAction(input.on_delete, 'on_delete');
+            const onUpdate = normalizeFkAction(input.on_update, 'on_update');
+            const constraintName = input.name ? String(input.name) : `${tableName}_${cols.join('_')}_fkey`;
+
+            const sql =
+                `ALTER TABLE ${quoteIdent(tableName)} ` +
+                `ADD CONSTRAINT ${quoteIdent(constraintName)} ` +
+                `FOREIGN KEY (${cols.map(quoteIdent).join(', ')}) ` +
+                `REFERENCES ${quoteIdent(refTable)} (${refCols.map(quoteIdent).join(', ')}) ` +
+                `ON DELETE ${onDelete} ON UPDATE ${onUpdate}`;
+
+            const v = validateSql(sql, ctx.projectId);
+            if (!v.ok) throw new Error(`Generated SQL failed validation: ${v.error}`);
+            const r = await runStatement(v.statements[0], {
+                projectId: ctx.projectId, userId: ctx.userId, toolName: 'add_foreign_key',
+            });
+            return {
+                callId: '', success: true,
+                output: { table: tableName, name: constraintName, sql, message: `FK "${constraintName}" added to "${tableName}".`, duration_ms: r.duration_ms },
+                duration_ms: Date.now() - start,
+            };
+        } catch (err) {
+            return {
+                callId: '', success: false,
+                output: { table: tableName },
+                error: err instanceof Error ? err.message : 'add_foreign_key failed',
+                duration_ms: Date.now() - start,
+            };
+        }
+    },
+});
+
+// ── drop_foreign_key ──────────────────────────────────────────────────
+
+registerTool({
+    name: 'drop_foreign_key',
+    description: 'Drop a foreign key constraint by name.',
+    isDestructive: true,
+    access: ['build'],
+    parameters: {
+        type: 'object',
+        required: ['table', 'constraint_name'],
+        properties: {
+            table: { type: 'string' },
+            constraint_name: { type: 'string' },
+        },
+    },
+    async execute(ctx: ToolContext, input: ToolInput) {
+        const start = Date.now();
+        const tableName = String(input.table ?? '');
+        const constraintName = String(input.constraint_name ?? '');
+        try {
+            if (!tableName || !constraintName) throw new Error('table and constraint_name are required');
+            const sql = `ALTER TABLE ${quoteIdent(tableName)} DROP CONSTRAINT IF EXISTS ${quoteIdent(constraintName)}`;
+            const v = validateSql(sql, ctx.projectId);
+            if (!v.ok) throw new Error(`Generated SQL failed validation: ${v.error}`);
+            const r = await runStatement(v.statements[0], {
+                projectId: ctx.projectId, userId: ctx.userId, toolName: 'drop_foreign_key',
+            });
+            return {
+                callId: '', success: true,
+                output: { table: tableName, name: constraintName, sql, message: `FK "${constraintName}" dropped.`, duration_ms: r.duration_ms },
+                duration_ms: Date.now() - start,
+            };
+        } catch (err) {
+            return {
+                callId: '', success: false,
+                output: { table: tableName, name: constraintName },
+                error: err instanceof Error ? err.message : 'drop_foreign_key failed',
+                duration_ms: Date.now() - start,
+            };
+        }
+    },
+});
+
+// ── create_index ──────────────────────────────────────────────────────
+
+registerTool({
+    name: 'create_index',
+    description: 'Create an index (optionally UNIQUE) on one or more columns. Uses IF NOT EXISTS so repeated calls are safe.',
+    isDestructive: false,
+    access: ['build'],
+    parameters: {
+        type: 'object',
+        required: ['table', 'columns'],
+        properties: {
+            table: { type: 'string' },
+            columns: { type: 'array', items: { type: 'string' } },
+            unique: { type: 'boolean', description: 'Create a UNIQUE index. Default false.' },
+            name: { type: 'string', description: 'Optional index name. Defaults to <table>_<cols>_idx.' },
+        },
+    },
+    async execute(ctx: ToolContext, input: ToolInput) {
+        const start = Date.now();
+        const tableName = String(input.table ?? '');
+        try {
+            const cols = Array.isArray(input.columns) ? (input.columns as unknown[]).map(String) : [];
+            if (!tableName || cols.length === 0) throw new Error('table and columns[] are required');
+            const unique = Boolean(input.unique);
+            const indexName = input.name ? String(input.name) : `${tableName}_${cols.join('_')}_idx`;
+            const sql =
+                `CREATE ${unique ? 'UNIQUE ' : ''}INDEX IF NOT EXISTS ${quoteIdent(indexName)} ` +
+                `ON ${quoteIdent(tableName)} (${cols.map(quoteIdent).join(', ')})`;
+            const v = validateSql(sql, ctx.projectId);
+            if (!v.ok) throw new Error(`Generated SQL failed validation: ${v.error}`);
+            const r = await runStatement(v.statements[0], {
+                projectId: ctx.projectId, userId: ctx.userId, toolName: 'create_index',
+            });
+            return {
+                callId: '', success: true,
+                output: { table: tableName, name: indexName, unique, sql, message: `Index "${indexName}" on "${tableName}" created.`, duration_ms: r.duration_ms },
+                duration_ms: Date.now() - start,
+            };
+        } catch (err) {
+            return {
+                callId: '', success: false,
+                output: { table: tableName },
+                error: err instanceof Error ? err.message : 'create_index failed',
+                duration_ms: Date.now() - start,
+            };
+        }
+    },
+});
+
+// ── drop_index ────────────────────────────────────────────────────────
+
+registerTool({
+    name: 'drop_index',
+    description: 'Drop an index by name.',
+    isDestructive: true,
+    access: ['build'],
+    parameters: {
+        type: 'object',
+        required: ['index_name'],
+        properties: {
+            index_name: { type: 'string' },
+        },
+    },
+    async execute(ctx: ToolContext, input: ToolInput) {
+        const start = Date.now();
+        const indexName = String(input.index_name ?? '');
+        try {
+            if (!indexName) throw new Error('index_name is required');
+            const sql = `DROP INDEX IF EXISTS ${quoteIdent(indexName)}`;
+            const v = validateSql(sql, ctx.projectId);
+            if (!v.ok) throw new Error(`Generated SQL failed validation: ${v.error}`);
+            const r = await runStatement(v.statements[0], {
+                projectId: ctx.projectId, userId: ctx.userId, toolName: 'drop_index',
+            });
+            return {
+                callId: '', success: true,
+                output: { name: indexName, sql, message: `Index "${indexName}" dropped.`, duration_ms: r.duration_ms },
+                duration_ms: Date.now() - start,
+            };
+        } catch (err) {
+            return {
+                callId: '', success: false,
+                output: { name: indexName },
+                error: err instanceof Error ? err.message : 'drop_index failed',
+                duration_ms: Date.now() - start,
+            };
+        }
+    },
+});
+
 // ── execute_game_sql ──────────────────────────────────────────────────
 
 registerTool({

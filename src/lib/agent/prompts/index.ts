@@ -30,7 +30,7 @@ const TOOLS = `## Tools
 **Files:** read_file, edit_file, write_file, list_files, search_files, delete_file
 **Game:** create_project_config, create_scene, write_game_logic, modify_scene, modify_physics, update_ui_layout, debug_runtime_error, export_build
 **Realtime:** configure_realtime (declare chat/rooms/presence/state/events/custom in realtime.axiom.json)
-**DB:** list_game_tables, describe_game_table, create_game_table, add_column, drop_column, rename_column, alter_column, execute_game_sql
+**DB:** list_game_tables, describe_game_table, create_game_table, add_column, drop_column, rename_column, alter_column, add_foreign_key, drop_foreign_key, create_index, drop_index, execute_game_sql
 **Assets:** search_free_asset (free, prefer this), generate_sprite (5cr), generate_texture (5cr), generate_animation`;
 
 const TOOLS_3D_EXTRA = `, generate_3d_model (10cr)`;
@@ -71,6 +71,7 @@ export const TOOLS_2D = [
     'configure_realtime',
     'list_game_tables', 'describe_game_table', 'create_game_table',
     'add_column', 'drop_column', 'rename_column', 'alter_column',
+    'add_foreign_key', 'drop_foreign_key', 'create_index', 'drop_index',
     'execute_game_sql',
 ];
 
@@ -82,6 +83,7 @@ export const TOOLS_3D = [
     'configure_realtime',
     'list_game_tables', 'describe_game_table', 'create_game_table',
     'add_column', 'drop_column', 'rename_column', 'alter_column',
+    'add_foreign_key', 'drop_foreign_key', 'create_index', 'drop_index',
     'execute_game_sql',
 ];
 
