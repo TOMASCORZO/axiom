@@ -326,13 +326,100 @@ function Banner({ tone, children }: { tone: 'error' | 'warn'; children: React.Re
 
 // ── Empty state ───────────────────────────────────────────────────
 
+const SUGGESTION_POOL: readonly string[] = [
+    'add a global chat',
+    'build a 4-player lobby',
+    'sync enemy positions across clients',
+    '1v1 matchmaking with a queue',
+    'among us-style lobby with a host',
+    'clash royale-style 1v1 matches',
+    'co-op dungeon for up to 3 players',
+    'live leaderboard that updates on kills',
+    'trade items between players',
+    'voice-chat rooms per party',
+    'shared party inventory',
+    'PvP arena with respawn timers',
+    'spectator mode for live matches',
+    'tower defense with shared waves',
+    'agar.io-style shared world',
+    'fall guys-style rounds with eliminations',
+    'turn-based card duels',
+    'team fortress-style class picker',
+    'minecraft-style co-op builder',
+    'racing grid for 8 players',
+    'online chess with draw offers',
+    'battle royale with a shrinking zone',
+    'capture the flag across two teams',
+    'drawing charades room',
+    'single-elimination tournament bracket',
+    'typing race with live WPM',
+    'guild / clan membership',
+    'friend list with online status',
+    'whisper / direct messages',
+    'emoji reactions on chat messages',
+    'party queue — join a match as a group',
+    'ready-up countdown before match start',
+    'dice rolls everyone in the room sees',
+    'shared map editor with live cursors',
+    'co-op puzzle with synced pieces',
+    'raid boss with a damage meter',
+    'stealth kill feed notifications',
+    'loot drops visible to nearby players',
+    'synced emote wheel',
+    'auction house with live bids',
+    'ghost replay of a previous run',
+    'MMO-style chat channels',
+    'PvP betting on match outcomes',
+    'live polls inside a lobby',
+    '10-player raid coordination',
+    'karting drift sync',
+    'king of the hill with a scoring timer',
+    'mario party-style minigame rotation',
+    'trivia room with buzzer-in answers',
+    'role reveal phase for hidden-role games',
+];
+
+const SLOT_COUNT = 4;
+const ROTATE_MS_PER_SLOT = 1800;
+
+function pickDistinctIndices(count: number, total: number): number[] {
+    const pool = Array.from({ length: total }, (_, i) => i);
+    for (let i = pool.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [pool[i], pool[j]] = [pool[j], pool[i]];
+    }
+    return pool.slice(0, count);
+}
+
+function useRotatingSuggestions(): string[] {
+    const [indices, setIndices] = useState<number[]>(() =>
+        pickDistinctIndices(SLOT_COUNT, SUGGESTION_POOL.length));
+
+    useEffect(() => {
+        let slot = 0;
+        const id = window.setInterval(() => {
+            setIndices(prev => {
+                const used = new Set(prev);
+                let next = Math.floor(Math.random() * SUGGESTION_POOL.length);
+                // Prevent collision with any currently-shown suggestion.
+                let guard = 0;
+                while (used.has(next) && guard++ < 20) {
+                    next = Math.floor(Math.random() * SUGGESTION_POOL.length);
+                }
+                const out = [...prev];
+                out[slot] = next;
+                slot = (slot + 1) % SLOT_COUNT;
+                return out;
+            });
+        }, ROTATE_MS_PER_SLOT);
+        return () => window.clearInterval(id);
+    }, []);
+
+    return indices.map(i => SUGGESTION_POOL[i]);
+}
+
 function EmptyState() {
-    const suggestions = [
-        '«agrégame un chat global»',
-        '«haz un lobby de 4 jugadores»',
-        '«sincroniza enemigos entre clientes»',
-        '«partidas 1v1 con matchmaking»',
-    ];
+    const suggestions = useRotatingSuggestions();
     return (
         <div className="flex-1 flex flex-col items-center justify-center text-center px-6 py-8">
             <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-fuchsia-500/20 to-purple-500/10 flex items-center justify-center mb-3">
@@ -343,15 +430,22 @@ function EmptyState() {
                 This game hasn&apos;t declared any multiplayer features. Ask the agent and it&apos;ll set it up:
             </p>
             <div className="space-y-1 w-full max-w-[260px]">
-                {suggestions.map(s => (
+                {suggestions.map((s, idx) => (
                     <div
-                        key={s}
+                        key={`${idx}:${s}`}
                         className="text-[11px] font-mono text-zinc-400 bg-white/[0.03] border border-white/5 rounded px-2 py-1.5 text-left"
+                        style={{ animation: 'realtimeSuggestionIn 380ms ease-out' }}
                     >
-                        {s}
+                        «{s}»
                     </div>
                 ))}
             </div>
+            <style>{`
+                @keyframes realtimeSuggestionIn {
+                    from { opacity: 0; transform: translateY(3px); }
+                    to   { opacity: 1; transform: translateY(0); }
+                }
+            `}</style>
         </div>
     );
 }
