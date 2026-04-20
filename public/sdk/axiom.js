@@ -28,6 +28,16 @@
  *   lobby.subscribe(status => console.log('lobby', status));
  *   await lobby.broadcast('chat', { text: 'gg' });
  *
+ *   // CDC (table change subscriptions — every insert/update/delete done via
+ *   // axiom.from(...).insert/update/delete fans out to subscribers here):
+ *   const sub = await axiom.from('messages')
+ *       .on('INSERT', ({ row }) => console.log('new msg', row))
+ *       .on('UPDATE', ({ row }) => console.log('edited',  row))
+ *       .on('DELETE', ({ row }) => console.log('deleted', row))
+ *       .subscribe();
+ *   // ...later:
+ *   await sub.unsubscribe();
+ *
  * No build step. Single file. Works in any browser that supports fetch +
  * localStorage + URLSearchParams. The SDK is intentionally thin — server-side
  * is where the real validation happens; this file only stores tokens, builds
@@ -168,14 +178,19 @@ function createAuth(state) {
 }
 
 class QueryBuilder {
-    constructor(state, table) {
+    constructor(state, table, realtime) {
         this._state = state;
+        this._realtime = realtime;
+        this._table = table;
         this._req = {
             table,
             scope: 'player',
             filters: [],
             order: [],
         };
+        // Becomes non-null the first time .on(...) is called; .subscribe()
+        // switches on this to pick CDC mode vs. the existing channel API.
+        this._cdc = null;
     }
 
     scope(scope) {
@@ -220,6 +235,49 @@ class QueryBuilder {
 
     delete() {
         return this._send('delete', {});
+    }
+
+    // Switch this builder into CDC-subscription mode. Accepts 'INSERT',
+    // 'UPDATE', 'DELETE', or '*' (all three). Multiple calls accumulate.
+    // Handlers receive `{ op, table, row }`.
+    on(event, handler) {
+        if (typeof handler !== 'function') {
+            throw new AxiomError('on(event, handler) requires a function', 0);
+        }
+        const key = String(event).toUpperCase();
+        if (key !== 'INSERT' && key !== 'UPDATE' && key !== 'DELETE' && key !== '*') {
+            throw new AxiomError(`on: event must be INSERT | UPDATE | DELETE | * (got ${event})`, 0);
+        }
+        if (!this._cdc) this._cdc = { handlers: [] };
+        this._cdc.handlers.push({ event: key, handler });
+        return this;
+    }
+
+    // In CDC mode, .subscribe() opens a realtime channel on
+    // `game:<gameId>:db:<table>` and wires each .on() handler. Returns an
+    // object with `.unsubscribe()`. Must be awaited.
+    async subscribe(statusCallback) {
+        if (!this._cdc) {
+            throw new AxiomError('.subscribe() requires at least one .on(event, handler) call', 0);
+        }
+        const handlers = this._cdc.handlers;
+        const channel = await this._realtime.channel(`db:${this._table}`);
+        for (const { event, handler } of handlers) {
+            if (event === '*') {
+                channel.on('INSERT', handler);
+                channel.on('UPDATE', handler);
+                channel.on('DELETE', handler);
+            } else {
+                channel.on(event, handler);
+            }
+        }
+        channel.subscribe(statusCallback);
+        return {
+            table: this._table,
+            topic: channel.topic,
+            _ch: channel,
+            unsubscribe: () => channel.unsubscribe(),
+        };
     }
 
     async _send(op, extra) {
@@ -415,7 +473,7 @@ export function createAxiomClient(options) {
             if (!table || typeof table !== 'string') {
                 throw new AxiomError('from(table) requires a non-empty string', 0);
             }
-            return new QueryBuilder(state, table);
+            return new QueryBuilder(state, table, realtime);
         },
         channel(topic, opts) { return realtime.channel(topic, opts); },
         disconnect() { return realtime.disconnect(); },

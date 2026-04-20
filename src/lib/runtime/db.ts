@@ -20,6 +20,7 @@ import { gameSchemaName } from '@/lib/game-db/schema';
 import { validateSql } from '@/lib/game-db';
 import { safeIdent, safeLiteral } from '@/lib/game-db/literals';
 import { getAdminClient } from '@/lib/supabase/admin';
+import { broadcastChanges, type CdcOp } from './cdc';
 
 export type RuntimeOp = 'select' | 'insert' | 'update' | 'delete';
 export type Scope = 'player' | 'public';
@@ -196,10 +197,20 @@ export async function runRuntimeOp(req: RuntimeRequest, ctx: RuntimeContext): Pr
     });
     if (error) throw new Error(error.message);
     const result = data as { rows?: Record<string, unknown>[]; row_count?: number; duration_ms?: number };
+    const rows = result.rows ?? [];
+
+    // CDC fan-out for mutations. SELECT never emits — it doesn't change state.
+    // Fire-and-forget so slow Realtime doesn't stretch the SDK response.
+    if (req.op !== 'select' && rows.length > 0) {
+        const cdcOp: CdcOp = req.op === 'insert' ? 'INSERT'
+            : req.op === 'update' ? 'UPDATE'
+            : 'DELETE';
+        void broadcastChanges({ gameId: ctx.gameId, table: req.table, op: cdcOp, rows });
+    }
 
     return {
         op: req.op,
-        rows: result.rows ?? [],
+        rows,
         row_count: result.row_count ?? 0,
         duration_ms: result.duration_ms ?? 0,
         sql,

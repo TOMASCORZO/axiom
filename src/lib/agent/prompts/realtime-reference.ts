@@ -73,8 +73,20 @@ Topics are suffixes — \`lobby\`, \`match:123\`, \`chat-global\`. Lowercase, nu
 1. \`configure_realtime({ operation:'set_feature', feature:{ id:'matchmaking', kind:'events', label:'Matchmaking', topic:'mm', events:[{name:'queue_join',fields:[{name:'player_id',type:'player_id'}]},{name:'match_found',fields:[{name:'match_id',type:'string'},{name:'players',type:'json'}]}] } })\`
 2. \`configure_realtime({ operation:'set_feature', feature:{ id:'match', kind:'state', label:'Match state', topic:'match', fields:[{name:'tower_hp',type:'json'},{name:'units',type:'json'},{name:'elixir',type:'json'}], tickHz:10 } })\`
 
+### Database CDC (change subscriptions)
+
+Every table op done through the SDK (\`axiom.from(t).insert/update/delete\`) auto-publishes a CDC broadcast on topic \`db:<table>\`. Subscribe with:
+
+    const sub = await axiom.from('messages')
+        .on('INSERT', ({ row }) => renderMessage(row))
+        .on('UPDATE', ({ row }) => patchMessage(row))
+        .on('DELETE', ({ row }) => removeMessage(row))
+        .subscribe();
+
+Handlers receive { op, table, row }. Use this for leaderboards, chat history, inventory sync, any "table changed → other players see it" pattern — no trigger setup needed, no manifest entry needed. Only mutations through the SDK emit events (SQL Console edits are silent).
+
 ### Rules
-- NEVER write realtime client code without a matching manifest entry — the user's Studio panel goes blind otherwise.
+- NEVER write realtime client code without a matching manifest entry — the user's Studio panel goes blind otherwise. (CDC subscriptions via \`from(t).on()\` don't need a manifest entry; they're table-driven.)
 - Feature \`id\` is kebab-case, stable — reuse it if updating.
 - Prefer many small features over one giant 'custom' — the Studio renders meaningful widgets for typed kinds.
 - Don't fake data in \`axiom.channel\` topics; always match what configure_realtime declared.`;
