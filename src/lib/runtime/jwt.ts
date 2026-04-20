@@ -93,3 +93,38 @@ export async function verifyOAuthState(state: string): Promise<OAuthStateClaims>
     });
     return payload as OAuthStateClaims;
 }
+
+const SUPABASE_JWT_LIFETIME_SECONDS = 60 * 5; // 5 minutes
+
+function getSupabaseSecret(): Uint8Array {
+    const raw = process.env.SUPABASE_JWT_SECRET;
+    if (!raw || raw.length < 32) {
+        throw new Error('SUPABASE_JWT_SECRET is missing or too short (need ≥ 32 chars).');
+    }
+    return new TextEncoder().encode(raw);
+}
+
+/**
+ * Mint a short-lived Supabase-compatible JWT for a player so they can connect
+ * to Supabase Realtime as `authenticated`. The `game_id` claim is what the
+ * RLS policy on realtime.messages reads to scope channel access.
+ *
+ * Signed with SUPABASE_JWT_SECRET (Supabase verifies it natively). Expiry is
+ * 5 minutes — the SDK refreshes before reconnect.
+ */
+export async function signSupabaseJWT(args: {
+    playerId: string;
+    gameId: string;
+}): Promise<{ token: string; expiresIn: number }> {
+    const token = await new SignJWT({
+        game_id: args.gameId,
+        role: 'authenticated',
+    })
+        .setProtectedHeader({ alg: ALG })
+        .setSubject(args.playerId)
+        .setAudience('authenticated')
+        .setIssuedAt()
+        .setExpirationTime(`${SUPABASE_JWT_LIFETIME_SECONDS}s`)
+        .sign(getSupabaseSecret());
+    return { token, expiresIn: SUPABASE_JWT_LIFETIME_SECONDS };
+}

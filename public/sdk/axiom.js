@@ -22,6 +22,12 @@
  *   const { rows } = await axiom.from('saves').scope('player').select();
  *   await axiom.from('high_scores').scope('public').insert({ score: 1234 });
  *
+ *   // Realtime (broadcast + presence, auto-scoped to this game):
+ *   const lobby = await axiom.channel('lobby');
+ *   lobby.on('chat', msg => console.log(msg));
+ *   lobby.subscribe(status => console.log('lobby', status));
+ *   await lobby.broadcast('chat', { text: 'gg' });
+ *
  * No build step. Single file. Works in any browser that supports fetch +
  * localStorage + URLSearchParams. The SDK is intentionally thin — server-side
  * is where the real validation happens; this file only stores tokens, builds
@@ -29,6 +35,8 @@
  */
 
 const TOKEN_STORAGE_PREFIX = 'axiom.session.';
+const REALTIME_CDN = 'https://esm.sh/@supabase/realtime-js@2';
+const REALTIME_REFRESH_BUFFER_MS = 30_000; // refresh 30s before expiry
 
 function tokenStorageKey(gameId) {
     return `${TOKEN_STORAGE_PREFIX}${gameId}`;
@@ -240,6 +248,150 @@ class QueryBuilder {
     }
 }
 
+/**
+ * Realtime: thin wrapper around @supabase/realtime-js that auto-prefixes
+ * channel topics with `game:<gameId>:` and keeps the Supabase JWT fresh.
+ *
+ * Channel access is gated server-side by RLS on realtime.messages — the JWT
+ * minted by /api/runtime/realtime/token carries `game_id`, and the policy
+ * only allows topics that match `game:<jwt.game_id>:%`. So even if a player
+ * tampers with the topic name, they can't peek into another game's traffic.
+ *
+ * The realtime client is lazy-loaded from a CDN (esm.sh) on first use so
+ * games that never call .channel() don't pay the bytes.
+ */
+function createRealtime(state) {
+    let clientPromise = null;          // Promise<RealtimeClient>
+    let refreshTimer = null;
+    let config = null;                 // { access_token, expires_at, channel_prefix, supabase_url, anon_key }
+
+    async function mintToken() {
+        const session = state.session;
+        if (!session) throw new AxiomError('Not authenticated — call axiom.auth.signInAnonymously() first', 401);
+        const res = await fetch(`${state.baseUrl}/api/runtime/realtime/token`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${session.access_token}` },
+        });
+        if (!res.ok) throw await parseError(res);
+        const body = await res.json();
+        config = {
+            access_token: body.access_token,
+            expires_at: Date.now() + body.expires_in * 1000,
+            channel_prefix: body.channel_prefix,
+            supabase_url: body.supabase_url,
+            anon_key: body.supabase_anon_key,
+        };
+        return config;
+    }
+
+    function scheduleRefresh(client) {
+        if (refreshTimer) clearTimeout(refreshTimer);
+        if (!config) return;
+        const delay = Math.max(1000, config.expires_at - Date.now() - REALTIME_REFRESH_BUFFER_MS);
+        refreshTimer = setTimeout(async () => {
+            try {
+                await mintToken();
+                client.setAuth(config.access_token);
+                scheduleRefresh(client);
+            } catch (err) {
+                // Token refresh runs in the background — log instead of throwing
+                // across event loops. Player-side reconnect logic will retry.
+                console.warn('[axiom realtime] token refresh failed:', err);
+            }
+        }, delay);
+    }
+
+    async function getClient() {
+        if (clientPromise) return clientPromise;
+        clientPromise = (async () => {
+            await mintToken();
+            const mod = await import(/* @vite-ignore */ REALTIME_CDN);
+            const RealtimeClient = mod.RealtimeClient ?? mod.default?.RealtimeClient;
+            if (!RealtimeClient) {
+                throw new AxiomError('Failed to load @supabase/realtime-js from CDN', 0);
+            }
+            const wsUrl = `${config.supabase_url.replace(/\/+$/, '').replace(/^http/, 'ws')}/realtime/v1`;
+            const client = new RealtimeClient(wsUrl, {
+                params: { apikey: config.anon_key },
+                accessToken: () => Promise.resolve(config?.access_token),
+            });
+            scheduleRefresh(client);
+            return client;
+        })();
+        return clientPromise;
+    }
+
+    return {
+        // axiom.channel('lobby') → joins `game:<gid>:lobby` as a private channel
+        async channel(topic, opts = {}) {
+            if (!topic || typeof topic !== 'string') {
+                throw new AxiomError('channel(topic) requires a non-empty string', 0);
+            }
+            const client = await getClient();
+            const fullTopic = `${config.channel_prefix}${topic}`;
+            const channel = client.channel(fullTopic, {
+                config: {
+                    private: true,
+                    broadcast: { self: opts.receiveOwn ?? false, ack: opts.ack ?? false },
+                    presence: { key: opts.presenceKey ?? state.session?.player_id ?? '' },
+                },
+            });
+
+            return {
+                topic: fullTopic,
+                _ch: channel,
+
+                on(event, handler) {
+                    channel.on('broadcast', { event }, ({ payload }) => handler(payload));
+                    return this;
+                },
+
+                onPresence(event, handler) {
+                    // event: 'sync' | 'join' | 'leave'
+                    channel.on('presence', { event }, payload => handler(payload));
+                    return this;
+                },
+
+                async broadcast(event, payload) {
+                    return await channel.send({ type: 'broadcast', event, payload });
+                },
+
+                async track(state) {
+                    return await channel.track(state);
+                },
+
+                async untrack() {
+                    return await channel.untrack();
+                },
+
+                presenceState() {
+                    return channel.presenceState();
+                },
+
+                subscribe(callback) {
+                    channel.subscribe(status => callback?.(status));
+                    return this;
+                },
+
+                async unsubscribe() {
+                    return await channel.unsubscribe();
+                },
+            };
+        },
+
+        // For tests / advanced consumers who want to drop the underlying socket.
+        async disconnect() {
+            if (refreshTimer) { clearTimeout(refreshTimer); refreshTimer = null; }
+            if (clientPromise) {
+                const client = await clientPromise;
+                client.disconnect();
+                clientPromise = null;
+            }
+            config = null;
+        },
+    };
+}
+
 export function createAxiomClient(options) {
     if (!options || typeof options !== 'object') {
         throw new AxiomError('createAxiomClient: options object is required', 0);
@@ -254,6 +406,8 @@ export function createAxiomClient(options) {
         session: readSession(gameId),
     };
 
+    const realtime = createRealtime(state);
+
     const client = {
         get gameId() { return state.gameId; },
         get baseUrl() { return state.baseUrl; },
@@ -263,6 +417,8 @@ export function createAxiomClient(options) {
             }
             return new QueryBuilder(state, table);
         },
+        channel(topic, opts) { return realtime.channel(topic, opts); },
+        disconnect() { return realtime.disconnect(); },
     };
     client.auth = createAuth(state);
     return client;

@@ -590,6 +590,33 @@ DROP POLICY IF EXISTS "Project owner reads players" ON public.game_players;
 CREATE POLICY "Project owner reads players" ON public.game_players FOR SELECT
     USING (game_id IN (SELECT id FROM public.projects WHERE owner_id = auth.uid()));
 
+-- ── 15. Runtime: Realtime Authorization (Phase 3) ──────────────
+-- Players reach Supabase Realtime over WebSocket directly (Vercel serverless
+-- can't proxy long-lived connections cheaply). To avoid making channels world-
+-- readable, we mint short-lived Supabase JWTs at /api/runtime/realtime/token
+-- with game_id as a custom claim, then this RLS policy on realtime.messages
+-- restricts every subscribe/broadcast to channels under the player's own game.
+--
+-- Naming convention: `game:<game_id>:<topic>` — e.g. `game:abc-123:lobby`.
+-- Anything that doesn't match this prefix is rejected at the DB layer, not at
+-- the SDK, so a malicious client can't bypass it by patching the JS.
+
+ALTER TABLE realtime.messages ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Players send to own game" ON realtime.messages;
+CREATE POLICY "Players send to own game" ON realtime.messages
+FOR INSERT TO authenticated
+WITH CHECK (
+    realtime.topic() LIKE 'game:' || (SELECT auth.jwt() ->> 'game_id') || ':%'
+);
+
+DROP POLICY IF EXISTS "Players receive from own game" ON realtime.messages;
+CREATE POLICY "Players receive from own game" ON realtime.messages
+FOR SELECT TO authenticated
+USING (
+    realtime.topic() LIKE 'game:' || (SELECT auth.jwt() ->> 'game_id') || ':%'
+);
+
 -- ============================================================
 -- DONE! Your Axiom database is ready.
 -- 
