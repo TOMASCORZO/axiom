@@ -85,7 +85,7 @@ type Tab = 'tables' | 'sql' | 'migrations' | 'realtime' | 'audit';
 
 const TABS: { id: Tab; label: string; icon: typeof TableIcon }[] = [
     { id: 'tables', label: 'Tables', icon: TableIcon },
-    { id: 'sql', label: 'SQL Console', icon: Terminal },
+    { id: 'sql', label: 'SQL', icon: Terminal },
     { id: 'migrations', label: 'Migrations', icon: GitBranch },
     { id: 'realtime', label: 'Realtime', icon: Radio },
     { id: 'audit', label: 'Audit', icon: History },
@@ -1000,14 +1000,14 @@ function RealtimeTab() {
     return (
         <div className="flex flex-col flex-1 overflow-hidden">
             {/* Connect bar */}
-            <div className="flex items-center gap-2 px-3 py-2 border-b border-white/5">
-                <span className="text-[10px] uppercase tracking-wider text-zinc-500">game:{project?.id?.slice(0, 8) ?? '…'}:</span>
+            <div className="flex items-center gap-1.5 px-3 py-2 border-b border-white/5">
+                <span className="text-[10px] font-mono text-zinc-600 flex-shrink-0" title={`game:${project?.id ?? ''}:`}>game:</span>
                 <input
                     value={topic}
                     onChange={e => setTopic(e.target.value)}
                     disabled={status === 'subscribed' || status === 'connecting'}
-                    placeholder="topic (e.g. lobby)"
-                    className="flex-1 bg-zinc-900 border border-white/10 rounded px-2 py-1 text-xs font-mono text-zinc-200 focus:outline-none focus:border-cyan-500/50 disabled:opacity-50"
+                    placeholder="topic"
+                    className="flex-1 min-w-0 bg-zinc-900 border border-white/10 rounded px-2 py-1 text-xs font-mono text-zinc-200 focus:outline-none focus:border-cyan-500/50 disabled:opacity-50"
                 />
                 {status === 'subscribed' || status === 'connecting' ? (
                     <button
@@ -1045,9 +1045,9 @@ function RealtimeTab() {
             )}
 
             {(status !== 'idle') && (
-                <div className="flex-1 grid grid-cols-[1fr_280px] overflow-hidden">
+                <div className="flex-1 flex flex-col overflow-hidden">
                     {/* Messages stream */}
-                    <div className="flex flex-col overflow-hidden border-r border-white/5">
+                    <div className="flex flex-col overflow-hidden flex-1 min-h-0">
                         <div className="px-3 py-1.5 border-b border-white/5 flex items-center justify-between">
                             <span className="text-[10px] uppercase tracking-wider text-zinc-500">
                                 Messages · {messages.length}
@@ -1086,36 +1086,35 @@ function RealtimeTab() {
                         </div>
 
                         {/* Broadcast composer */}
-                        <div className="border-t border-white/5 p-2 space-y-2">
-                            <div className="flex items-center gap-2">
-                                <input
-                                    value={eventName}
-                                    onChange={e => setEventName(e.target.value)}
-                                    placeholder="event name"
-                                    disabled={status !== 'subscribed'}
-                                    className="w-32 bg-zinc-900 border border-white/10 rounded px-2 py-1 text-xs font-mono text-zinc-200 focus:outline-none focus:border-cyan-500/50 disabled:opacity-50"
-                                />
-                                <input
-                                    value={payloadText}
-                                    onChange={e => setPayloadText(e.target.value)}
-                                    onKeyDown={e => { if (e.key === 'Enter') sendBroadcast(); }}
-                                    placeholder='payload (JSON or string)'
-                                    disabled={status !== 'subscribed'}
-                                    className="flex-1 bg-zinc-900 border border-white/10 rounded px-2 py-1 text-xs font-mono text-zinc-200 focus:outline-none focus:border-cyan-500/50 disabled:opacity-50"
-                                />
-                                <button
-                                    onClick={sendBroadcast}
-                                    disabled={status !== 'subscribed' || !eventName.trim()}
-                                    className="flex items-center gap-1 text-[10px] px-2 py-1 rounded bg-cyan-500/15 text-cyan-300 hover:bg-cyan-500/25 disabled:opacity-30"
-                                >
-                                    <Send size={10} /> Broadcast
-                                </button>
-                            </div>
+                        <div className="border-t border-white/5 p-2 flex items-center gap-1.5">
+                            <input
+                                value={eventName}
+                                onChange={e => setEventName(e.target.value)}
+                                placeholder="event"
+                                disabled={status !== 'subscribed'}
+                                className="w-20 flex-shrink-0 bg-zinc-900 border border-white/10 rounded px-2 py-1 text-xs font-mono text-zinc-200 focus:outline-none focus:border-cyan-500/50 disabled:opacity-50"
+                            />
+                            <input
+                                value={payloadText}
+                                onChange={e => setPayloadText(e.target.value)}
+                                onKeyDown={e => { if (e.key === 'Enter') sendBroadcast(); }}
+                                placeholder="payload (JSON)"
+                                disabled={status !== 'subscribed'}
+                                className="flex-1 min-w-0 bg-zinc-900 border border-white/10 rounded px-2 py-1 text-xs font-mono text-zinc-200 focus:outline-none focus:border-cyan-500/50 disabled:opacity-50"
+                            />
+                            <button
+                                onClick={sendBroadcast}
+                                disabled={status !== 'subscribed' || !eventName.trim()}
+                                title="Broadcast"
+                                className="flex-shrink-0 flex items-center gap-1 text-[10px] px-2 py-1 rounded bg-cyan-500/15 text-cyan-300 hover:bg-cyan-500/25 disabled:opacity-30"
+                            >
+                                <Send size={10} />
+                            </button>
                         </div>
                     </div>
 
                     {/* Presence panel */}
-                    <div className="flex flex-col overflow-hidden">
+                    <div className="flex flex-col overflow-hidden border-t border-white/10 max-h-[40%]">
                         <div className="px-3 py-1.5 border-b border-white/5 flex items-center gap-2">
                             <Users size={11} className="text-zinc-500" />
                             <span className="text-[10px] uppercase tracking-wider text-zinc-500">
@@ -1266,12 +1265,13 @@ export default function DatabaseStudio() {
                         <button
                             key={t.id}
                             onClick={() => setTab(t.id)}
-                            className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-xs transition-colors ${
+                            title={t.label}
+                            className={`flex-1 min-w-0 flex items-center justify-center gap-1 py-2 text-[11px] transition-colors ${
                                 tab === t.id ? 'text-cyan-400 border-b-2 border-cyan-500 bg-cyan-500/5' : 'text-zinc-500 hover:text-zinc-300'
                             }`}
                         >
-                            <Icon size={12} />
-                            {t.label}
+                            <Icon size={11} className="flex-shrink-0" />
+                            <span className="truncate">{t.label}</span>
                         </button>
                     );
                 })}
