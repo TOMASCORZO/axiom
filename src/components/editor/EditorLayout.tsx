@@ -10,6 +10,7 @@ import AssetStudio from './AssetStudio';
 import MapStudio from './MapStudio';
 import MapCanvas from './MapCanvas';
 import DatabaseStudio from './DatabaseStudio';
+import RealtimeStudio from './RealtimeStudio';
 import ConsolePanel from './ConsolePanel';
 import SubsystemsPanel from './SubsystemsPanel';
 import AnimationTimeline from './AnimationTimeline';
@@ -118,6 +119,8 @@ export default function EditorLayout({ projectId }: EditorLayoutProps) {
                         <MapStudio />
                     ) : activeRightPanel === 'database' ? (
                         <DatabaseStudio />
+                    ) : activeRightPanel === 'realtime' ? (
+                        <RealtimeStudio />
                     ) : (
                         <ChatPanel projectId={projectId} />
                     )}

@@ -16,6 +16,7 @@ import {
     ImageIcon,
     Map as MapIcon,
     Database as DatabaseIcon,
+    Radio as RadioIcon,
 } from 'lucide-react';
 
 export default function Toolbar() {
@@ -168,6 +169,17 @@ export default function Toolbar() {
                     title="Database Studio"
                 >
                     <DatabaseIcon size={15} />
+                </button>
+                <button
+                    onClick={() => setActiveRightPanel(activeRightPanel === 'realtime' ? 'chat' : 'realtime')}
+                    className={`p-2 rounded-lg transition-all ${
+                        activeRightPanel === 'realtime'
+                            ? 'bg-fuchsia-500/20 text-fuchsia-400 hover:bg-fuchsia-500/30'
+                            : 'text-zinc-500 hover:text-zinc-300 hover:bg-white/5'
+                    }`}
+                    title="Realtime Studio"
+                >
+                    <RadioIcon size={15} />
                 </button>
             </div>
 
