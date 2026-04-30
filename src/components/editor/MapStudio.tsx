@@ -169,6 +169,12 @@ function GenerateMapTab() {
                 }),
             });
             const startData = await startRes.json();
+            if (startRes.status === 429) {
+                const reason = errorMessage(startData.error, 'Rate limit reached. Try again in a few minutes.');
+                setError(reason);
+                addConsoleEntry({ id: crypto.randomUUID(), level: 'warn', message: `[Map Studio] ${reason}`, timestamp: new Date().toISOString() });
+                return;
+            }
             if (!startRes.ok || !startData.success || !startData.job_id) {
                 const errMsg = errorMessage(startData.error, `Map generation failed (HTTP ${startRes.status})`);
                 setError(errMsg);

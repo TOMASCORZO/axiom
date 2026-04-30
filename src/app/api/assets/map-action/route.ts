@@ -15,6 +15,8 @@ import type {
     MapIsoTile,
 } from '@/types/asset';
 import { tryParseMapMetadata, sanitizePlacements } from '@/lib/map-schema';
+import { enforcePixellabBudget, recordPixellabUsage } from '@/lib/assets/usage-tracking';
+import { createLogger, newRequestId } from '@/lib/observability/logger';
 
 // Longest actions (generate_object, generate_iso_tile, recompose with many
 // buffers to download) can take a while — match /generate route's cap.
@@ -123,15 +125,36 @@ async function downloadStorageKey(storageKey: string): Promise<Buffer> {
 }
 
 export async function POST(request: NextRequest) {
+    const requestId = newRequestId();
+    const log = createLogger('map-action', { requestId });
+
     try {
         const body = (await request.json()) as Body;
         const userId = await resolveUser(body.project_id);
         if (!userId) {
             return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
         }
+        const reqLog = log.child({ userId, projectId: body.project_id, action: body.action });
+
+        // PixelLab-touching actions go through the budget gate first.
+        const isPixellabAction =
+            body.action === 'generate_object' ||
+            body.action === 'generate_iso_tile' ||
+            body.action === 'generate_tileset';
+        if (isPixellabAction) {
+            const gate = await enforcePixellabBudget(userId);
+            if (!gate.ok) {
+                reqLog.warn('rate_limited', { reason: gate.reason, callCount: gate.callCount, totalCostUsd: gate.totalCostUsd });
+                return NextResponse.json(
+                    { success: false, error: gate.reason, code: 'rate_limited', usage: gate },
+                    { status: 429 },
+                );
+            }
+        }
 
         // ── generate_object ──────────────────────────────────────
         if (body.action === 'generate_object') {
+            const t0 = Date.now();
             let backgroundImageBase64: string | undefined;
             if (body.background_storage_key) {
                 try {
@@ -162,7 +185,18 @@ export async function POST(request: NextRequest) {
                       }
                     : undefined,
             });
+            await recordPixellabUsage({
+                userId, projectId: body.project_id, kind: 'generate_object', surface: 'map_studio',
+                costUsd: result.cost ?? 0, success: !!(result.success && result.buffer),
+                durationMs: Date.now() - t0, requestId,
+                metadata: {
+                    tile_size: body.tile_size, w: body.width_tiles, h: body.height_tiles,
+                    inpaint: !!body.inpaint_region,
+                    error: result.success ? undefined : result.error,
+                },
+            });
             if (!result.success || !result.buffer) {
+                reqLog.error('generate_object_failed', { error: result.error });
                 return NextResponse.json({ success: false, error: result.error || 'Object generation failed' }, { status: 500 });
             }
             const sk = await uploadAssetBuffer(userId, body.project_id, body.target_path, result.buffer);
@@ -179,6 +213,7 @@ export async function POST(request: NextRequest) {
 
         // ── generate_iso_tile ────────────────────────────────────
         if (body.action === 'generate_iso_tile') {
+            const t0 = Date.now();
             const result = await generateSingleIsoTile({
                 prompt: body.prompt,
                 tileSize: body.tile_size,
@@ -186,7 +221,14 @@ export async function POST(request: NextRequest) {
                 seed: body.seed,
                 textGuidanceScale: body.text_guidance_scale,
             });
+            await recordPixellabUsage({
+                userId, projectId: body.project_id, kind: 'generate_iso_tile', surface: 'map_studio',
+                costUsd: result.cost ?? 0, success: !!(result.success && result.buffer),
+                durationMs: Date.now() - t0, requestId,
+                metadata: { tile_size: body.tile_size, shape: body.shape, error: result.success ? undefined : result.error },
+            });
             if (!result.success || !result.buffer) {
+                reqLog.error('generate_iso_tile_failed', { error: result.error });
                 return NextResponse.json({ success: false, error: result.error || 'Iso tile generation failed' }, { status: 500 });
             }
             const sk = await uploadAssetBuffer(userId, body.project_id, body.target_path, result.buffer);
@@ -211,6 +253,7 @@ export async function POST(request: NextRequest) {
             const targetDir = body.target_dir.replace(/\/+$/, '');
             const tileSize = Math.max(16, Math.min(body.tile_size ?? 32, 256));
 
+            const t0 = Date.now();
             const result = await generateTilesPro({
                 description,
                 tileType: body.shape ?? 'hex',
@@ -221,7 +264,18 @@ export async function POST(request: NextRequest) {
                 tileDepthRatio: body.tile_depth_ratio,
                 seed: body.seed,
             });
+            await recordPixellabUsage({
+                userId, projectId: body.project_id, kind: 'generate_tileset', surface: 'map_studio',
+                costUsd: result.cost ?? 0, success: result.success,
+                durationMs: Date.now() - t0, requestId,
+                metadata: {
+                    shape: body.shape ?? 'hex', tile_size: tileSize,
+                    variant_count: variantPrompts.length,
+                    error: result.success ? undefined : result.error,
+                },
+            });
             if (!result.success) {
+                reqLog.error('generate_tileset_failed', { error: result.error, shape: body.shape ?? 'hex' });
                 return NextResponse.json({ success: false, error: result.error || 'Tileset generation failed' }, { status: 500 });
             }
 
@@ -528,7 +582,7 @@ export async function POST(request: NextRequest) {
 
         return NextResponse.json({ error: 'Unknown action' }, { status: 400 });
     } catch (err) {
-        console.error('[map-action] error:', err);
+        log.error('unhandled', { error: err instanceof Error ? err.message : String(err) });
         return NextResponse.json(
             { error: err instanceof Error ? err.message : 'Internal server error' },
             { status: 500 },

@@ -3,6 +3,8 @@ import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { getAdminClient } from '@/lib/supabase/admin';
 import { executeTool } from '@/lib/agent/tools';
 import type { ToolFileData } from '@/types/agent';
+import { recordPixellabUsage } from '@/lib/assets/usage-tracking';
+import { createLogger, newRequestId } from '@/lib/observability/logger';
 
 // Worker route — does the actual map generation. Invoked fire-and-forget
 // from /start, which means it gets its own fresh 300s serverless budget.
@@ -23,6 +25,8 @@ interface JobRow {
 
 export async function POST(request: NextRequest) {
     const admin = getAdminClient();
+    const requestId = newRequestId();
+    const log = createLogger('generate-map/run', { requestId });
     let jobId: string | undefined;
 
     try {
@@ -74,9 +78,26 @@ export async function POST(request: NextRequest) {
             ...(job.params.options ?? {}),
         };
 
+        const t0 = Date.now();
         const result = await executeTool('generate_map', toolInput, ctx);
+        const output = (result.output ?? {}) as Record<string, unknown>;
+        const cost = typeof output.cost === 'number' ? output.cost : 0;
+
+        await recordPixellabUsage({
+            userId: job.user_id, projectId: job.project_id,
+            kind: 'generate_map', surface: 'map_studio',
+            costUsd: cost, success: result.success,
+            durationMs: Date.now() - t0, requestId,
+            metadata: {
+                projection: (job.params.options as Record<string, unknown> | undefined)?.projection,
+                grid_w: (job.params.options as Record<string, unknown> | undefined)?.grid_w,
+                grid_h: (job.params.options as Record<string, unknown> | undefined)?.grid_h,
+                error: result.success ? undefined : result.error,
+            },
+        });
 
         if (!result.success) {
+            log.error('generate_map_failed', { jobId, userId: job.user_id, error: result.error });
             await admin.from('map_jobs')
                 .update({
                     status: 'failed',
@@ -86,8 +107,6 @@ export async function POST(request: NextRequest) {
                 .eq('id', jobId);
             return NextResponse.json({ success: false, error: result.error });
         }
-
-        const output = result.output as Record<string, unknown> | undefined;
         await admin.from('map_jobs')
             .update({
                 status: 'done',
@@ -105,7 +124,7 @@ export async function POST(request: NextRequest) {
 
         return NextResponse.json({ success: true });
     } catch (err) {
-        console.error('[generate-map/run] error:', err);
+        log.error('unhandled', { jobId, error: err instanceof Error ? err.message : String(err) });
         if (jobId) {
             await admin.from('map_jobs')
                 .update({

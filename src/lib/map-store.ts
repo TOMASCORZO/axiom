@@ -9,7 +9,7 @@ import type {
     MapMode,
     TerrainCorner,
 } from '@/types/asset';
-import { ensureLayers } from '@/lib/map-schema';
+import { ensureLayers, MAX_GRID_DIMENSION } from '@/lib/map-schema';
 
 // Tools available to the user. Brush meaning depends on projection:
 //   orthogonal → paint a CORNER with the selected terrain label (Wang)
@@ -560,8 +560,12 @@ export const useMapEditorStore = create<MapEditorState>((set, get) => ({
         const meta = s.metadata;
         if (!meta) return;
         const before = snapshot(meta);
-        const newW = Math.max(1, meta.grid_w + addCols);
-        const newH = Math.max(1, meta.grid_h + addRows);
+        // Cap to MAX_GRID_DIMENSION so the client can't ever produce a payload
+        // the server would reject in /map-action recompose. Also a soft cap
+        // against accidental memory blow-up from undo snapshots.
+        const newW = Math.max(1, Math.min(MAX_GRID_DIMENSION, meta.grid_w + addCols));
+        const newH = Math.max(1, Math.min(MAX_GRID_DIMENSION, meta.grid_h + addRows));
+        if (newW === meta.grid_w && newH === meta.grid_h) return;
 
         let patch: Partial<MapMetadataShape>;
         if (meta.projection === 'isometric') {

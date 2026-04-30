@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse, after } from 'next/server';
 import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { getAdminClient } from '@/lib/supabase/admin';
+import { enforcePixellabBudget } from '@/lib/assets/usage-tracking';
+import { createLogger, newRequestId } from '@/lib/observability/logger';
 
 // /start is a thin enqueue step — it must return fast so the client can
 // begin polling. The heavy work happens in /run, which gets its own fresh
@@ -8,6 +10,8 @@ import { getAdminClient } from '@/lib/supabase/admin';
 export const maxDuration = 30;
 
 export async function POST(request: NextRequest) {
+    const requestId = newRequestId();
+    const log = createLogger('generate-map/start', { requestId });
     try {
         const body = await request.json();
         const { project_id, prompt, target_path, options } = body ?? {};
@@ -35,6 +39,18 @@ export async function POST(request: NextRequest) {
                 return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
             }
             userId = project.owner_id;
+        }
+
+        // Fail fast on rate-limited users so we don't enqueue a job that
+        // would just sit pending. The worker checks again — this is a UX
+        // optimization, not a security boundary.
+        const gate = await enforcePixellabBudget(userId);
+        if (!gate.ok) {
+            log.warn('rate_limited', { userId, reason: gate.reason, callCount: gate.callCount, totalCostUsd: gate.totalCostUsd });
+            return NextResponse.json(
+                { success: false, error: gate.reason, code: 'rate_limited', usage: gate },
+                { status: 429 },
+            );
         }
 
         const admin = getAdminClient();
@@ -73,7 +89,7 @@ export async function POST(request: NextRequest) {
                     body: JSON.stringify({ job_id: job.id }),
                 });
             } catch (err) {
-                console.error('[generate-map/start] worker dispatch failed:', err);
+                log.error('worker_dispatch_failed', { jobId: job.id, error: err instanceof Error ? err.message : String(err) });
                 await admin.from('map_jobs')
                     .update({
                         status: 'failed',
@@ -86,7 +102,7 @@ export async function POST(request: NextRequest) {
 
         return NextResponse.json({ success: true, job_id: job.id });
     } catch (err) {
-        console.error('[generate-map/start] error:', err);
+        log.error('unhandled', { error: err instanceof Error ? err.message : String(err) });
         return NextResponse.json(
             { error: err instanceof Error ? err.message : 'Internal server error' },
             { status: 500 },

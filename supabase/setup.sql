@@ -617,9 +617,53 @@ USING (
     realtime.topic() LIKE 'game:' || (SELECT auth.jwt() ->> 'game_id') || ':%'
 );
 
+-- ── 12. PixelLab Usage Log ─────────────────────────────────────
+-- One row per PixelLab API call. Drives:
+--   • spend visibility per user / project
+--   • soft rate limit (count rows in window before allowing a new call)
+--   • forensics when a generation goes weird (params + duration + cost)
+-- Append-only — no UPDATE policy. Service role bypasses RLS for inserts.
+CREATE TABLE IF NOT EXISTS public.pixellab_usage_log (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    project_id UUID REFERENCES public.projects(id) ON DELETE SET NULL,
+    kind TEXT NOT NULL,                  -- 'generate_map' | 'generate_object' | 'generate_iso_tile' | 'generate_tileset' | 'generate_sprite' | 'generate_animation' | …
+    surface TEXT NOT NULL,               -- 'agent' | 'map_studio' | 'asset_studio'
+    cost_usd NUMERIC(10,4) NOT NULL DEFAULT 0,
+    success BOOLEAN NOT NULL DEFAULT true,
+    duration_ms INTEGER,
+    request_id TEXT,                     -- correlates with structured logs
+    metadata JSONB,                      -- prompt slug, dimensions, shape, error msg, …
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_usage_user_created ON public.pixellab_usage_log(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_usage_project ON public.pixellab_usage_log(project_id);
+CREATE INDEX IF NOT EXISTS idx_usage_kind_created ON public.pixellab_usage_log(kind, created_at DESC);
+
+ALTER TABLE public.pixellab_usage_log ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Users read own usage" ON public.pixellab_usage_log;
+CREATE POLICY "Users read own usage" ON public.pixellab_usage_log FOR SELECT
+    USING (auth.uid() = user_id);
+
+-- Spend rollup over last N hours. Used by API routes for budget caps and by
+-- the UI to show a usage chip. SECURITY DEFINER so anon clients can read
+-- their own rollup without needing direct table access.
+CREATE OR REPLACE FUNCTION public.pixellab_usage_window(
+    p_user_id UUID,
+    p_window_hours INTEGER DEFAULT 1
+) RETURNS TABLE (call_count BIGINT, total_cost_usd NUMERIC) AS $$
+    SELECT
+        COUNT(*) AS call_count,
+        COALESCE(SUM(cost_usd), 0) AS total_cost_usd
+    FROM public.pixellab_usage_log
+    WHERE user_id = p_user_id
+      AND created_at > now() - (p_window_hours || ' hours')::INTERVAL;
+$$ LANGUAGE sql STABLE SECURITY DEFINER;
+
 -- ============================================================
 -- DONE! Your Axiom database is ready.
--- 
+--
 -- Next steps:
 -- 1. Set env vars in .env.local:
 --    NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
@@ -627,6 +671,11 @@ USING (
 --    ANTHROPIC_API_KEY=sk-ant-...
 --    OPENAI_API_KEY=sk-... (optional, for sprite generation)
 --    MESHY_API_KEY=... (optional, for 3D model generation)
+--    PIXELLAB_API_TOKEN=... (for tileset/map/sprite generation)
+--
+-- Optional tunables:
+--    PIXELLAB_RATE_LIMIT_HOUR=30        (max PixelLab calls per user per hour)
+--    PIXELLAB_BUDGET_USD_HOUR=5         (max USD spend per user per hour)
 --
 -- 2. Run: npm run dev
 -- 3. Register a user, create a project, start chatting!
