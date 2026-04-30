@@ -471,12 +471,32 @@ registerTool({
     },
 });
 
+// Sensible defaults per target form factor. The agent should pick `target`
+// based on the user's stated platform; explicit display_width/height
+// override the preset.
+const TARGET_PRESETS: Record<string, { w: number; h: number; aspect: string }> = {
+    'desktop':           { w: 1280, h: 720,  aspect: 'keep' },         // 16:9 letterboxed
+    'mobile_portrait':   { w: 720,  h: 1280, aspect: 'keep_width' },   // phone, content scales by width
+    'mobile_landscape':  { w: 1280, h: 720,  aspect: 'keep_height' },  // phone landscape, scales by height
+    'tablet_portrait':   { w: 820,  h: 1180, aspect: 'keep_width' },
+    'tablet_landscape':  { w: 1180, h: 820,  aspect: 'keep_height' },
+    'responsive':        { w: 720,  h: 1280, aspect: 'expand' },       // viewport stretches, UI uses anchors
+};
+
 registerTool({
     name: 'create_project_config',
-    description: 'Create or update project.axiom configuration. ALWAYS do this first for new games.',
+    description: 'Create or update project.axiom configuration. ALWAYS do this first for new games. The `target` field auto-picks viewport size + stretch behavior so the game fills any device — pick "mobile_portrait" for phone games, "desktop" for web, "responsive" for UI-anchored games that should fill any aspect ratio.',
     parameters: {
         type: 'object',
-        properties: { project_name: { type: 'string' }, main_scene: { type: 'string' }, display_width: { type: 'integer', default: 1280 }, display_height: { type: 'integer', default: 720 }, game_mode: { type: 'string', enum: ['2d', '3d'] } },
+        properties: {
+            project_name: { type: 'string' },
+            main_scene: { type: 'string' },
+            game_mode: { type: 'string', enum: ['2d', '3d'] },
+            target: { type: 'string', enum: ['desktop', 'mobile_portrait', 'mobile_landscape', 'tablet_portrait', 'tablet_landscape', 'responsive'], default: 'desktop', description: 'Form factor preset — sets viewport size + stretch_aspect to fill the screen on that device. Override with display_width/height if needed.' },
+            display_width: { type: 'integer', description: 'Override viewport width (defaults from target preset).' },
+            display_height: { type: 'integer', description: 'Override viewport height (defaults from target preset).' },
+            stretch_aspect: { type: 'string', enum: ['keep', 'keep_width', 'keep_height', 'expand', 'ignore'], description: 'Override aspect handling (defaults from target preset). expand=fill canvas via UI anchors; keep=letterbox; keep_width/height=scale-to-fit one dimension.' },
+        },
         required: ['project_name', 'main_scene', 'game_mode'],
     },
     access: ['build'],
@@ -484,11 +504,17 @@ registerTool({
         const start = Date.now();
         const name = (input.project_name as string) || 'My Game';
         const mainScene = (input.main_scene as string) || 'scenes/main.scene';
-        const w = (input.display_width as number) || 1280;
-        const h = (input.display_height as number) || 720;
+        const target = (input.target as string) || 'desktop';
+        const preset = TARGET_PRESETS[target] ?? TARGET_PRESETS.desktop;
+        const w = (input.display_width as number) || preset.w;
+        const h = (input.display_height as number) || preset.h;
+        const aspect = (input.stretch_aspect as string) || preset.aspect;
         const is3D = input.game_mode === '3d';
-        const config = `; Axiom Engine Project Configuration\nconfig_version=5\n\n[application]\nconfig/name="${name}"\nrun/main_scene="res://${mainScene}"\nconfig/features=PackedStringArray("4.3", "${is3D ? 'Forward Plus' : 'GL Compatibility'}")\n\n[display]\nwindow/size/viewport_width=${w}\nwindow/size/viewport_height=${h}\nwindow/stretch/mode="canvas_items"\n\n[rendering]\nrenderer/rendering_method="${is3D ? 'forward_plus' : 'gl_compatibility'}"\n`;
+        // Always emit stretch/mode AND stretch/aspect — without aspect Godot
+        // defaults to "ignore" which letterboxes at the project resolution
+        // and leaves big black bars on phones with different ratios.
+        const config = `; Axiom Engine Project Configuration\nconfig_version=5\n\n[application]\nconfig/name="${name}"\nrun/main_scene="res://${mainScene}"\nconfig/features=PackedStringArray("4.3", "${is3D ? 'Forward Plus' : 'GL Compatibility'}")\n\n[display]\nwindow/size/viewport_width=${w}\nwindow/size/viewport_height=${h}\nwindow/stretch/mode="canvas_items"\nwindow/stretch/aspect="${aspect}"\nwindow/handheld/orientation="${target.includes('portrait') ? 'portrait' : target.includes('landscape') ? 'landscape' : 'sensor'}"\n\n[rendering]\nrenderer/rendering_method="${is3D ? 'forward_plus' : 'gl_compatibility'}"\n`;
         await upsertProjectFile(ctx, 'project.axiom', config, 'text');
-        return { callId: '', success: true, output: { message: `Project config: ${name} (${is3D ? '3D' : '2D'}, ${w}x${h})`, path: 'project.axiom', mainScene }, filesModified: ['project.axiom'], duration_ms: Date.now() - start };
+        return { callId: '', success: true, output: { message: `Project config: ${name} (${is3D ? '3D' : '2D'}, ${w}x${h}, target=${target}, aspect=${aspect})`, path: 'project.axiom', mainScene, target, aspect }, filesModified: ['project.axiom'], duration_ms: Date.now() - start };
     },
 });

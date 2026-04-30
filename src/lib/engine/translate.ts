@@ -109,9 +109,40 @@ function translateProjectConfig(content: string): string {
     // Translate internal scene path references
     result = result.replace(/\.scene"/g, '.tscn"');
     result = result.replace(/\.axs"/g, '.gd"');
+    // Safety net: ensure stretch_mode + stretch_aspect are set so games auto-
+    // fit any device (phone, tablet, desktop, embedded preview). Without
+    // these, Godot renders at the project's native resolution and lets the
+    // browser canvas pick up the slack — yielding a tiny image in the corner
+    // of phone-sized viewports. Old project files written before
+    // create_project_config emitted these get them retroactively here.
+    result = injectDisplayDefaults(result);
     // Inject AxiomInspector autoload so the React bridge can talk to the SceneTree
     result = injectInspectorAutoload(result);
     return result;
+}
+
+/**
+ * Ensure project config has [display] section with sensible stretch defaults.
+ * Idempotent — only adds keys that aren't already present.
+ */
+function injectDisplayDefaults(projectIni: string): string {
+    const has = (key: string) => new RegExp(`^${escapeRegExp(key)}\\s*=`, 'm').test(projectIni);
+    const hasDisplaySection = /^\[display\]\s*$/m.test(projectIni);
+
+    const additions: string[] = [];
+    if (!has('window/stretch/mode')) additions.push('window/stretch/mode="canvas_items"');
+    if (!has('window/stretch/aspect')) additions.push('window/stretch/aspect="keep"');
+
+    if (additions.length === 0) return projectIni;
+
+    if (hasDisplaySection) {
+        // Append our additions right after [display].
+        return projectIni.replace(/^\[display\]\s*$/m, `[display]\n${additions.join('\n')}`);
+    }
+    // No [display] section — add one. Place after the first existing section
+    // or at the end.
+    const block = `\n[display]\n${additions.join('\n')}\n`;
+    return projectIni.trimEnd() + '\n' + block;
 }
 
 /**
