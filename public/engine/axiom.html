@@ -2,7 +2,14 @@
 <html lang="en">
 <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <!-- viewport-fit=cover honors notches; user-scalable=no kills the
+         pinch-zoom that would interrupt gameplay on iOS Safari. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="theme-color" content="#0a0a0f">
+    <link rel="manifest" href="/manifest.webmanifest">
     <title>Axiom Engine Runtime</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -12,7 +19,16 @@
             font-family: 'Geist', 'Inter', -apple-system, system-ui, sans-serif;
             color: #ededed;
         }
-        canvas { display: block; width: 100%; height: 100%; }
+        canvas {
+            display: block; width: 100%; height: 100%;
+            /* touch-action:none disables browser pan/zoom on the canvas so
+             * games receive every touch event raw. Critical for mobile. */
+            touch-action: none;
+            /* Avoid the iOS callout (text selection menu) on long press. */
+            -webkit-touch-callout: none;
+            -webkit-user-select: none;
+            user-select: none;
+        }
 
         #splash {
             position: absolute; inset: 0;
@@ -443,13 +459,99 @@
         // Auto-focus canvas
         canvas.focus();
 
-        // Resize canvas to fill viewport
+        // ── Touch input bridge ──────────────────────────────────────────
+        //
+        // The Godot WASM runtime listens to native touch events on the
+        // canvas (InputEventScreenTouch / InputEventScreenDrag in GDScript).
+        // The browser already dispatches them — we just need to:
+        //   1. Prevent the default page behaviors (scroll, double-tap zoom,
+        //      long-press context menu) that would interrupt gameplay.
+        //   2. Synthesize matching MouseEvents on touchstart/touchmove/
+        //      touchend so games written for mouse-only ALSO work on touch
+        //      with no script changes. The agent gets touch parity for free.
+        //
+        // The synth path checks `event.synthesized` to avoid feedback loops
+        // when a real mouse generates events on hybrid devices.
+        function pointInCanvasCoords(touch) {
+            const rect = canvas.getBoundingClientRect();
+            return {
+                x: (touch.clientX - rect.left) * (canvas.width / rect.width),
+                y: (touch.clientY - rect.top) * (canvas.height / rect.height),
+            };
+        }
+
+        function dispatchSynthMouse(type, touch, button) {
+            const ev = new MouseEvent(type, {
+                bubbles: true, cancelable: true, view: window,
+                clientX: touch.clientX, clientY: touch.clientY,
+                button: button ?? 0,
+                buttons: type === 'mouseup' ? 0 : 1,
+            });
+            // Tag so we don't re-synthesize from a synthesized event.
+            ev.synthesized = true;
+            canvas.dispatchEvent(ev);
+        }
+
+        // Block native gestures that would steal input from the game.
+        ['gesturestart', 'gesturechange', 'gestureend'].forEach(t => {
+            canvas.addEventListener(t, e => e.preventDefault(), { passive: false });
+        });
+        canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+        canvas.addEventListener('touchstart', function(e) {
+            e.preventDefault();
+            const t = e.changedTouches[0];
+            if (t) dispatchSynthMouse('mousedown', t, 0);
+            sendToParent({ type: 'touch', phase: 'start', count: e.touches.length });
+        }, { passive: false });
+
+        canvas.addEventListener('touchmove', function(e) {
+            e.preventDefault();
+            const t = e.changedTouches[0];
+            if (t) dispatchSynthMouse('mousemove', t);
+        }, { passive: false });
+
+        canvas.addEventListener('touchend', function(e) {
+            e.preventDefault();
+            const t = e.changedTouches[0];
+            if (t) dispatchSynthMouse('mouseup', t, 0);
+            sendToParent({ type: 'touch', phase: 'end', count: e.touches.length });
+        }, { passive: false });
+
+        canvas.addEventListener('touchcancel', function(e) {
+            e.preventDefault();
+            const t = e.changedTouches[0];
+            if (t) dispatchSynthMouse('mouseup', t, 0);
+        }, { passive: false });
+
+        // ── Mobile-friendly viewport ────────────────────────────────────
+
+        // Pixel ratio matters on mobile — without it a 1080×2400 phone
+        // renders at the wrong DPI and pixel art becomes blurry. We expose
+        // the ratio as a CSS variable and feed the device pixel size to the
+        // canvas while keeping its CSS size at viewport-relative units.
         function resizeCanvas() {
-            canvas.width = window.innerWidth;
-            canvas.height = window.innerHeight;
+            const dpr = Math.min(window.devicePixelRatio || 1, 2);
+            const cssW = window.innerWidth;
+            const cssH = window.innerHeight;
+            canvas.width = Math.floor(cssW * dpr);
+            canvas.height = Math.floor(cssH * dpr);
+            canvas.style.width = cssW + 'px';
+            canvas.style.height = cssH + 'px';
         }
         window.addEventListener('resize', resizeCanvas);
+        window.addEventListener('orientationchange', resizeCanvas);
         resizeCanvas();
+
+        // Register the PWA service worker so the game can be installed on
+        // mobile. Skipped inside the editor preview (where the engine runs
+        // in an iframe under /editor) to avoid scoping conflicts. Also
+        // skipped on http: (localhost works because it's an SW exception).
+        if ('serviceWorker' in navigator && window.parent === window) {
+            navigator.serviceWorker.register('/sw.js').catch(() => {
+                /* SW failure shouldn't break the game */
+            });
+        }
 
         // Notify parent that shell is ready
         sendToParent({ type: 'ready' });

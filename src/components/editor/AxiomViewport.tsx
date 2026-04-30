@@ -5,7 +5,7 @@ import { useEditorStore } from '@/lib/store';
 import { checkEngineAvailability, type EngineAvailability } from '@/lib/engine/loader';
 import { engineBridge } from '@/lib/engine/bridge';
 import { translateProjectFiles, translateEngineMessage } from '@/lib/engine/translate';
-import { Loader2, Zap } from 'lucide-react';
+import { Loader2, Zap, Monitor, Smartphone, Tablet, RotateCcw } from 'lucide-react';
 import GizmoToolbar from './GizmoToolbar';
 
 // Chunked conversion — a single `btoa(String.fromCharCode(...arr))` blows the
@@ -175,10 +175,24 @@ function FallbackCanvas({ isPlaying }: { isPlaying: boolean }) {
 /**
  * WASM engine mode — renders the engine inside an iframe.
  */
+// Device preview presets — used by the mobile-preview toggle so devs can
+// see how the game lays out on common form factors without flashing it to
+// a real phone. Sizes are CSS pixels (DPR is handled by axiom.html).
+type DevicePreview = 'desktop' | 'phone-portrait' | 'phone-landscape' | 'tablet-portrait' | 'tablet-landscape';
+
+const DEVICE_DIMENSIONS: Record<DevicePreview, { w: number; h: number; label: string }> = {
+    'desktop':          { w: 0,    h: 0,    label: 'Desktop' },        // 0/0 = fill
+    'phone-portrait':   { w: 393,  h: 852,  label: '393 × 852' },      // iPhone 15 Pro
+    'phone-landscape':  { w: 852,  h: 393,  label: '852 × 393' },
+    'tablet-portrait':  { w: 820,  h: 1180, label: '820 × 1180' },     // iPad
+    'tablet-landscape': { w: 1180, h: 820,  label: '1180 × 820' },
+};
+
 function WasmEngine({ isPlaying }: { isPlaying: boolean }) {
     const iframeRef = useRef<HTMLIFrameElement>(null);
     const [engineFps, setEngineFps] = useState(0);
     const [engineState, setEngineState] = useState<'loading' | 'ready' | 'running' | 'stopped'>('loading');
+    const [devicePreview, setDevicePreview] = useState<DevicePreview>('desktop');
     const { files, addConsoleEntry } = useEditorStore();
 
     // Connect the bridge once iframe loads
@@ -294,15 +308,32 @@ function WasmEngine({ isPlaying }: { isPlaying: boolean }) {
         }
     }, [isPlaying, files, engineState, addConsoleEntry]);
 
+    const dim = DEVICE_DIMENSIONS[devicePreview];
+    const isFramed = dim.w > 0 && dim.h > 0;
+
+    // Toggle phone <-> landscape and tablet <-> landscape with one button
+    // so users can see both orientations without hunting through the menu.
+    const rotate = () => {
+        if (devicePreview === 'phone-portrait') setDevicePreview('phone-landscape');
+        else if (devicePreview === 'phone-landscape') setDevicePreview('phone-portrait');
+        else if (devicePreview === 'tablet-portrait') setDevicePreview('tablet-landscape');
+        else if (devicePreview === 'tablet-landscape') setDevicePreview('tablet-portrait');
+    };
+
     return (
-        <div className="relative w-full h-full">
-            <iframe
-                ref={iframeRef}
-                src="/engine/axiom.html"
-                className="w-full h-full border-0"
-                allow="autoplay; fullscreen; cross-origin-isolated"
-                sandbox="allow-scripts allow-same-origin allow-modals allow-popups allow-pointer-lock"
-            />
+        <div className={`relative w-full h-full ${isFramed ? 'flex items-center justify-center bg-zinc-950 overflow-auto' : ''}`}>
+            <div
+                className={isFramed ? 'relative bg-black rounded-[20px] overflow-hidden shadow-2xl shadow-black/60 ring-1 ring-white/10' : 'relative w-full h-full'}
+                style={isFramed ? { width: dim.w, height: dim.h, flex: 'none' } : undefined}
+            >
+                <iframe
+                    ref={iframeRef}
+                    src="/engine/axiom.html"
+                    className="w-full h-full border-0"
+                    allow="autoplay; fullscreen; cross-origin-isolated"
+                    sandbox="allow-scripts allow-same-origin allow-modals allow-popups allow-pointer-lock"
+                />
+            </div>
 
             {/* Loading overlay */}
             {engineState === 'loading' && (
@@ -313,6 +344,48 @@ function WasmEngine({ isPlaying }: { isPlaying: boolean }) {
                     </div>
                 </div>
             )}
+
+            {/* Device preview toggle — top center, away from existing FPS/LIVE chips. */}
+            <div className="absolute top-2 left-1/2 -translate-x-1/2 flex items-center gap-1 px-1 py-1 bg-black/60 backdrop-blur rounded-lg z-10 ring-1 ring-white/10">
+                <button
+                    onClick={() => setDevicePreview('desktop')}
+                    className={`p-1.5 rounded transition-colors ${devicePreview === 'desktop' ? 'bg-violet-500/30 text-violet-200' : 'text-zinc-500 hover:text-zinc-300'}`}
+                    title="Desktop"
+                    aria-label="Desktop preview"
+                >
+                    <Monitor size={13} />
+                </button>
+                <button
+                    onClick={() => setDevicePreview(devicePreview === 'phone-landscape' ? 'phone-landscape' : 'phone-portrait')}
+                    className={`p-1.5 rounded transition-colors ${devicePreview.startsWith('phone') ? 'bg-violet-500/30 text-violet-200' : 'text-zinc-500 hover:text-zinc-300'}`}
+                    title="Phone preview"
+                    aria-label="Phone preview"
+                >
+                    <Smartphone size={13} />
+                </button>
+                <button
+                    onClick={() => setDevicePreview(devicePreview === 'tablet-landscape' ? 'tablet-landscape' : 'tablet-portrait')}
+                    className={`p-1.5 rounded transition-colors ${devicePreview.startsWith('tablet') ? 'bg-violet-500/30 text-violet-200' : 'text-zinc-500 hover:text-zinc-300'}`}
+                    title="Tablet preview"
+                    aria-label="Tablet preview"
+                >
+                    <Tablet size={13} />
+                </button>
+                {isFramed && (
+                    <>
+                        <div className="w-px h-3 bg-white/10 mx-0.5" />
+                        <button
+                            onClick={rotate}
+                            className="p-1.5 rounded text-zinc-400 hover:text-zinc-200 transition-colors"
+                            title="Rotate"
+                            aria-label="Rotate orientation"
+                        >
+                            <RotateCcw size={13} />
+                        </button>
+                        <span className="px-1.5 text-[10px] font-mono text-zinc-500">{dim.label}</span>
+                    </>
+                )}
+            </div>
 
             {/* FPS counter */}
             <div className={`absolute top-2 right-2 px-2 py-0.5 bg-black/60 rounded text-xs font-mono z-10 ${engineState === 'running' ? 'text-emerald-400' : 'text-zinc-500'}`}>

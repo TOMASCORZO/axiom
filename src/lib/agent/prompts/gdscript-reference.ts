@@ -265,5 +265,79 @@ func get_from_pool() -> Node2D:
 func return_to_pool(obj: Node2D):
     obj.visible = false
     pool.append(obj)
-\`\`\``;
+\`\`\`
+
+### Touch / Mobile Input
+
+The Axiom runtime forwards touch as both \`InputEventScreenTouch\` /
+\`InputEventScreenDrag\` (native) and synthesized \`InputEventMouseButton\`
+events, so anything written for mouse already works on touch. For
+mobile-specific gameplay use the screen events directly:
+
+\`\`\`gdscript
+# Tap / drag tracker — works the same on iOS, Android, web mobile.
+var touches: Dictionary = {}   # touch_index → Vector2 position
+func _input(event):
+    if event is InputEventScreenTouch:
+        if event.pressed:
+            touches[event.index] = event.position
+        else:
+            touches.erase(event.index)
+    elif event is InputEventScreenDrag:
+        touches[event.index] = event.position
+
+# Two-finger pinch (returns delta zoom). Hook to Camera2D.zoom.
+var pinch_start: float = 0.0
+func get_pinch_delta() -> float:
+    if touches.size() != 2: return 0.0
+    var ps = touches.values()
+    var d = ps[0].distance_to(ps[1])
+    if pinch_start == 0.0: pinch_start = d
+    var delta = d / pinch_start
+    pinch_start = d
+    return delta
+
+# Virtual joystick — TouchScreenButton or a Control with custom drag
+# handling. Read input as a normalized Vector2 in your physics process.
+@onready var joystick: Control = $UI/Joystick
+func _physics_process(_delta):
+    var dir: Vector2 = joystick.get_value() if joystick.has_method("get_value") else Vector2.ZERO
+    velocity = dir * speed
+    move_and_slide()
+\`\`\`
+
+### Mobile-Friendly UI
+
+\`Control\` nodes anchored to screen edges scale with the viewport — use
+anchor presets (\`set_anchors_preset(PRESET_BOTTOM_LEFT)\`) instead of
+hardcoded positions so the layout works at 393×852 (iPhone) and
+1180×820 (iPad landscape) without code changes.
+
+Touch targets must be **≥ 48×48 dp** (Material spec) for ergonomic
+tapping. Use \`Button.custom_minimum_size = Vector2(48, 48)\`. Avoid
+relying on hover states — there's no cursor on mobile.
+
+Safe-area: on phones with notches, anchor important UI to
+\`get_viewport().get_visible_rect()\` shrunken by ~44 px top / 34 px
+bottom. The shell already declares \`viewport-fit=cover\`.
+
+### Responsive Project Config
+
+\`project.axiom.json\` defines the base resolution but the runtime auto-
+fits to device DPI. For mobile-first games:
+
+\`\`\`json
+{
+  "display": {
+    "viewport_w": 720,
+    "viewport_h": 1280,
+    "stretch_mode": "canvas_items",
+    "stretch_aspect": "keep_height"
+  }
+}
+\`\`\`
+
+For a portrait-mobile game use \`viewport_w < viewport_h\` and
+\`keep_width\`; for landscape, the inverse. The agent should set this
+via \`create_project_config\` based on the user's stated target.`;
 }
