@@ -16,6 +16,7 @@ import SubsystemsPanel from './SubsystemsPanel';
 import AnimationTimeline from './AnimationTimeline';
 import HierarchyPanel from './HierarchyPanel';
 import InspectorPanel from './InspectorPanel';
+import Toaster from '@/components/ui/Toaster';
 import { useEditorStore } from '@/lib/store';
 
 interface EditorLayoutProps {
@@ -126,6 +127,7 @@ export default function EditorLayout({ projectId }: EditorLayoutProps) {
                     )}
                 </div>
             </div>
+            <Toaster />
         </div>
     );
 }

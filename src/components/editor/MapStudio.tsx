@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { useEditorStore } from '@/lib/store';
 import { useMapEditorStore, type MapTool } from '@/lib/map-store';
+import { toast } from '@/lib/toast';
 import type { Asset, MapMetadataShape, MapMode, MapProjection, TerrainCorner } from '@/types/asset';
 import { tryParseMapMetadata } from '@/lib/map-schema';
 import {
@@ -172,12 +173,14 @@ function GenerateMapTab() {
             if (startRes.status === 429) {
                 const reason = errorMessage(startData.error, 'Rate limit reached. Try again in a few minutes.');
                 setError(reason);
+                toast.warn('Rate limit reached', { detail: reason });
                 addConsoleEntry({ id: crypto.randomUUID(), level: 'warn', message: `[Map Studio] ${reason}`, timestamp: new Date().toISOString() });
                 return;
             }
             if (!startRes.ok || !startData.success || !startData.job_id) {
                 const errMsg = errorMessage(startData.error, `Map generation failed (HTTP ${startRes.status})`);
                 setError(errMsg);
+                toast.error('Map generation failed', { detail: errMsg });
                 addConsoleEntry({ id: crypto.randomUUID(), level: 'error', message: `[Map Studio] Failed: ${errMsg}`, timestamp: new Date().toISOString() });
                 return;
             }
@@ -215,21 +218,27 @@ function GenerateMapTab() {
                     consecutiveFails++;
                     currentIntervalMs = Math.min(currentIntervalMs * 2, maxIntervalMs);
                     if (consecutiveFails >= maxConsecutiveFails) {
-                        setError('Lost connection to generation service — please retry');
+                        const msg = 'Lost connection to generation service — please retry';
+                        setError(msg);
+                        toast.error(msg);
                         return;
                     }
                     continue;
                 }
 
                 if (sRes.status === 404) {
-                    setError('Generation job disappeared server-side — please retry');
+                    const msg = 'Generation job disappeared server-side — please retry';
+                    setError(msg);
+                    toast.error(msg);
                     return;
                 }
                 if (!sRes.ok) {
                     consecutiveFails++;
                     currentIntervalMs = Math.min(currentIntervalMs * 2, maxIntervalMs);
                     if (consecutiveFails >= maxConsecutiveFails) {
-                        setError(`Generation service is unhealthy (HTTP ${sRes.status}) — please retry`);
+                        const msg = `Generation service is unhealthy (HTTP ${sRes.status}) — please retry`;
+                        setError(msg);
+                        toast.error(msg);
                         return;
                     }
                     continue;
@@ -246,12 +255,14 @@ function GenerateMapTab() {
 
             if (!finalStatus) {
                 setError('Map generation timed out — please try again');
+                toast.error('Generation timed out', { detail: 'Try a smaller grid or check the worker logs' });
                 addConsoleEntry({ id: crypto.randomUUID(), level: 'error', message: '[Map Studio] Timeout waiting for job', timestamp: new Date().toISOString() });
                 return;
             }
             if (finalStatus.status === 'failed') {
                 const errMsg = errorMessage(finalStatus.error, 'Map generation failed');
                 setError(errMsg);
+                toast.error('Map generation failed', { detail: errMsg });
                 addConsoleEntry({ id: crypto.randomUUID(), level: 'error', message: `[Map Studio] Failed: ${errMsg}`, timestamp: new Date().toISOString() });
                 return;
             }
@@ -264,6 +275,7 @@ function GenerateMapTab() {
             const parsed = tryParseMapMetadata(out.map_metadata);
             if (!parsed.ok) {
                 setError(`Map generation returned invalid metadata: ${parsed.error}`);
+                toast.error('Invalid map metadata', { detail: parsed.error });
                 addConsoleEntry({ id: crypto.randomUUID(), level: 'error', message: `[Map Studio] Invalid metadata: ${parsed.error}`, timestamp: new Date().toISOString() });
                 return;
             }
@@ -299,6 +311,7 @@ function GenerateMapTab() {
             addAsset(asset);
             refreshProjectFiles(project.id);
             open(assetId, metadata);
+            toast.success('Map generated', { detail: `${grid.w}×${grid.h} · ${tileSize}px` });
             addConsoleEntry({
                 id: crypto.randomUUID(), level: 'log',
                 message: `[Map Studio] Map generated → ${targetPath}`,
@@ -695,22 +708,32 @@ function TilesetTab() {
                 body: JSON.stringify(body),
             });
             const data = await res.json();
+            if (res.status === 429) {
+                const reason = errorMessage(data.error, 'Rate limit reached. Try again in a few minutes.');
+                setError(reason);
+                toast.warn('Rate limit reached', { detail: reason });
+                return;
+            }
             if (!res.ok || !data.success) {
                 const msg = errorMessage(data.error, `Tileset failed (HTTP ${res.status})`);
                 setError(msg);
+                toast.error('Tileset generation failed', { detail: msg });
                 addConsoleEntry({ id: crypto.randomUUID(), level: 'error', message: `[Map Studio] Tileset failed: ${msg}`, timestamp: new Date().toISOString() });
                 return;
             }
             const paths: string[] = data.tile_paths ?? [];
             setResultPaths(paths);
             refreshProjectFiles(project.id);
+            toast.success(`Tileset · ${paths.length} tiles`, { detail: targetDir });
             addConsoleEntry({
                 id: crypto.randomUUID(), level: 'log',
                 message: `[Map Studio] Tileset → ${paths.length} tiles in ${targetDir}/ (~$${(data.cost ?? 0).toFixed(3)})`,
                 timestamp: new Date().toISOString(),
             });
         } catch (err) {
-            setError(err instanceof Error ? err.message : 'Network error');
+            const errMsg = err instanceof Error ? err.message : 'Network error';
+            setError(errMsg);
+            toast.error('Network error', { detail: errMsg });
         } finally {
             setBusy(false);
         }

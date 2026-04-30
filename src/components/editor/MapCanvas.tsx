@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { useEditorStore } from '@/lib/store';
 import { useMapEditorStore, computeStackStep } from '@/lib/map-store';
+import { toast } from '@/lib/toast';
 import { Map as MapIcon, Save, Undo2, Redo2, Loader2, Wand2, X } from 'lucide-react';
 import type { MapWangTile, TerrainCorner } from '@/types/asset';
 
@@ -12,6 +13,15 @@ export const MAP_ASSET_DRAG_MIME = 'application/x-axiom-asset';
 // ── Image cache ─────────────────────────────────────────────────────
 // Loads images for the current tile + object libraries. Keyed by storage_key
 // so the cache survives re-renders and remains stable across edits.
+//
+// Concurrency cap: the previous implementation kicked off ALL image fetches
+// in parallel — for a 16-tile Wang map + 50-object library the browser would
+// open 60+ simultaneous connections, saturate the network, and starve other
+// /api requests in the editor. We now run a small worker pool (MAX_CONCURRENT
+// = 6) so loads come in waves. Errors don't block the queue — a single bad
+// storage_key just leaves a hole in the canvas (renders as the placeholder).
+const MAX_CONCURRENT_IMAGE_LOADS = 6;
+
 function useImageCache(storageKeys: string[]): Map<string, HTMLImageElement> {
     const [cache, setCache] = useState<Map<string, HTMLImageElement>>(() => new Map());
 
@@ -19,19 +29,42 @@ function useImageCache(storageKeys: string[]): Map<string, HTMLImageElement> {
         let cancelled = false;
         const missing = storageKeys.filter(k => !cache.has(k));
         if (missing.length === 0) return;
-        for (const key of missing) {
-            const img = new Image();
-            img.onload = () => {
-                if (cancelled) return;
-                setCache(prev => {
-                    if (prev.has(key)) return prev;
-                    const next = new Map(prev);
-                    next.set(key, img);
-                    return next;
-                });
-            };
-            img.src = `/api/assets/serve?key=${encodeURIComponent(key)}`;
-        }
+
+        const queue = [...missing];
+        let inFlight = 0;
+
+        const pump = () => {
+            while (!cancelled && inFlight < MAX_CONCURRENT_IMAGE_LOADS && queue.length > 0) {
+                const key = queue.shift();
+                if (!key) break;
+                inFlight++;
+                const img = new Image();
+                const finish = () => {
+                    inFlight--;
+                    pump();
+                };
+                img.onload = () => {
+                    if (!cancelled) {
+                        setCache(prev => {
+                            if (prev.has(key)) return prev;
+                            const next = new Map(prev);
+                            next.set(key, img);
+                            return next;
+                        });
+                    }
+                    finish();
+                };
+                img.onerror = () => {
+                    // Don't block the queue on a single bad key. The canvas
+                    // already falls back to placeholder when imageCache.get()
+                    // returns undefined.
+                    finish();
+                };
+                img.src = `/api/assets/serve?key=${encodeURIComponent(key)}`;
+            }
+        };
+
+        pump();
         return () => { cancelled = true; };
         // cache is intentionally omitted: we only want to re-run when storageKeys changes.
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -634,8 +667,16 @@ export default function MapCanvas() {
                 }),
             });
             const data = await res.json();
+            if (res.status === 429) {
+                const reason = typeof data.error === 'string' ? data.error : 'Rate limit reached';
+                setInpaintError(reason);
+                toast.warn('Rate limit reached', { detail: reason });
+                return;
+            }
             if (!res.ok || !data.success) {
-                setInpaintError(typeof data.error === 'string' ? data.error : `HTTP ${res.status}`);
+                const msg = typeof data.error === 'string' ? data.error : `HTTP ${res.status}`;
+                setInpaintError(msg);
+                toast.error('Inpaint failed', { detail: msg });
                 return;
             }
             // Stash the generated object in the library and place it at the
@@ -643,6 +684,7 @@ export default function MapCanvas() {
             // afterwards like any other placement.
             addObjectToLibrary(data.object);
             placeObject(inpaintCellRect.x, inpaintCellRect.y, data.object.id);
+            toast.success('Region inpainted', { detail: `${inpaintCellRect.w}×${inpaintCellRect.h} cells` });
             addConsoleEntry({
                 id: crypto.randomUUID(), level: 'log',
                 message: `[Map Studio] Inpaint → "${inpaintPrompt.trim()}" at (${inpaintCellRect.x},${inpaintCellRect.y}) ${inpaintCellRect.w}×${inpaintCellRect.h} cells`,
@@ -690,6 +732,10 @@ export default function MapCanvas() {
     // Save (recompose) handler
     const handleSave = async () => {
         if (!metadata || !assetId || !project?.id) return;
+        // Hard guard against double-submit. Without this, a user can spam-click
+        // Save during a slow recompose (Wang composes 16 tiles + N placements
+        // can take 20s+) and orphan storage uploads.
+        if (useMapEditorStore.getState().saving) return;
         useMapEditorStore.getState().setSaving(true);
         useMapEditorStore.getState().setSaveError(null);
         try {
@@ -711,13 +757,15 @@ export default function MapCanvas() {
             });
             const data = await res.json();
             if (res.status === 409 || data?.conflict) {
-                useMapEditorStore.getState().setSaveError(
-                    data.error || 'Map was modified elsewhere — reload to continue',
-                );
+                const conflictMsg = typeof data.error === 'string' ? data.error : 'Map was modified elsewhere — reload to continue';
+                useMapEditorStore.getState().setSaveError(conflictMsg);
+                toast.error('Save conflict', { detail: conflictMsg });
                 return;
             }
             if (!res.ok || !data.success) {
-                useMapEditorStore.getState().setSaveError(data.error || `HTTP ${res.status}`);
+                const errMsg = typeof data.error === 'string' ? data.error : `HTTP ${res.status}`;
+                useMapEditorStore.getState().setSaveError(errMsg);
+                toast.error('Save failed', { detail: errMsg });
                 return;
             }
             // Adopt the new version the server assigned, so subsequent saves
@@ -740,8 +788,11 @@ export default function MapCanvas() {
                 message: `[Map Studio] Saved map → ${targetPath}`,
                 timestamp: new Date().toISOString(),
             });
+            toast.success('Map saved');
         } catch (err) {
-            useMapEditorStore.getState().setSaveError(err instanceof Error ? err.message : 'Save failed');
+            const errMsg = err instanceof Error ? err.message : 'Save failed';
+            useMapEditorStore.getState().setSaveError(errMsg);
+            toast.error('Save failed', { detail: errMsg });
         } finally {
             useMapEditorStore.getState().setSaving(false);
         }
@@ -845,6 +896,18 @@ export default function MapCanvas() {
                                 height: inpaintCellRect.h * tileSize,
                             }}
                         />
+                    </div>
+                )}
+
+                {/* Recompose lock — covers the canvas during save so the user
+                    can't paint into stale state (their edits would be lost
+                    when the new metadata version comes back from the server). */}
+                {saving && (
+                    <div className="absolute inset-0 z-30 bg-zinc-950/40 backdrop-blur-[1px] flex items-center justify-center pointer-events-auto">
+                        <div className="flex items-center gap-2 px-4 py-2 rounded-lg bg-zinc-900/95 border border-violet-500/30 shadow-xl shadow-black/40">
+                            <Loader2 size={14} className="animate-spin text-violet-400" />
+                            <span className="text-xs text-zinc-200">Recomposing map…</span>
+                        </div>
                     </div>
                 )}
 
