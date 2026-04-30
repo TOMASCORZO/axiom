@@ -26,6 +26,7 @@ import {
     decodeB64,
     type CreateTilesetResp,
     type WangTileResp,
+    type TilesProShape,
 } from './pixellab-maps';
 import type { TerrainCorner } from '@/types/asset';
 
@@ -38,6 +39,12 @@ export interface GenerateWangTilesetOptions {
     tileSize?: 16 | 32;
     view?: 'low top-down' | 'high top-down';
     seed?: number;
+    /** Width of the blended transition band (0 = none, 1 = full tile). Defaults to 0.5 when `transition` is set. */
+    transitionSize?: 0 | 0.25 | 0.5 | 0.75 | 1.0;
+    /** Free-text art-direction hints sent straight to /create-tileset. */
+    outline?: string;       // e.g. "thin black outline" | "no outline"
+    shading?: string;       // e.g. "soft shading" | "hard pillow shading"
+    detail?: string;        // e.g. "low detail" | "high detail"
 }
 
 export interface GeneratedWangTile {
@@ -73,8 +80,11 @@ export async function generateWangTileset(opts: GenerateWangTilesetOptions): Pro
             transitionDescription: opts.transition,
             tileSize: opts.tileSize ?? 32,
             view: opts.view ?? 'high top-down',
-            transitionSize: opts.transition ? 0.5 : 0,
+            transitionSize: opts.transitionSize ?? (opts.transition ? 0.5 : 0),
             seed: opts.seed,
+            outline: opts.outline,
+            shading: opts.shading,
+            detail: opts.detail,
         });
 
         const tsTiles = resp.tileset?.tiles ?? [];
@@ -115,12 +125,16 @@ export type IsoView = 'top-down' | 'high top-down' | 'low top-down' | 'side';
 export interface GenerateIsoTilesOptions {
     /** Numbered prompts carry the tile count — e.g. "1). grass 2). dirt 3). stone". */
     description: string;
+    /** Tile geometry. Defaults to 'isometric' for backwards compat. */
+    tileType?: TilesProShape;
     tileSize?: number;      // 16-256, default 32 (footprint width)
     /** Explicit tile pixel height. Makes iso tiles render as taller blocks.
      *  When omitted, PixelLab computes from tileView + tile_type geometry. */
     tileHeight?: number;
     /** View preset — controls implicit depth. */
     tileView?: IsoView;
+    /** Continuous view angle 0–90deg (overrides tileView when set). */
+    tileViewAngle?: number;
     /** 0.0 flat → 1.0 tall block. Overrides tileView's implicit depth. */
     tileDepthRatio?: number;
     seed?: number;
@@ -143,10 +157,11 @@ export async function generateIsoTiles(opts: GenerateIsoTilesOptions): Promise<G
     try {
         const resp = await createTilesPro({
             description: opts.description,
-            tileType: 'isometric',
+            tileType: opts.tileType ?? 'isometric',
             tileSize: opts.tileSize ?? 32,
             tileHeight: opts.tileHeight,
             tileView: opts.tileView,
+            tileViewAngle: opts.tileViewAngle,
             tileDepthRatio: opts.tileDepthRatio,
             seed: opts.seed,
         });
@@ -207,12 +222,18 @@ export async function generateIsoTiles(opts: GenerateIsoTilesOptions): Promise<G
     }
 }
 
+/** Shape-generic alias for generateIsoTiles. Use with tileType='hex' /
+ *  'hex_pointy' / 'octagon' / 'square_topdown' for non-isometric tilesets. */
+export const generateTilesPro = generateIsoTiles;
+
 // Single iso tile — convenience used by the single-tile generator in MapStudio.
 export interface GenerateSingleIsoTileOptions {
     prompt: string;
     tileSize?: 16 | 32;
     shape?: 'thin tile' | 'thick tile' | 'block';
     seed?: number;
+    /** 1–20. Higher = stick closer to prompt; lower = more creative. */
+    textGuidanceScale?: number;
 }
 
 export async function generateSingleIsoTile(opts: GenerateSingleIsoTileOptions): Promise<{ success: boolean; buffer?: Buffer; width: number; height: number; cost: number; error?: string }> {
@@ -225,6 +246,7 @@ export async function generateSingleIsoTile(opts: GenerateSingleIsoTileOptions):
             isoShape: opts.shape ?? 'block',
             isoTileSize: ts,
             seed: opts.seed,
+            textGuidanceScale: opts.textGuidanceScale,
         });
         const buf = extractIsoTileBuffer(resp);
         if (!buf) return { success: false, width: 0, height: 0, cost: 0, error: 'No image in iso tile response' };
@@ -245,6 +267,13 @@ export interface GenerateMapObjectOptions {
     /** Optional composed map PNG for style-match via inpainting. */
     backgroundImageBase64?: string;
     seed?: number;
+    /** 1–20. Higher = stick closer to prompt; lower = more creative. */
+    textGuidanceScale?: number;
+    /** Optional inpainting region — restricts generation to a sub-area of the
+     *  background image. Coordinates are in pixels of the background. */
+    inpainting?:
+        | { type: 'oval' | 'rectangle'; x: number; y: number; w: number; h: number }
+        | { type: 'mask'; mask_base64: string };
 }
 
 export interface GenerateMapObjectResult {
@@ -275,6 +304,8 @@ export async function generateMapObjectV2(opts: GenerateMapObjectOptions): Promi
             view: opts.view ?? 'high top-down',
             backgroundImageBase64: opts.backgroundImageBase64,
             seed: opts.seed,
+            textGuidanceScale: opts.textGuidanceScale,
+            inpainting: opts.inpainting,
         });
         const buf = extractMapObjectBuffer(resp);
         if (!buf) {

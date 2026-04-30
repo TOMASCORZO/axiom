@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { useEditorStore } from '@/lib/store';
 import { useMapEditorStore, computeStackStep } from '@/lib/map-store';
-import { Map as MapIcon, Save, Undo2, Redo2, Loader2 } from 'lucide-react';
+import { Map as MapIcon, Save, Undo2, Redo2, Loader2, Wand2, X } from 'lucide-react';
 import type { MapWangTile, TerrainCorner } from '@/types/asset';
 
 /** MIME type identifying an asset drag from the Gallery. Data is the asset id. */
@@ -86,8 +86,27 @@ export default function MapCanvas() {
         stackAdd, stackPop,
         undo, redoAction, dirty, saving, saveError,
         assetId, history, redo,
+        addObjectToLibrary,
     } = useMapEditorStore();
     const { project, addConsoleEntry, assets } = useEditorStore();
+
+    // Inpaint rectangle (orthogonal only). Cell coords on the map grid.
+    type InpaintRect = { startCell: { x: number; y: number }; endCell: { x: number; y: number }; frozen: boolean };
+    const [inpaintRect, setInpaintRect] = useState<InpaintRect | null>(null);
+    const [inpaintPrompt, setInpaintPrompt] = useState('');
+    const [inpaintBusy, setInpaintBusy] = useState(false);
+    const [inpaintError, setInpaintError] = useState<string | null>(null);
+
+    // Reset inpaint state on tool change so a stale rect from a previous tool
+    // session doesn't bleed into the next one. Also reset when the active map
+    // changes — a frozen rect from another map is meaningless here.
+    useEffect(() => {
+        if (tool !== 'inpaint') {
+            setInpaintRect(null);
+            setInpaintPrompt('');
+            setInpaintError(null);
+        }
+    }, [tool, assetId]);
 
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
@@ -471,6 +490,17 @@ export default function MapCanvas() {
             dragRef.current = { active: true, startX: e.clientX, startY: e.clientY, ox: pan.x, oy: pan.y, panning: true };
             return;
         }
+        // Inpaint: drag a cell-aligned rectangle. Ortho only — iso projection
+        // doesn't have a 1:1 cell→pixel mapping that PixelLab's inpainting can
+        // consume directly.
+        if (e.button === 0 && tool === 'inpaint' && !isIso) {
+            const cell = coordsFromEvent(e, 'cell');
+            if (cell) {
+                setInpaintRect({ startCell: cell, endCell: cell, frozen: false });
+                setInpaintError(null);
+            }
+            return;
+        }
         if (e.button === 0) {
             painting.current = true;
             applyTool(e);
@@ -521,6 +551,11 @@ export default function MapCanvas() {
             });
             return;
         }
+        if (inpaintRect && !inpaintRect.frozen) {
+            const cell = coordsFromEvent(e, 'cell');
+            if (cell) setInpaintRect(r => r ? { ...r, endCell: cell } : r);
+            return;
+        }
         if (painting.current) {
             applyTool(e);
         }
@@ -529,6 +564,16 @@ export default function MapCanvas() {
     const endDrag = () => {
         painting.current = false;
         if (dragRef.current) dragRef.current.active = false;
+        // Freeze the inpaint rect on mouseup. Discard if collapsed (zero area).
+        if (inpaintRect && !inpaintRect.frozen) {
+            const w = Math.abs(inpaintRect.endCell.x - inpaintRect.startCell.x) + 1;
+            const h = Math.abs(inpaintRect.endCell.y - inpaintRect.startCell.y) + 1;
+            if (w < 1 || h < 1) {
+                setInpaintRect(null);
+            } else {
+                setInpaintRect(r => r ? { ...r, frozen: true } : r);
+            }
+        }
     };
 
     const handleWheel = (e: React.WheelEvent) => {
@@ -536,6 +581,79 @@ export default function MapCanvas() {
         const dir = e.deltaY < 0 ? 1.1 : 0.9;
         const next = Math.max(0.1, Math.min(zoom * dir, 8));
         setZoom(next);
+    };
+
+    // Normalized rect in cell coords (top-left + size) — used for both render
+    // and submission so they stay in sync.
+    const inpaintCellRect = inpaintRect ? (() => {
+        const x0 = Math.min(inpaintRect.startCell.x, inpaintRect.endCell.x);
+        const y0 = Math.min(inpaintRect.startCell.y, inpaintRect.endCell.y);
+        const w = Math.abs(inpaintRect.endCell.x - inpaintRect.startCell.x) + 1;
+        const h = Math.abs(inpaintRect.endCell.y - inpaintRect.startCell.y) + 1;
+        return { x: x0, y: y0, w, h };
+    })() : null;
+
+    const cancelInpaint = () => {
+        setInpaintRect(null);
+        setInpaintPrompt('');
+        setInpaintError(null);
+    };
+
+    const runInpaint = async () => {
+        if (!inpaintCellRect || !inpaintPrompt.trim() || !project?.id || !metadata || !assetId) return;
+        const currentAsset = assets.find(a => a.id === assetId);
+        if (!currentAsset?.storage_key) {
+            setInpaintError('Map has no storage key — save the map first.');
+            return;
+        }
+        setInpaintBusy(true);
+        setInpaintError(null);
+        try {
+            // Convert cell coords → pixel coords on the composed map PNG.
+            const pxX = inpaintCellRect.x * tileSize;
+            const pxY = inpaintCellRect.y * tileSize;
+            const pxW = inpaintCellRect.w * tileSize;
+            const pxH = inpaintCellRect.h * tileSize;
+            const slug = inpaintPrompt.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 20) || 'inpaint';
+            const target = `assets/maps/objects/${slug}_${Date.now() % 100000}.png`;
+
+            const res = await fetch('/api/assets/map-action', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    action: 'generate_object',
+                    project_id: project.id,
+                    prompt: inpaintPrompt.trim(),
+                    tile_size: tileSize,
+                    width_tiles: inpaintCellRect.w,
+                    height_tiles: inpaintCellRect.h,
+                    view: 'high top-down',
+                    target_path: target,
+                    background_storage_key: currentAsset.storage_key,
+                    inpaint_region: { shape: 'rectangle', x: pxX, y: pxY, width: pxW, height: pxH },
+                }),
+            });
+            const data = await res.json();
+            if (!res.ok || !data.success) {
+                setInpaintError(typeof data.error === 'string' ? data.error : `HTTP ${res.status}`);
+                return;
+            }
+            // Stash the generated object in the library and place it at the
+            // top-left cell of the inpaint rect. The user can move/delete it
+            // afterwards like any other placement.
+            addObjectToLibrary(data.object);
+            placeObject(inpaintCellRect.x, inpaintCellRect.y, data.object.id);
+            addConsoleEntry({
+                id: crypto.randomUUID(), level: 'log',
+                message: `[Map Studio] Inpaint → "${inpaintPrompt.trim()}" at (${inpaintCellRect.x},${inpaintCellRect.y}) ${inpaintCellRect.w}×${inpaintCellRect.h} cells`,
+                timestamp: new Date().toISOString(),
+            });
+            cancelInpaint();
+        } catch (err) {
+            setInpaintError(err instanceof Error ? err.message : 'Network error');
+        } finally {
+            setInpaintBusy(false);
+        }
     };
 
     const handleDragOver = (e: React.DragEvent) => {
@@ -697,7 +815,7 @@ export default function MapCanvas() {
                 onDragOver={handleDragOver}
                 onDrop={handleDrop}
                 onContextMenu={(e) => e.preventDefault()}
-                style={{ cursor: tool === 'pan' ? 'grab' : 'crosshair' }}
+                style={{ cursor: tool === 'pan' ? 'grab' : tool === 'inpaint' ? 'crosshair' : 'crosshair' }}
             >
                 <div className="absolute inset-0 bg-[length:16px_16px] bg-[position:0_0,8px_8px] bg-[image:linear-gradient(45deg,#111118_25%,transparent_25%,transparent_75%,#111118_75%),linear-gradient(45deg,#111118_25%,transparent_25%,transparent_75%,#111118_75%)]" />
                 <canvas
@@ -708,6 +826,79 @@ export default function MapCanvas() {
                         imageRendering: 'pixelated',
                     }}
                 />
+
+                {/* Inpaint selection rectangle (ortho only). Positioned in the
+                    same transformed space as the canvas so it tracks pan/zoom. */}
+                {inpaintCellRect && !isIso && (
+                    <div
+                        className="absolute origin-top-left pointer-events-none"
+                        style={{
+                            transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+                        }}
+                    >
+                        <div
+                            className={`absolute border-2 ${inpaintRect?.frozen ? 'border-violet-400 bg-violet-400/10' : 'border-violet-300 border-dashed bg-violet-300/5'}`}
+                            style={{
+                                left: inpaintCellRect.x * tileSize,
+                                top: inpaintCellRect.y * tileSize,
+                                width: inpaintCellRect.w * tileSize,
+                                height: inpaintCellRect.h * tileSize,
+                            }}
+                        />
+                    </div>
+                )}
+
+                {/* Inpaint popover form — appears once the rect is frozen. */}
+                {inpaintRect?.frozen && inpaintCellRect && !isIso && (
+                    <div
+                        className="absolute z-20 w-[260px] bg-zinc-900/95 backdrop-blur border border-violet-500/40 rounded-lg shadow-xl shadow-black/40 p-3 flex flex-col gap-2"
+                        style={{
+                            // Position the popover at the rect's bottom-right in screen coords.
+                            left: pan.x + (inpaintCellRect.x + inpaintCellRect.w) * tileSize * zoom + 8,
+                            top: pan.y + inpaintCellRect.y * tileSize * zoom,
+                        }}
+                    >
+                        <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-1.5 text-[11px] text-violet-300 font-medium">
+                                <Wand2 size={11} /> Inpaint region
+                            </div>
+                            <button onClick={cancelInpaint} className="text-zinc-500 hover:text-zinc-200" title="Cancel (Esc)">
+                                <X size={12} />
+                            </button>
+                        </div>
+                        <div className="text-[10px] text-zinc-500 font-mono">
+                            ({inpaintCellRect.x},{inpaintCellRect.y}) · {inpaintCellRect.w}×{inpaintCellRect.h} cells · {inpaintCellRect.w * tileSize}×{inpaintCellRect.h * tileSize} px
+                        </div>
+                        <textarea
+                            value={inpaintPrompt}
+                            onChange={e => setInpaintPrompt(e.target.value)}
+                            rows={3}
+                            autoFocus
+                            placeholder='What goes here? e.g. "small village with stone houses"'
+                            className="w-full bg-zinc-950 border border-white/10 rounded px-2 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 resize-none focus:outline-none focus:border-violet-500/50"
+                            onKeyDown={(e) => {
+                                if (e.key === 'Escape') cancelInpaint();
+                                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) runInpaint();
+                            }}
+                        />
+                        {inpaintError && <div className="text-[10px] text-red-400">{inpaintError}</div>}
+                        <div className="flex gap-1.5">
+                            <button
+                                onClick={cancelInpaint}
+                                className="flex-1 py-1.5 text-[11px] rounded bg-zinc-800 text-zinc-300 hover:bg-zinc-700 transition-colors"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={runInpaint}
+                                disabled={!inpaintPrompt.trim() || inpaintBusy}
+                                className="flex-1 py-1.5 text-[11px] rounded bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 text-white font-medium disabled:opacity-40 flex items-center justify-center gap-1"
+                            >
+                                {inpaintBusy ? <><Loader2 size={11} className="animate-spin" /> Generating…</> : <><Wand2 size={11} /> Inpaint</>}
+                            </button>
+                        </div>
+                    </div>
+                )}
             </div>
 
             {/* Status bar */}

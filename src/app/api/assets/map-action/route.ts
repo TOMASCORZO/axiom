@@ -4,6 +4,7 @@ import { getAdminClient } from '@/lib/supabase/admin';
 import {
     generateMapObjectV2,
     generateSingleIsoTile,
+    generateTilesPro,
     composeWangMap,
     composeIsoMap,
 } from '@/lib/assets/map-generate';
@@ -30,6 +31,12 @@ interface GenerateObjectBody {
     target_path: string;
     /** Optional: storage_key of a composed map PNG for style-match via inpainting. */
     background_storage_key?: string;
+    /** Optional: restrict generation to a sub-area of the background. Pixel coords. */
+    inpaint_region?: { shape?: 'oval' | 'rectangle'; x: number; y: number; width: number; height: number };
+    /** Optional deterministic seed. */
+    seed?: number;
+    /** 1–20. Higher = stick closer to prompt; lower = more creative. */
+    text_guidance_scale?: number;
 }
 
 interface GenerateIsoTileBody {
@@ -39,6 +46,24 @@ interface GenerateIsoTileBody {
     tile_size: 16 | 32;
     shape?: 'thin tile' | 'thick tile' | 'block';
     target_path: string;
+    seed?: number;
+    text_guidance_scale?: number;
+}
+
+interface GenerateTilesetBody {
+    action: 'generate_tileset';
+    project_id: string;
+    prompt: string;
+    variant_prompts?: string[];
+    shape?: 'isometric' | 'hex' | 'hex_pointy' | 'octagon' | 'square_topdown';
+    tile_size?: number;
+    tile_height?: number;
+    tile_view?: 'top-down' | 'high top-down' | 'low top-down' | 'side';
+    tile_view_angle?: number;
+    tile_depth_ratio?: number;
+    seed?: number;
+    /** Storage directory under assets/ where tile PNGs will land. Tiles → {target_dir}/{i}.png. */
+    target_dir: string;
 }
 
 interface RecomposeBody {
@@ -52,7 +77,7 @@ interface RecomposeBody {
     expected_version?: number;
 }
 
-type Body = GenerateObjectBody | GenerateIsoTileBody | RecomposeBody;
+type Body = GenerateObjectBody | GenerateIsoTileBody | GenerateTilesetBody | RecomposeBody;
 
 async function resolveUser(projectId: string): Promise<string | null> {
     const supabase = await createServerSupabaseClient();
@@ -125,6 +150,17 @@ export async function POST(request: NextRequest) {
                 heightTiles: body.height_tiles,
                 view: body.view,
                 backgroundImageBase64,
+                seed: body.seed,
+                textGuidanceScale: body.text_guidance_scale,
+                inpainting: body.inpaint_region && backgroundImageBase64
+                    ? {
+                          type: body.inpaint_region.shape ?? 'rectangle',
+                          x: body.inpaint_region.x,
+                          y: body.inpaint_region.y,
+                          w: body.inpaint_region.width,
+                          h: body.inpaint_region.height,
+                      }
+                    : undefined,
             });
             if (!result.success || !result.buffer) {
                 return NextResponse.json({ success: false, error: result.error || 'Object generation failed' }, { status: 500 });
@@ -147,6 +183,8 @@ export async function POST(request: NextRequest) {
                 prompt: body.prompt,
                 tileSize: body.tile_size,
                 shape: body.shape,
+                seed: body.seed,
+                textGuidanceScale: body.text_guidance_scale,
             });
             if (!result.success || !result.buffer) {
                 return NextResponse.json({ success: false, error: result.error || 'Iso tile generation failed' }, { status: 500 });
@@ -160,6 +198,48 @@ export async function POST(request: NextRequest) {
                 height: result.height,
             };
             return NextResponse.json({ success: true, tile, cost: result.cost });
+        }
+
+        // ── generate_tileset (shape-generic, returns N tile PNGs) ─
+        if (body.action === 'generate_tileset') {
+            const variantPrompts = (body.variant_prompts ?? [
+                `${body.prompt} — variant 1`,
+                `${body.prompt} — variant 2`,
+                `${body.prompt} — variant 3`,
+            ]).slice(0, 16);
+            const description = variantPrompts.map((p, i) => `${i + 1}). ${p}`).join(' ');
+            const targetDir = body.target_dir.replace(/\/+$/, '');
+            const tileSize = Math.max(16, Math.min(body.tile_size ?? 32, 256));
+
+            const result = await generateTilesPro({
+                description,
+                tileType: body.shape ?? 'hex',
+                tileSize,
+                tileHeight: body.tile_height,
+                tileView: body.tile_view,
+                tileViewAngle: body.tile_view_angle,
+                tileDepthRatio: body.tile_depth_ratio,
+                seed: body.seed,
+            });
+            if (!result.success) {
+                return NextResponse.json({ success: false, error: result.error || 'Tileset generation failed' }, { status: 500 });
+            }
+
+            const tilePaths: string[] = [];
+            for (let i = 0; i < result.tiles.length; i++) {
+                const t = result.tiles[i];
+                const path = `${targetDir}/${i}.png`;
+                await uploadAssetBuffer(userId, body.project_id, path, t.buffer);
+                tilePaths.push(path);
+            }
+            return NextResponse.json({
+                success: true,
+                shape: body.shape ?? 'hex',
+                tile_size: tileSize,
+                tile_paths: tilePaths,
+                count: tilePaths.length,
+                cost: result.cost,
+            });
         }
 
         // ── recompose ────────────────────────────────────────────

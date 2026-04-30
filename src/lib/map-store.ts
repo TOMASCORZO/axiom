@@ -17,7 +17,10 @@ import { ensureLayers } from '@/lib/map-schema';
 // Iso-only tools:
 //   stack_add  → push the selected iso tile on top of the cell's stack
 //   stack_pop  → pop the top tile from the cell's stack
-export type MapTool = 'paint' | 'erase' | 'place_object' | 'pan' | 'stack_add' | 'stack_pop';
+// Cross-projection tool:
+//   inpaint    → drag a rectangle, then prompt to regenerate that region of
+//                the composed map (orthogonal only for v1; iso ignores).
+export type MapTool = 'paint' | 'erase' | 'place_object' | 'pan' | 'stack_add' | 'stack_pop' | 'inpaint';
 
 /** Legacy vertical step per stack level as a fraction of tile_size.
  *  Only meaningful for flat tiles (tile_height ≈ tile_size). For taller

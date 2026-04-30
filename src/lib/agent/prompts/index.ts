@@ -31,7 +31,11 @@ const TOOLS = `## Tools
 **Game:** create_project_config, create_scene, write_game_logic, modify_scene, modify_physics, update_ui_layout, debug_runtime_error, export_build
 **Realtime:** configure_realtime (declare chat/rooms/presence/state/events/custom in realtime.axiom.json)
 **DB:** list_game_tables, describe_game_table, create_game_table, add_column, drop_column, rename_column, alter_column, add_foreign_key, drop_foreign_key, create_index, drop_index, execute_game_sql
-**Assets:** search_free_asset (free, prefer this), generate_sprite (5cr), generate_texture (5cr), generate_animation`;
+**Assets:** search_free_asset (free, prefer this), generate_sprite (5cr), generate_texture (5cr), generate_animation
+**Maps — generation:** generate_map (Wang ortho or isometric, full grid), generate_tileset (raw tiles in any shape — hex/hex_pointy/octagon/square_topdown/isometric), generate_map_object (one sprite, optional style-lock + inpainting against an existing map), generate_iso_tile (one iso-tile variant)
+**Maps — editing:** list_maps, read_map, paint_terrain_region (Wang corners), edit_iso_cells, place_objects_on_map, remove_placements_from_map, extend_map_grid, add_iso_tile_to_map, add_object_to_map, recompose_map, preview_map
+**Maps — layers:** list_layers, create_layer, delete_layer, update_layer, move_layer, attach_script_to_placement, export_map_to_scene
+**Map tips:** prefer editing an existing map (paint/place/extend) over re-generating. generate_map exposes art-direction knobs (outline, shading, detail, transition_size, seed) plus iso-only ones (iso_variant_prompts up to 16, iso_tile_height, iso_tile_view, iso_tile_view_angle, iso_depth_ratio). For non-isometric/non-Wang maps (hex grids, octagon, square top-down) use generate_tileset to get raw tiles. For surgical region edits on an existing map use generate_map_object with background_map_path + inpaint_region (rectangle/oval) or mask_path (arbitrary shape via b/w PNG mask).`;
 
 const TOOLS_3D_EXTRA = `, generate_3d_model (10cr)`;
 

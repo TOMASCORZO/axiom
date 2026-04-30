@@ -15,6 +15,7 @@ import { registerTool, type ToolContext } from './registry';
 import {
     generateWangTileset,
     generateIsoTiles,
+    generateTilesPro,
     generateSingleIsoTile,
     generateMapObjectV2,
     makeCornerGrid,
@@ -22,6 +23,7 @@ import {
     fillIsoGrid,
     composeWangMap,
     composeIsoMap,
+    type GenerateMapObjectOptions,
 } from '@/lib/assets/map-generate';
 import type {
     MapMetadataShape,
@@ -114,7 +116,7 @@ function slugify(s: string): string {
 
 registerTool({
     name: 'generate_map_object',
-    description: 'Generate one pixel-art map object (tree, rock, chest…) via PixelLab /map-objects. Transparent background. Optional style-match via background_map_path: pass a composed map storage path and the object will inpaint against it for palette consistency.',
+    description: 'Generate one pixel-art map object (tree, rock, chest…) via PixelLab /map-objects. Transparent background. Optional style-match via background_map_path: pass a composed map storage path and the object will inpaint against it for palette consistency. Optional inpaint_region restricts generation to a sub-area of the background — use it to edit a specific spot of the map without re-generating the whole thing.',
     parameters: {
         type: 'object',
         properties: {
@@ -125,6 +127,21 @@ registerTool({
             view: { type: 'string', enum: ['low top-down', 'high top-down', 'side'], default: 'high top-down' },
             target_path: { type: 'string' },
             background_map_path: { type: 'string', description: 'Optional: storage path to a composed map PNG for style-match via inpainting.' },
+            seed: { type: 'integer', description: 'Optional deterministic seed.' },
+            text_guidance_scale: { type: 'number', description: '1–20. Higher = stick closer to prompt; lower = more creative.' },
+            inpaint_region: {
+                type: 'object',
+                description: 'Optional: restrict generation to a sub-area of the background_map_path image. Pixel coords. Requires background_map_path. Use this OR mask_path, not both.',
+                properties: {
+                    shape: { type: 'string', enum: ['oval', 'rectangle'], default: 'rectangle' },
+                    x: { type: 'integer' },
+                    y: { type: 'integer' },
+                    width: { type: 'integer' },
+                    height: { type: 'integer' },
+                },
+                required: ['x', 'y', 'width', 'height'],
+            },
+            mask_path: { type: 'string', description: 'Optional: storage path to a black/white PNG mask (white = paint-here, black = leave-untouched). Same dimensions as background_map_path. Use this for arbitrary-shape regions; use inpaint_region for simple rectangles/ovals. Requires background_map_path.' },
         },
         required: ['prompt', 'target_path'],
     },
@@ -138,18 +155,42 @@ registerTool({
         const view = (input.view as 'low top-down' | 'high top-down' | 'side') || 'high top-down';
         const targetPath = input.target_path as string;
         const backgroundMapPath = input.background_map_path as string | undefined;
+        const seed = input.seed as number | undefined;
+        const textGuidanceScale = input.text_guidance_scale as number | undefined;
+        const inpaintRegion = input.inpaint_region as
+            | { shape?: 'oval' | 'rectangle'; x: number; y: number; width: number; height: number }
+            | undefined;
+        const maskPath = input.mask_path as string | undefined;
+
+        const admin = getAdmin();
+        const downloadAsB64 = async (path: string): Promise<string | undefined> => {
+            const storageKey = `projects/${ctx.userId}/${ctx.projectId}/${path}`;
+            const { data } = await admin.storage.from('assets').download(storageKey);
+            if (!data) return undefined;
+            const ab = await data.arrayBuffer();
+            return Buffer.from(ab).toString('base64');
+        };
 
         let backgroundImageBase64: string | undefined;
-        if (backgroundMapPath) {
-            // Fetch the composed map PNG and hand it to the API as b64 for palette match.
-            const admin = getAdmin();
-            const storageKey = `projects/${ctx.userId}/${ctx.projectId}/${backgroundMapPath}`;
-            const { data } = await admin.storage.from('assets').download(storageKey);
-            if (data) {
-                const ab = await data.arrayBuffer();
-                backgroundImageBase64 = Buffer.from(ab).toString('base64');
-            }
+        if (backgroundMapPath) backgroundImageBase64 = await downloadAsB64(backgroundMapPath);
+
+        let maskInpainting: { type: 'mask'; mask_base64: string } | undefined;
+        if (maskPath && backgroundImageBase64) {
+            const maskB64 = await downloadAsB64(maskPath);
+            if (maskB64) maskInpainting = { type: 'mask', mask_base64: maskB64 };
         }
+
+        // mask_path takes precedence over inpaint_region when both are provided.
+        const inpainting: GenerateMapObjectOptions['inpainting'] = maskInpainting
+            ?? (inpaintRegion && backgroundImageBase64
+                ? {
+                      type: inpaintRegion.shape ?? 'rectangle',
+                      x: inpaintRegion.x,
+                      y: inpaintRegion.y,
+                      w: inpaintRegion.width,
+                      h: inpaintRegion.height,
+                  }
+                : undefined);
 
         const result = await generateMapObjectV2({
             prompt,
@@ -158,6 +199,9 @@ registerTool({
             heightTiles: hTiles,
             view,
             backgroundImageBase64,
+            seed,
+            textGuidanceScale,
+            inpainting,
         });
         if (!result.success || !result.buffer) {
             return {
@@ -197,6 +241,8 @@ registerTool({
             tile_size: { type: 'integer', enum: [16, 32], default: 32 },
             shape: { type: 'string', enum: ['thin tile', 'thick tile', 'block'], default: 'block' },
             target_path: { type: 'string' },
+            seed: { type: 'integer', description: 'Optional deterministic seed.' },
+            text_guidance_scale: { type: 'number', description: '1–20. Higher = stick closer to prompt; lower = more creative.' },
         },
         required: ['prompt', 'target_path'],
     },
@@ -207,8 +253,10 @@ registerTool({
         const tileSize = ((input.tile_size as number) === 16 ? 16 : 32) as 16 | 32;
         const shape = (input.shape as 'thin tile' | 'thick tile' | 'block') ?? 'block';
         const targetPath = input.target_path as string;
+        const seed = input.seed as number | undefined;
+        const textGuidanceScale = input.text_guidance_scale as number | undefined;
 
-        const result = await generateSingleIsoTile({ prompt, tileSize, shape });
+        const result = await generateSingleIsoTile({ prompt, tileSize, shape, seed, textGuidanceScale });
         if (!result.success || !result.buffer) {
             return {
                 callId: '', success: false,
@@ -244,16 +292,22 @@ interface GenerateMapInput {
     lower?: string;
     upper?: string;
     transition?: string;
+    transition_size?: 0 | 0.25 | 0.5 | 0.75 | 1.0;
+    outline?: string;
+    shading?: string;
+    detail?: string;
     // Isometric inputs
     iso_variant_prompts?: string[];   // e.g. ["grass","dirt path","stone block"]
     iso_tile_height?: number;         // explicit pixel height (16-256) — makes taller blocks
     iso_tile_view?: 'top-down' | 'high top-down' | 'low top-down' | 'side';
+    iso_tile_view_angle?: number;     // 0–90deg, overrides iso_tile_view
     iso_depth_ratio?: number;         // 0.0 flat → 1.0 full block height
     // Shared
     tile_size?: number;
     grid_w?: number;
     grid_h?: number;
     mode?: 'fixed' | 'looping';
+    seed?: number;
     target_path: string;
 }
 
@@ -268,14 +322,20 @@ registerTool({
             lower: { type: 'string', description: 'Orthogonal: lower/base terrain (e.g. "grass").' },
             upper: { type: 'string', description: 'Orthogonal: upper/elevated terrain (e.g. "stone path").' },
             transition: { type: 'string', description: 'Orthogonal: optional blend band description.' },
-            iso_variant_prompts: { type: 'array', items: { type: 'string' }, description: 'Isometric: tile variant prompts (will be joined into one numbered description).' },
+            transition_size: { type: 'number', enum: [0, 0.25, 0.5, 0.75, 1.0], description: 'Orthogonal: width of the blended transition band (0=none, 1=full tile). Defaults to 0.5 when transition is set.' },
+            outline: { type: 'string', description: 'Orthogonal art-direction: free-text outline style (e.g. "thin black outline", "no outline").' },
+            shading: { type: 'string', description: 'Orthogonal art-direction: free-text shading style (e.g. "soft shading", "hard pillow shading").' },
+            detail: { type: 'string', description: 'Orthogonal art-direction: free-text detail level (e.g. "low detail", "high detail").' },
+            iso_variant_prompts: { type: 'array', items: { type: 'string' }, description: 'Isometric: tile variant prompts (up to 16). Will be joined into one numbered description.' },
             iso_tile_height: { type: 'integer', description: 'Isometric: explicit tile pixel height (16-256). Makes tiles render as tall blocks — e.g. 2× tile_size for a proper cube.' },
             iso_tile_view: { type: 'string', enum: ['top-down', 'high top-down', 'low top-down', 'side'], description: 'Isometric: view preset controlling implicit depth. top-down=flat, side=~50% depth.' },
+            iso_tile_view_angle: { type: 'number', description: 'Isometric: continuous view angle 0–90deg. Overrides iso_tile_view when set.' },
             iso_depth_ratio: { type: 'number', description: 'Isometric: 0.0 (flat) → 1.0 (full block). Overrides iso_tile_view\'s default depth.' },
-            tile_size: { type: 'integer', default: 32 },
-            grid_w: { type: 'integer', default: 16 },
-            grid_h: { type: 'integer', default: 12 },
+            tile_size: { type: 'integer', default: 32, description: 'Tile footprint in pixels. Wang is API-limited to 16 or 32; iso supports 16–64.' },
+            grid_w: { type: 'integer', default: 16, description: 'Cell columns (4–128).' },
+            grid_h: { type: 'integer', default: 12, description: 'Cell rows (4–128).' },
             mode: { type: 'string', enum: ['fixed', 'looping'], default: 'fixed' },
+            seed: { type: 'integer', description: 'Optional deterministic seed — pass the same seed to reproduce a generation.' },
             target_path: { type: 'string' },
         },
         required: ['prompt', 'target_path'],
@@ -286,8 +346,11 @@ registerTool({
         const data = input as unknown as GenerateMapInput;
         const projection: MapProjection = data.projection ?? 'orthogonal';
         const rawTileSize = data.tile_size ?? 32;
-        const gridW = Math.max(4, Math.min(data.grid_w ?? 16, 64));
-        const gridH = Math.max(4, Math.min(data.grid_h ?? 12, 64));
+        // Cap raised from 64 → 128 cells per side. Past ~128 the composed PNG
+        // climbs into multi-megapixel territory; bump again only after profiling
+        // sharp memory + asset storage limits.
+        const gridW = Math.max(4, Math.min(data.grid_w ?? 16, 128));
+        const gridH = Math.max(4, Math.min(data.grid_h ?? 12, 128));
         const mode = data.mode ?? 'fixed';
         const targetPath = data.target_path;
         const basePromptSlug = slugify(data.prompt);
@@ -303,6 +366,11 @@ registerTool({
             const ts = await generateWangTileset({
                 lower, upper, transition, tileSize,
                 view: 'high top-down',
+                seed: data.seed,
+                transitionSize: data.transition_size,
+                outline: data.outline,
+                shading: data.shading,
+                detail: data.detail,
             });
             if (!ts.success) {
                 return {
@@ -385,11 +453,14 @@ registerTool({
 
         // ── Isometric path ──
         const tileSize = Math.max(16, Math.min(rawTileSize, 64));
+        // Variant cap raised from 6 → 16. /create-tiles-pro accepts arbitrary
+        // counts via the numbered description; 16 keeps the composite legible
+        // and the cost bounded.
         const variantPrompts = (data.iso_variant_prompts ?? [
             `${data.prompt} — ground`,
             `${data.prompt} — path`,
             `${data.prompt} — detail`,
-        ]).slice(0, 6);
+        ]).slice(0, 16);
 
         // Build a single numbered description per tiles-pro convention.
         const description = variantPrompts.map((p, i) => `${i + 1}). ${p}`).join(' ');
@@ -399,7 +470,9 @@ registerTool({
             tileSize,
             tileHeight: data.iso_tile_height,
             tileView: data.iso_tile_view,
+            tileViewAngle: data.iso_tile_view_angle,
             tileDepthRatio: data.iso_depth_ratio,
+            seed: data.seed,
         });
         if (!iso.success) {
             return {
@@ -493,6 +566,91 @@ registerTool({
                 cost: totalCost,
             },
             filesModified: [targetPath],
+            duration_ms: Date.now() - start,
+        };
+    },
+});
+
+// ── generate_tileset (raw, shape-generic) ─────────────────────────────
+//
+// Exposes /create-tiles-pro for ALL shapes (isometric/hex/hex_pointy/octagon/
+// square_topdown). Unlike generate_map this does NOT compose a single PNG —
+// hex/octagon/square need shape-specific layout. We just return the N tile
+// PNGs as individual assets so the agent can use them as raw building blocks.
+
+registerTool({
+    name: 'generate_tileset',
+    description: 'Generate N pixel-art tiles in any shape (hex / hex_pointy / octagon / square_topdown / isometric) via PixelLab /create-tiles-pro. Returns one PNG per variant. Does NOT compose a final map — use this when you need raw tiles to assemble yourself, or for non-isometric/non-Wang projections that generate_map can\'t handle. For a ready-to-use map prefer generate_map instead.',
+    parameters: {
+        type: 'object',
+        properties: {
+            prompt: { type: 'string', description: 'Overall theme; used as fallback when variant_prompts is empty.' },
+            variant_prompts: { type: 'array', items: { type: 'string' }, description: 'Up to 16 numbered variant prompts (e.g. ["grass","stone","water"]).' },
+            shape: { type: 'string', enum: ['isometric', 'hex', 'hex_pointy', 'octagon', 'square_topdown'], default: 'hex' },
+            tile_size: { type: 'integer', default: 32, description: 'Tile footprint width 16–256.' },
+            tile_height: { type: 'integer', description: 'Optional explicit tile pixel height (16–256).' },
+            tile_view: { type: 'string', enum: ['top-down', 'high top-down', 'low top-down', 'side'] },
+            tile_view_angle: { type: 'number', description: '0–90deg, overrides tile_view.' },
+            tile_depth_ratio: { type: 'number', description: '0.0 flat → 1.0 full block.' },
+            seed: { type: 'integer' },
+            target_dir: { type: 'string', description: 'Storage directory under assets/ where tile PNGs will land. Tiles are written as {target_dir}/{i}.png.' },
+        },
+        required: ['prompt', 'target_dir'],
+    },
+    access: ['build'],
+    execute: async (ctx, input) => {
+        const start = Date.now();
+        const prompt = input.prompt as string;
+        const rawVariants = (input.variant_prompts as string[] | undefined) ?? [
+            `${prompt} — variant 1`,
+            `${prompt} — variant 2`,
+            `${prompt} — variant 3`,
+        ];
+        const variantPrompts = rawVariants.slice(0, 16);
+        const shape = (input.shape as 'isometric' | 'hex' | 'hex_pointy' | 'octagon' | 'square_topdown') ?? 'hex';
+        const tileSize = Math.max(16, Math.min((input.tile_size as number) ?? 32, 256));
+        const targetDir = (input.target_dir as string).replace(/\/+$/, '');
+        const description = variantPrompts.map((p, i) => `${i + 1}). ${p}`).join(' ');
+
+        const result = await generateTilesPro({
+            description,
+            tileType: shape,
+            tileSize,
+            tileHeight: input.tile_height as number | undefined,
+            tileView: input.tile_view as 'top-down' | 'high top-down' | 'low top-down' | 'side' | undefined,
+            tileViewAngle: input.tile_view_angle as number | undefined,
+            tileDepthRatio: input.tile_depth_ratio as number | undefined,
+            seed: input.seed as number | undefined,
+        });
+        if (!result.success) {
+            return {
+                callId: '', success: false,
+                error: `Tileset failed: ${result.error}`,
+                output: { message: result.error },
+                filesModified: [],
+                duration_ms: Date.now() - start,
+            };
+        }
+
+        const tilePaths: string[] = [];
+        for (let i = 0; i < result.tiles.length; i++) {
+            const t = result.tiles[i];
+            const path = `${targetDir}/${i}.png`;
+            await uploadBinaryAsset(ctx, path, t.buffer, 'image/png');
+            tilePaths.push(path);
+        }
+
+        return {
+            callId: '', success: true,
+            output: {
+                message: `Generated ${tilePaths.length} ${shape} tiles in ${targetDir}/ (~$${result.cost.toFixed(3)})`,
+                shape,
+                tile_size: tileSize,
+                tile_paths: tilePaths,
+                count: tilePaths.length,
+                cost: result.cost,
+            },
+            filesModified: tilePaths,
             duration_ms: Date.now() - start,
         };
     },

@@ -40,6 +40,10 @@ const GRID_SIZES = [
     { label: '16×12', w: 16, h: 12 },
     { label: '24×16', w: 24, h: 16 },
     { label: '32×24', w: 32, h: 24 },
+    { label: '48×32', w: 48, h: 32 },
+    { label: '64×48', w: 64, h: 48 },
+    { label: '96×64', w: 96, h: 64 },
+    { label: '128×96', w: 128, h: 96 },
 ];
 
 const TILE_SIZES = [16, 24, 32, 48];
@@ -76,11 +80,20 @@ function GenerateMapTab() {
     const [lowerPrompt, setLowerPrompt] = useState('');
     const [upperPrompt, setUpperPrompt] = useState('');
     const [transitionPrompt, setTransitionPrompt] = useState('');
+    const [transitionSize, setTransitionSize] = useState<number>(0.5); // 0..1 in 0.25 steps
     // Isometric inputs
     const [isoVariantsText, setIsoVariantsText] = useState('');
     const [isoView, setIsoView] = useState<'top-down' | 'high top-down' | 'low top-down' | 'side'>('low top-down');
     const [isoDepthRatio, setIsoDepthRatio] = useState<number>(0.5); // 0 flat → 1 full block
     const [isoTileHeight, setIsoTileHeight] = useState<string>(''); // empty = auto (PixelLab decides)
+    const [isoTileViewAngle, setIsoTileViewAngle] = useState<string>(''); // empty = use preset
+
+    // Art-direction (advanced) — sent through to /create-tileset.
+    const [showAdvanced, setShowAdvanced] = useState(false);
+    const [outline, setOutline] = useState('');
+    const [shading, setShading] = useState('');
+    const [detail, setDetail] = useState('');
+    const [seedText, setSeedText] = useState('');
 
     const [tileSize, setTileSize] = useState(32);
     const [gridIdx, setGridIdx] = useState(2);
@@ -116,7 +129,10 @@ function GenerateMapTab() {
             if (projection === 'orthogonal') {
                 if (lowerPrompt.trim()) options.lower = lowerPrompt.trim();
                 if (upperPrompt.trim()) options.upper = upperPrompt.trim();
-                if (transitionPrompt.trim()) options.transition = transitionPrompt.trim();
+                if (transitionPrompt.trim()) {
+                    options.transition = transitionPrompt.trim();
+                    options.transition_size = transitionSize;
+                }
             } else {
                 if (isoVariantPrompts.length) options.iso_variant_prompts = isoVariantPrompts;
                 options.iso_tile_view = isoView;
@@ -125,7 +141,19 @@ function GenerateMapTab() {
                 if (Number.isFinite(parsedHeight) && parsedHeight >= 16 && parsedHeight <= 256) {
                     options.iso_tile_height = parsedHeight;
                 }
+                const parsedViewAngle = parseFloat(isoTileViewAngle);
+                if (Number.isFinite(parsedViewAngle) && parsedViewAngle >= 0 && parsedViewAngle <= 90) {
+                    options.iso_tile_view_angle = parsedViewAngle;
+                }
             }
+
+            // Art-direction passes through for both projections — the orthogonal
+            // path uses outline/shading/detail; iso uses seed.
+            if (outline.trim()) options.outline = outline.trim();
+            if (shading.trim()) options.shading = shading.trim();
+            if (detail.trim()) options.detail = detail.trim();
+            const parsedSeed = parseInt(seedText, 10);
+            if (Number.isFinite(parsedSeed)) options.seed = parsedSeed;
 
             // Enqueue job — /start returns immediately with a job_id, and the
             // heavy generation runs on a separate worker invocation. This
@@ -346,6 +374,29 @@ function GenerateMapTab() {
                             className="w-full bg-zinc-900 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-violet-500/50 transition-colors"
                         />
                     </div>
+                    {transitionPrompt.trim() && (
+                        <div>
+                            <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">
+                                Transition width — {Math.round(transitionSize * 100)}%
+                            </label>
+                            <div className="flex gap-1">
+                                {[0, 0.25, 0.5, 0.75, 1.0].map(v => (
+                                    <button
+                                        key={v}
+                                        onClick={() => setTransitionSize(v)}
+                                        className={`flex-1 py-1 rounded text-[10px] transition-colors ${
+                                            Math.abs(transitionSize - v) < 0.01
+                                                ? 'bg-violet-500/20 text-violet-300 border border-violet-500/30'
+                                                : 'bg-zinc-900 text-zinc-500 border border-white/5 hover:text-zinc-300'
+                                        }`}
+                                    >
+                                        {Math.round(v * 100)}%
+                                    </button>
+                                ))}
+                            </div>
+                            <p className="text-[9px] text-zinc-600 mt-1">0% = no blend (hard edge), 100% = full transition tile.</p>
+                        </div>
+                    )}
                 </>
             ) : (
                 <>
@@ -358,7 +409,7 @@ function GenerateMapTab() {
                             placeholder={'grass\ndirt path\nstone block\nwater'}
                             className="w-full bg-zinc-900 border border-white/10 rounded-lg px-3 py-2 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 resize-none focus:outline-none focus:border-cyan-500/50 transition-colors"
                         />
-                        <p className="text-[9px] text-zinc-600 mt-1">Up to 6. Leave blank to auto-derive 3 variants from theme.</p>
+                        <p className="text-[9px] text-zinc-600 mt-1">Up to 16. Leave blank to auto-derive 3 variants from theme.</p>
                     </div>
                     <div>
                         <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">View angle</label>
@@ -410,6 +461,23 @@ function GenerateMapTab() {
                         />
                         <p className="text-[9px] text-zinc-600 mt-1">
                             Explicit PNG height (16–256). Leave blank for PixelLab default. Try {tileSize * 2}px for cube blocks, {tileSize * 3}px+ for columns/towers.
+                        </p>
+                    </div>
+                    <div>
+                        <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">
+                            View angle override — <span className="normal-case text-zinc-600">{isoTileViewAngle.trim() ? `${isoTileViewAngle}°` : 'use preset'}</span>
+                        </label>
+                        <input
+                            type="number"
+                            min={0}
+                            max={90}
+                            value={isoTileViewAngle}
+                            onChange={e => setIsoTileViewAngle(e.target.value)}
+                            placeholder="auto (uses View angle preset)"
+                            className="w-full bg-zinc-900 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-cyan-500/50 transition-colors"
+                        />
+                        <p className="text-[9px] text-zinc-600 mt-1">
+                            Continuous angle 0–90° (overrides preset). 0=top-down, 30=high, 45=mid, 60=low, 90=side.
                         </p>
                     </div>
                 </>
@@ -475,6 +543,62 @@ function GenerateMapTab() {
                 <p className="text-[9px] text-zinc-600 mt-1">Looping wraps visually — useful for endless backgrounds.</p>
             </div>
 
+            <div className="border-t border-white/5 pt-3">
+                <button
+                    type="button"
+                    onClick={() => setShowAdvanced(v => !v)}
+                    className="w-full flex items-center justify-between text-[10px] uppercase tracking-wider text-zinc-500 hover:text-zinc-300 transition-colors"
+                >
+                    <span>Style {projection === 'orthogonal' ? '(outline / shading / detail / seed)' : '(seed)'}</span>
+                    <span className="text-zinc-600">{showAdvanced ? '−' : '+'}</span>
+                </button>
+                {showAdvanced && (
+                    <div className="mt-2 flex flex-col gap-2">
+                        {projection === 'orthogonal' && (
+                            <>
+                                <div>
+                                    <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">Outline</label>
+                                    <input
+                                        value={outline}
+                                        onChange={e => setOutline(e.target.value)}
+                                        placeholder='e.g. "thin black outline" or "no outline"'
+                                        className="w-full bg-zinc-900 border border-white/10 rounded px-2 py-1 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-violet-500/50"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">Shading</label>
+                                    <input
+                                        value={shading}
+                                        onChange={e => setShading(e.target.value)}
+                                        placeholder='e.g. "soft shading" or "hard pillow"'
+                                        className="w-full bg-zinc-900 border border-white/10 rounded px-2 py-1 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-violet-500/50"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">Detail</label>
+                                    <input
+                                        value={detail}
+                                        onChange={e => setDetail(e.target.value)}
+                                        placeholder='e.g. "low detail" or "high detail"'
+                                        className="w-full bg-zinc-900 border border-white/10 rounded px-2 py-1 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-violet-500/50"
+                                    />
+                                </div>
+                            </>
+                        )}
+                        <div>
+                            <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">Seed (optional)</label>
+                            <input
+                                type="number"
+                                value={seedText}
+                                onChange={e => setSeedText(e.target.value)}
+                                placeholder="reproducible — same seed → same map"
+                                className="w-full bg-zinc-900 border border-white/10 rounded px-2 py-1 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-violet-500/50"
+                            />
+                        </div>
+                    </div>
+                )}
+            </div>
+
             {error && <div className="px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-xs">{error}</div>}
 
             <button
@@ -484,6 +608,268 @@ function GenerateMapTab() {
             >
                 {assetGenerating ? <><Loader2 size={14} className="animate-spin" />Generating map…</> : <><Sparkles size={14} />Generate Map</>}
             </button>
+        </div>
+    );
+}
+
+// ── Tileset Tab ─────────────────────────────────────────────────────
+//
+// Shape-generic raw tile generation via PixelLab /create-tiles-pro. Returns
+// N PNGs in the project file tree — no composed map. For non-isometric/non-
+// Wang projections (hex / hex_pointy / octagon / square_topdown) the tiles
+// are intended as raw assets the agent or the user can compose by hand.
+
+const TILESET_SHAPES = [
+    { id: 'hex' as const, label: 'Hex (flat)' },
+    { id: 'hex_pointy' as const, label: 'Hex (pointy)' },
+    { id: 'octagon' as const, label: 'Octagon' },
+    { id: 'square_topdown' as const, label: 'Square top-down' },
+    { id: 'isometric' as const, label: 'Isometric' },
+];
+
+function TilesetTab() {
+    const { project, addConsoleEntry, refreshProjectFiles } = useEditorStore();
+
+    const [prompt, setPrompt] = useState('');
+    const [variantsText, setVariantsText] = useState('');
+    const [shape, setShape] = useState<'hex' | 'hex_pointy' | 'octagon' | 'square_topdown' | 'isometric'>('hex');
+    const [tileSize, setTileSize] = useState(32);
+    const [tileHeight, setTileHeight] = useState('');
+    const [tileView, setTileView] = useState<'top-down' | 'high top-down' | 'low top-down' | 'side'>('high top-down');
+    const [tileViewAngle, setTileViewAngle] = useState('');
+    const [depthRatio, setDepthRatio] = useState(0.5);
+    const [seed, setSeed] = useState('');
+    const [busy, setBusy] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const [resultPaths, setResultPaths] = useState<string[]>([]);
+
+    const handleGenerate = async () => {
+        if (!prompt.trim() || !project?.id) return;
+        setBusy(true);
+        setError(null);
+        setResultPaths([]);
+
+        const slug = prompt.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 30) || 'tileset';
+        const targetDir = `assets/tilesets/${shape}_${slug}`;
+        const variantPrompts = variantsText.split('\n').map(s => s.trim()).filter(Boolean);
+
+        addConsoleEntry({
+            id: crypto.randomUUID(), level: 'log',
+            message: `[Map Studio] Generating ${shape} tileset "${prompt}" (${tileSize}px)…`,
+            timestamp: new Date().toISOString(),
+        });
+
+        try {
+            const body: Record<string, unknown> = {
+                action: 'generate_tileset',
+                project_id: project.id,
+                prompt: prompt.trim(),
+                shape,
+                tile_size: tileSize,
+                target_dir: targetDir,
+            };
+            if (variantPrompts.length) body.variant_prompts = variantPrompts;
+            const parsedHeight = parseInt(tileHeight, 10);
+            if (Number.isFinite(parsedHeight) && parsedHeight >= 16 && parsedHeight <= 256) {
+                body.tile_height = parsedHeight;
+            }
+            body.tile_view = tileView;
+            const parsedAngle = parseFloat(tileViewAngle);
+            if (Number.isFinite(parsedAngle) && parsedAngle >= 0 && parsedAngle <= 90) {
+                body.tile_view_angle = parsedAngle;
+            }
+            // depth_ratio is meaningful for shapes with a vertical extent.
+            if (shape === 'isometric' || shape === 'octagon') body.tile_depth_ratio = depthRatio;
+            const parsedSeed = parseInt(seed, 10);
+            if (Number.isFinite(parsedSeed)) body.seed = parsedSeed;
+
+            const res = await fetch('/api/assets/map-action', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            const data = await res.json();
+            if (!res.ok || !data.success) {
+                const msg = errorMessage(data.error, `Tileset failed (HTTP ${res.status})`);
+                setError(msg);
+                addConsoleEntry({ id: crypto.randomUUID(), level: 'error', message: `[Map Studio] Tileset failed: ${msg}`, timestamp: new Date().toISOString() });
+                return;
+            }
+            const paths: string[] = data.tile_paths ?? [];
+            setResultPaths(paths);
+            refreshProjectFiles(project.id);
+            addConsoleEntry({
+                id: crypto.randomUUID(), level: 'log',
+                message: `[Map Studio] Tileset → ${paths.length} tiles in ${targetDir}/ (~$${(data.cost ?? 0).toFixed(3)})`,
+                timestamp: new Date().toISOString(),
+            });
+        } catch (err) {
+            setError(err instanceof Error ? err.message : 'Network error');
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    const showsDepth = shape === 'isometric' || shape === 'octagon';
+
+    return (
+        <div className="flex flex-col gap-3 p-3 overflow-y-auto flex-1">
+            <div className="px-3 py-2 rounded-lg bg-cyan-500/5 border border-cyan-500/20 text-[11px] text-cyan-300/80 leading-relaxed">
+                Generates raw tile PNGs in any shape. Unlike <b>Generate</b> this does <b>not</b> compose a final map — the tiles land in <code>assets/tilesets/…</code> for manual or agent-driven assembly.
+            </div>
+
+            <div>
+                <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">Theme</label>
+                <textarea
+                    value={prompt}
+                    onChange={e => setPrompt(e.target.value)}
+                    rows={2}
+                    placeholder='e.g. "enchanted forest"'
+                    className="w-full bg-zinc-900 border border-white/10 rounded-lg px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-600 resize-none focus:outline-none focus:border-cyan-500/50 transition-colors"
+                />
+            </div>
+
+            <div>
+                <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">Shape</label>
+                <div className="grid grid-cols-2 gap-1">
+                    {TILESET_SHAPES.map(s => (
+                        <button
+                            key={s.id}
+                            onClick={() => setShape(s.id)}
+                            className={`py-1.5 rounded text-[11px] transition-colors ${
+                                shape === s.id ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30' : 'bg-zinc-900 text-zinc-500 border border-white/5 hover:text-zinc-300'
+                            }`}
+                        >
+                            {s.label}
+                        </button>
+                    ))}
+                </div>
+            </div>
+
+            <div>
+                <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">Variants (one per line, up to 16)</label>
+                <textarea
+                    value={variantsText}
+                    onChange={e => setVariantsText(e.target.value)}
+                    rows={4}
+                    placeholder={'grass\nforest floor\nmoss\nstone\nwater'}
+                    className="w-full bg-zinc-900 border border-white/10 rounded-lg px-3 py-2 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 resize-none focus:outline-none focus:border-cyan-500/50 transition-colors"
+                />
+                <p className="text-[9px] text-zinc-600 mt-1">Leave blank to auto-derive 3 variants from theme.</p>
+            </div>
+
+            <div>
+                <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">Tile size — {tileSize}px</label>
+                <div className="flex gap-1">
+                    {TILE_SIZES.map(s => (
+                        <button
+                            key={s}
+                            onClick={() => setTileSize(s)}
+                            className={`flex-1 py-1 rounded text-xs transition-colors ${
+                                tileSize === s ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30' : 'bg-zinc-900 text-zinc-500 border border-white/5 hover:text-zinc-300'
+                            }`}
+                        >
+                            {s}
+                        </button>
+                    ))}
+                </div>
+            </div>
+
+            <div>
+                <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">View angle</label>
+                <div className="flex gap-1">
+                    {(['top-down', 'high top-down', 'low top-down', 'side'] as const).map(v => (
+                        <button
+                            key={v}
+                            onClick={() => setTileView(v)}
+                            className={`flex-1 px-1.5 py-1 rounded text-[10px] transition-colors ${
+                                tileView === v ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30' : 'bg-zinc-900 text-zinc-500 border border-white/5 hover:text-zinc-300'
+                            }`}
+                        >
+                            {v === 'top-down' ? 'Flat' : v === 'high top-down' ? 'High' : v === 'low top-down' ? 'Low' : 'Side'}
+                        </button>
+                    ))}
+                </div>
+            </div>
+
+            <div>
+                <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">
+                    View angle override — <span className="normal-case text-zinc-600">{tileViewAngle.trim() ? `${tileViewAngle}°` : 'use preset'}</span>
+                </label>
+                <input
+                    type="number"
+                    min={0}
+                    max={90}
+                    value={tileViewAngle}
+                    onChange={e => setTileViewAngle(e.target.value)}
+                    placeholder="auto"
+                    className="w-full bg-zinc-900 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-cyan-500/50 transition-colors"
+                />
+            </div>
+
+            {showsDepth && (
+                <div>
+                    <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">
+                        Block height — {Math.round(depthRatio * 100)}%
+                    </label>
+                    <input
+                        type="range"
+                        min={0}
+                        max={1}
+                        step={0.05}
+                        value={depthRatio}
+                        onChange={e => setDepthRatio(Number(e.target.value))}
+                        className="w-full accent-cyan-500"
+                    />
+                </div>
+            )}
+
+            <div>
+                <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">
+                    Tile height (px) — <span className="normal-case text-zinc-600">{tileHeight.trim() ? `${tileHeight}px` : 'auto'}</span>
+                </label>
+                <input
+                    type="number"
+                    min={16}
+                    max={256}
+                    value={tileHeight}
+                    onChange={e => setTileHeight(e.target.value)}
+                    placeholder="auto"
+                    className="w-full bg-zinc-900 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-cyan-500/50 transition-colors"
+                />
+            </div>
+
+            <div>
+                <label className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 block">Seed (optional)</label>
+                <input
+                    type="number"
+                    value={seed}
+                    onChange={e => setSeed(e.target.value)}
+                    placeholder="reproducible"
+                    className="w-full bg-zinc-900 border border-white/10 rounded-lg px-3 py-1.5 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-cyan-500/50 transition-colors"
+                />
+            </div>
+
+            {error && <div className="px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-xs">{error}</div>}
+
+            <button
+                onClick={handleGenerate}
+                disabled={!prompt.trim() || busy}
+                className="w-full py-2.5 rounded-lg font-medium text-sm transition-all flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed bg-gradient-to-r from-cyan-600 to-emerald-600 hover:from-cyan-500 hover:to-emerald-500 text-white shadow-lg shadow-cyan-500/20"
+            >
+                {busy ? <><Loader2 size={14} className="animate-spin" />Generating tileset…</> : <><Sparkles size={14} />Generate Tileset</>}
+            </button>
+
+            {resultPaths.length > 0 && (
+                <div className="border-t border-white/5 pt-3">
+                    <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">Generated · {resultPaths.length} tiles</div>
+                    <ul className="flex flex-col gap-1">
+                        {resultPaths.map(p => (
+                            <li key={p} className="text-[10px] font-mono text-zinc-400 truncate" title={p}>{p}</li>
+                        ))}
+                    </ul>
+                </div>
+            )}
         </div>
     );
 }
@@ -728,7 +1114,9 @@ function EditTab() {
         ...(isIso ? [
             { id: 'stack_add' as MapTool, icon: Layers, label: 'Stack +' },
             { id: 'stack_pop' as MapTool, icon: Minus, label: 'Stack −' },
-        ] : []),
+        ] : [
+            { id: 'inpaint' as MapTool, icon: Wand2, label: 'Inpaint' },
+        ]),
     ];
 
     const terrainOptions: TerrainCorner[] = ['lower', 'upper'];
@@ -1068,10 +1456,11 @@ function MapsGalleryTab() {
 
 // ── Main Component ─────────────────────────────────────────────────
 
-type Tab = 'generate' | 'edit' | 'gallery';
+type Tab = 'generate' | 'tileset' | 'edit' | 'gallery';
 
 const TABS: { id: Tab; label: string; icon: typeof Wand2 }[] = [
     { id: 'generate', label: 'Generate', icon: Wand2 },
+    { id: 'tileset', label: 'Tileset', icon: Grid3X3 },
     { id: 'edit', label: 'Edit', icon: MousePointer },
     { id: 'gallery', label: 'Gallery', icon: Grid3X3 },
 ];
@@ -1138,6 +1527,7 @@ export default function MapStudio() {
             </div>
 
             {tab === 'generate' && <GenerateMapTab />}
+            {tab === 'tileset' && <TilesetTab />}
             {tab === 'edit' && <EditTab />}
             {tab === 'gallery' && <MapsGalleryTab />}
         </div>
